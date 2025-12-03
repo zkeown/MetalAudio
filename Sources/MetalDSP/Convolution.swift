@@ -5,7 +5,12 @@ import MetalAudioKit
 
 /// GPU-accelerated convolution for audio processing
 /// Supports real-time partitioned convolution for long impulse responses
-public final class Convolution: @unchecked Sendable {
+///
+/// ## Thread Safety
+/// `Convolution` is NOT thread-safe. Partitioned convolution mode maintains
+/// internal state (input ring buffer, write indices) that is modified during
+/// processing. For concurrent convolution operations, use separate instances.
+public final class Convolution {
 
     /// Convolution mode
     public enum Mode {
@@ -25,6 +30,7 @@ public final class Convolution: @unchecked Sendable {
     private var kernelFFTImag: [Float]?
     private var fftSize: Int = 0
     private var fft: FFT?
+    private var inverseFft: FFT?  // Cached inverse FFT to avoid per-process allocation
 
     // For partitioned convolution
     private var partitions: [(real: [Float], imag: [Float])] = []
@@ -35,6 +41,17 @@ public final class Convolution: @unchecked Sendable {
 
     // For direct convolution
     private var kernel: [Float] = []
+
+    // Pre-allocated working buffers (avoid allocations in audio processing path)
+    private var workPaddedInput: [Float] = []
+    private var workInputReal: [Float] = []
+    private var workInputImag: [Float] = []
+    private var workOutputReal: [Float] = []
+    private var workOutputImag: [Float] = []
+    private var workInputBlock: [Float] = []
+    private var workAccumReal: [Float] = []
+    private var workAccumImag: [Float] = []
+    private var workOutputBlock: [Float] = []
 
     /// Initialize convolution processor
     /// - Parameters:
@@ -68,7 +85,15 @@ public final class Convolution: @unchecked Sendable {
         let minSize = kernel.count * 2
         fftSize = 1 << Int(ceil(log2(Double(minSize))))
 
-        fft = try FFT(device: device, config: .init(size: fftSize))
+        fft = try FFT(device: device, config: .init(size: fftSize, windowType: .none))
+        inverseFft = try FFT(device: device, config: .init(size: fftSize, inverse: true, windowType: .none))
+
+        // Pre-allocate working buffers for real-time safety
+        workPaddedInput = [Float](repeating: 0, count: fftSize)
+        workInputReal = [Float](repeating: 0, count: fftSize)
+        workInputImag = [Float](repeating: 0, count: fftSize)
+        workOutputReal = [Float](repeating: 0, count: fftSize)
+        workOutputImag = [Float](repeating: 0, count: fftSize)
 
         // Zero-pad and FFT the kernel
         var paddedKernel = kernel
@@ -91,6 +116,15 @@ public final class Convolution: @unchecked Sendable {
         self.fftSize = blockSize * 2
 
         fft = try FFT(device: device, config: .init(size: fftSize, windowType: .none))
+        inverseFft = try FFT(device: device, config: .init(size: fftSize, inverse: true, windowType: .none))
+
+        // Pre-allocate working buffers for real-time safety
+        workInputBlock = [Float](repeating: 0, count: fftSize)
+        workInputReal = [Float](repeating: 0, count: fftSize)
+        workInputImag = [Float](repeating: 0, count: fftSize)
+        workAccumReal = [Float](repeating: 0, count: fftSize)
+        workAccumImag = [Float](repeating: 0, count: fftSize)
+        workOutputBlock = [Float](repeating: 0, count: fftSize)
 
         // Partition the kernel into blocks
         partitionCount = (kernel.count + blockSize - 1) / blockSize
@@ -123,7 +157,7 @@ public final class Convolution: @unchecked Sendable {
     /// Process audio through convolution
     /// - Parameters:
     ///   - input: Input audio samples
-    ///   - output: Output buffer (must be large enough for input + kernel - 1)
+    ///   - output: Output buffer (will be resized to input + kernel - 1 for full convolution)
     public func process(input: [Float], output: inout [Float]) {
         switch mode {
         case .direct:
@@ -133,6 +167,12 @@ public final class Convolution: @unchecked Sendable {
         case .partitioned:
             processPartitionedConvolution(input: input, output: &output)
         }
+    }
+
+    /// Expected output size for full convolution (input + kernel - 1)
+    public var expectedOutputSize: Int {
+        guard !kernel.isEmpty else { return 0 }
+        return kernel.count - 1  // Additional samples beyond input length
     }
 
     private func processDirectConvolution(input: [Float], output: inout [Float]) {
@@ -155,74 +195,93 @@ public final class Convolution: @unchecked Sendable {
 
     private func processFFTConvolution(input: [Float], output: inout [Float]) {
         guard let fft = fft,
+              let inverseFft = inverseFft,
               let kernelReal = kernelFFTReal,
               let kernelImag = kernelFFTImag else { return }
 
-        // Zero-pad input
-        var paddedInput = input
-        paddedInput.append(contentsOf: [Float](repeating: 0, count: fftSize - input.count))
+        // Zero-pad input using pre-allocated buffer (no allocation in hot path)
+        let copyCount = min(input.count, fftSize)
+        for i in 0..<copyCount {
+            workPaddedInput[i] = input[i]
+        }
+        for i in copyCount..<fftSize {
+            workPaddedInput[i] = 0
+        }
 
-        // FFT of input
-        var inputReal = [Float](repeating: 0, count: fftSize)
-        var inputImag = [Float](repeating: 0, count: fftSize)
-
-        paddedInput.withUnsafeBufferPointer { ptr in
-            fft.forward(input: ptr.baseAddress!, outputReal: &inputReal, outputImag: &inputImag)
+        // FFT of input using pre-allocated buffers
+        workPaddedInput.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &workInputReal, outputImag: &workInputImag)
         }
 
         // Complex multiplication in frequency domain
-        var outputReal = [Float](repeating: 0, count: fftSize)
-        var outputImag = [Float](repeating: 0, count: fftSize)
-
         for i in 0..<fftSize {
             // (a + bi)(c + di) = (ac - bd) + (ad + bc)i
-            outputReal[i] = inputReal[i] * kernelReal[i] - inputImag[i] * kernelImag[i]
-            outputImag[i] = inputReal[i] * kernelImag[i] + inputImag[i] * kernelReal[i]
+            workOutputReal[i] = workInputReal[i] * kernelReal[i] - workInputImag[i] * kernelImag[i]
+            workOutputImag[i] = workInputReal[i] * kernelImag[i] + workInputImag[i] * kernelReal[i]
         }
 
-        // Inverse FFT
+        // Inverse FFT using cached instance
         if output.count < fftSize {
             output = [Float](repeating: 0, count: fftSize)
         }
 
-        let inverseFft = try? FFT(device: device, config: .init(size: fftSize, inverse: true, windowType: .none))
-        inverseFft?.inverse(inputReal: outputReal, inputImag: outputImag, output: &output)
+        inverseFft.inverse(inputReal: workOutputReal, inputImag: workOutputImag, output: &output)
     }
 
     private func processPartitionedConvolution(input: [Float], output: inout [Float]) {
-        guard let fft = fft, !partitions.isEmpty else { return }
+        guard let fft = fft, let inverseFft = inverseFft, !partitions.isEmpty else { return }
 
-        // Process input in blocks
-        var inputOffset = 0
+        // Full convolution output size: input + kernel - 1
+        // We need to process enough blocks to capture the entire convolution tail
+        let fullOutputSize = input.count + kernel.count - 1
+        let totalBlocks = (fullOutputSize + blockSize - 1) / blockSize
 
-        while inputOffset < input.count {
-            let remaining = input.count - inputOffset
-            let currentBlockSize = min(blockSize, remaining)
+        // Ensure output buffer is large enough for full convolution
+        if output.count < fullOutputSize {
+            output = [Float](repeating: 0, count: fullOutputSize)
+        } else {
+            // Zero out output buffer for overlap-add
+            for i in 0..<output.count {
+                output[i] = 0
+            }
+        }
 
-            // Prepare input block (zero-pad to fftSize)
-            var inputBlock = [Float](repeating: 0, count: fftSize)
-            for i in 0..<currentBlockSize {
-                inputBlock[i] = input[inputOffset + i]
+        // Process all blocks (including tail blocks with zero input)
+        for block in 0..<totalBlocks {
+            let inputOffset = block * blockSize
+
+            // Prepare input block using pre-allocated buffer (zero-pad to fftSize)
+            // For blocks beyond input length, use all zeros
+            for i in 0..<blockSize {
+                let inputIdx = inputOffset + i
+                if inputIdx < input.count {
+                    workInputBlock[i] = input[inputIdx]
+                } else {
+                    workInputBlock[i] = 0
+                }
+            }
+            for i in blockSize..<fftSize {
+                workInputBlock[i] = 0
             }
 
-            // FFT of input block
-            var inputReal = [Float](repeating: 0, count: fftSize)
-            var inputImag = [Float](repeating: 0, count: fftSize)
-
-            inputBlock.withUnsafeBufferPointer { ptr in
-                fft.forward(input: ptr.baseAddress!, outputReal: &inputReal, outputImag: &inputImag)
+            // FFT of input block using pre-allocated buffers
+            workInputBlock.withUnsafeBufferPointer { ptr in
+                fft.forward(input: ptr.baseAddress!, outputReal: &workInputReal, outputImag: &workInputImag)
             }
 
             // Store in ring buffer (interleaved real/imag)
             for i in 0..<fftSize {
-                inputBuffer[inputWriteIndex][i * 2] = inputReal[i]
-                inputBuffer[inputWriteIndex][i * 2 + 1] = inputImag[i]
+                inputBuffer[inputWriteIndex][i * 2] = workInputReal[i]
+                inputBuffer[inputWriteIndex][i * 2 + 1] = workInputImag[i]
+            }
+
+            // Reset accumulators (using pre-allocated buffers)
+            for i in 0..<fftSize {
+                workAccumReal[i] = 0
+                workAccumImag[i] = 0
             }
 
             // Accumulate convolution across all partitions
-            var accumReal = [Float](repeating: 0, count: fftSize)
-            var accumImag = [Float](repeating: 0, count: fftSize)
-
             for p in 0..<partitionCount {
                 let bufferIdx = (inputWriteIndex - p + partitionCount) % partitionCount
                 let partition = partitions[p]
@@ -231,28 +290,22 @@ public final class Convolution: @unchecked Sendable {
                     let inReal = inputBuffer[bufferIdx][i * 2]
                     let inImag = inputBuffer[bufferIdx][i * 2 + 1]
 
-                    accumReal[i] += inReal * partition.real[i] - inImag * partition.imag[i]
-                    accumImag[i] += inReal * partition.imag[i] + inImag * partition.real[i]
+                    workAccumReal[i] += inReal * partition.real[i] - inImag * partition.imag[i]
+                    workAccumImag[i] += inReal * partition.imag[i] + inImag * partition.real[i]
                 }
             }
 
-            // Inverse FFT
-            var outputBlock = [Float](repeating: 0, count: fftSize)
-            let inverseFft = try? FFT(device: device, config: .init(size: fftSize, inverse: true, windowType: .none))
-            inverseFft?.inverse(inputReal: accumReal, inputImag: accumImag, output: &outputBlock)
+            // Inverse FFT using cached instance and pre-allocated output buffer
+            inverseFft.inverse(inputReal: workAccumReal, inputImag: workAccumImag, output: &workOutputBlock)
 
             // Overlap-add to output
-            let outputOffset = inputOffset
-            if output.count < outputOffset + fftSize {
-                output.append(contentsOf: [Float](repeating: 0, count: outputOffset + fftSize - output.count))
-            }
-
-            for i in 0..<fftSize {
-                output[outputOffset + i] += outputBlock[i]
+            let outputOffset = block * blockSize
+            let samplesToWrite = min(fftSize, fullOutputSize - outputOffset)
+            for i in 0..<samplesToWrite {
+                output[outputOffset + i] += workOutputBlock[i]
             }
 
             inputWriteIndex = (inputWriteIndex + 1) % partitionCount
-            inputOffset += blockSize
         }
     }
 

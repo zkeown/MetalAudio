@@ -38,9 +38,43 @@ final class FFTTests: XCTestCase {
         var output = [Float](repeating: 0, count: size)
         inverseFft.inverse(inputReal: real, inputImag: imag, output: &output)
 
-        // Check reconstruction (with tolerance for floating point)
+        // Check reconstruction with hardware-adaptive tolerance
+        let accuracy = ToleranceProvider.shared.tolerances.fftAccuracy
         for i in 0..<size {
-            XCTAssertEqual(output[i], input[i], accuracy: 0.01, "Mismatch at index \(i)")
+            XCTAssertEqual(output[i], input[i], accuracy: accuracy,
+                "Mismatch at index \(i) (tolerance: \(accuracy))")
+        }
+    }
+
+    func testFFTAccuracyMatchesHardware() throws {
+        let profile = device.hardwareProfile
+        let tolerances = ToleranceConfiguration.optimal(for: profile)
+
+        // Verify tolerances scale with hardware capability
+        switch profile.gpuFamily {
+        case .apple9:
+            XCTAssertLessThanOrEqual(tolerances.fftAccuracy, 1e-4,
+                "Apple 9 should achieve 1e-4 or better")
+        case .apple8:
+            XCTAssertLessThanOrEqual(tolerances.fftAccuracy, 1e-4,
+                "Apple 8 should achieve 1e-4 or better")
+        case .apple7:
+            XCTAssertLessThanOrEqual(tolerances.fftAccuracy, 1e-3,
+                "Apple 7 should achieve 1e-3 or better")
+        default:
+            XCTAssertLessThanOrEqual(tolerances.fftAccuracy, 1e-2,
+                "Older hardware should achieve at least 1e-2")
+        }
+    }
+
+    func testGPUThresholdIsHardwareOptimal() throws {
+        let tolerances = ToleranceProvider.shared.tolerances
+        let profile = ToleranceProvider.shared.profile!
+
+        // Newer hardware can efficiently use GPU for smaller buffers
+        if profile.gpuFamily >= .apple8 {
+            XCTAssertLessThanOrEqual(tolerances.gpuCpuThreshold, 4096,
+                "Apple 8+ should have GPU threshold <= 4096")
         }
     }
 

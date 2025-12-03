@@ -11,7 +11,8 @@ final class AudioDeviceTests: XCTestCase {
 
     func testSharedDevice() {
         let device = AudioDevice.shared
-        XCTAssertNotNil(device.device)
+        XCTAssertNotNil(device)
+        XCTAssertNotNil(device?.device)
     }
 
     func testDeviceInfo() throws {
@@ -50,9 +51,7 @@ final class AudioBufferTests: XCTestCase {
         )
 
         let testData: [Float] = [1.0, 2.0, 3.0, 4.0]
-        testData.withUnsafeBufferPointer { ptr in
-            buffer.copyFromCPU(ptr.baseAddress!)
-        }
+        try buffer.copyFromCPU(testData)
 
         let contents = buffer.floatContents
         XCTAssertEqual(contents[0], 1.0)
@@ -75,23 +74,43 @@ final class AudioBufferPoolTests: XCTestCase {
             device: device,
             sampleCount: 512,
             channelCount: 2,
-            initialCount: 2,
-            maxPoolSize: 5
+            poolSize: 4
         )
 
-        XCTAssertEqual(pool.availableCount, 2)
+        XCTAssertEqual(pool.availableCount, 4)
+        XCTAssertEqual(pool.totalSize, 4)
 
         let buffer1 = try pool.acquire()
-        XCTAssertEqual(pool.availableCount, 1)
+        XCTAssertEqual(pool.availableCount, 3)
 
         let buffer2 = try pool.acquire()
-        XCTAssertEqual(pool.availableCount, 0)
-
-        pool.release(buffer1)
-        XCTAssertEqual(pool.availableCount, 1)
-
-        pool.release(buffer2)
         XCTAssertEqual(pool.availableCount, 2)
+
+        try pool.release(buffer1)
+        XCTAssertEqual(pool.availableCount, 3)
+
+        try pool.release(buffer2)
+        XCTAssertEqual(pool.availableCount, 4)
+    }
+
+    func testPoolExhaustion() throws {
+        let pool = try AudioBufferPool(
+            device: device,
+            sampleCount: 256,
+            channelCount: 1,
+            poolSize: 2
+        )
+
+        _ = try pool.acquire()
+        _ = try pool.acquire()
+
+        // Pool should be exhausted
+        XCTAssertThrowsError(try pool.acquire()) { error in
+            guard case BufferPoolError.poolExhausted = error else {
+                XCTFail("Expected poolExhausted error, got \(error)")
+                return
+            }
+        }
     }
 }
 
@@ -116,7 +135,7 @@ final class TensorTests: XCTestCase {
         let tensor = try Tensor(device: device, shape: [4])
         let data: [Float] = [1.0, 2.0, 3.0, 4.0]
 
-        tensor.copy(from: data)
+        try tensor.copy(from: data)
         let result = tensor.toArray()
 
         XCTAssertEqual(result, data)
@@ -166,14 +185,28 @@ final class ComputeContextTests: XCTestCase {
         let context = ComputeContext(device: device)
         try context.setupTripleBuffering(bufferSize: 1024)
 
-        XCTAssertNotNil(context.writeBuffer)
-        XCTAssertNotNil(context.readBuffer)
+        // Test write buffer access using safe closure-based API
+        var writeAddress1: UInt64 = 0
+        context.withWriteBuffer { buffer in
+            writeAddress1 = buffer.gpuAddress
+        }
+        XCTAssertNotEqual(writeAddress1, 0)
 
-        let writeBuffer1 = context.writeBuffer
+        // Test read buffer access using safe closure-based API
+        var readAddress: UInt64 = 0
+        context.withReadBuffer { buffer in
+            readAddress = buffer.gpuAddress
+        }
+        XCTAssertNotEqual(readAddress, 0)
+
+        // Advance and verify write buffer changed
         context.advanceTripleBuffer()
-        let writeBuffer2 = context.writeBuffer
+        var writeAddress2: UInt64 = 0
+        context.withWriteBuffer { buffer in
+            writeAddress2 = buffer.gpuAddress
+        }
 
-        // Compare by GPU address since MTLBuffer isn't Equatable
-        XCTAssertNotEqual(writeBuffer1?.gpuAddress, writeBuffer2?.gpuAddress)
+        // Write buffer should have changed after advancing
+        XCTAssertNotEqual(writeAddress1, writeAddress2)
     }
 }

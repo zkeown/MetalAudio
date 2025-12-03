@@ -1,0 +1,193 @@
+//  ToleranceConfiguration.swift
+//  MetalAudioKit
+//
+//  Hardware-derived tolerance values for numerical precision and performance tuning
+
+import Foundation
+
+/// Configuration for all tolerance and threshold values, derived from hardware capabilities
+public struct ToleranceConfiguration: Sendable {
+
+    // MARK: - Numerical Precision
+
+    /// General numerical epsilon for avoiding division by zero, log(0), etc.
+    public let epsilon: Float
+
+    /// Epsilon for Float16 operations
+    public let float16Epsilon: Float
+
+    /// Epsilon for LayerNorm/BatchNorm variance calculations
+    public let normalizationEpsilon: Float
+
+    // MARK: - Buffer Thresholds
+
+    /// Sample count threshold for GPU vs CPU decision.
+    /// Below this size, Accelerate/vDSP is typically faster than GPU.
+    public let gpuCpuThreshold: Int
+
+    /// Minimum buffer size for efficient GPU utilization
+    public let minBufferSize: Int
+
+    /// Optimal buffer size for this hardware
+    public let optimalBufferSize: Int
+
+    // MARK: - Command Buffer Management
+
+    /// Number of in-flight command buffers for triple/quad buffering
+    public let maxInFlightBuffers: Int
+
+    /// Preferred latency in audio frames
+    public let preferredLatencyFrames: Int
+
+    // MARK: - STFT/Overlap-add
+
+    /// Floor value for ISTFT window sum normalization (prevents division by near-zero)
+    public let windowFloorEpsilon: Float
+
+    // MARK: - Test Tolerances
+
+    /// Accuracy threshold for FFT forward/inverse reconstruction tests
+    public let fftAccuracy: Float
+
+    /// Accuracy threshold for convolution tests
+    public let convolutionAccuracy: Float
+
+    /// Accuracy threshold for neural network layer tests
+    public let nnLayerAccuracy: Float
+
+    // MARK: - Factory Methods
+
+    /// Create optimal configuration for detected hardware
+    /// Tolerances tightened after production readiness fixes:
+    /// - FFT normalization corrected (1/N forward, no scale inverse)
+    /// - Numerically stable sigmoid implementation
+    /// - Proper weight initialization (Xavier/He)
+    /// - LSTM cell state clipping
+    public static func optimal(for profile: HardwareProfile) -> ToleranceConfiguration {
+        switch profile.gpuFamily {
+        case .apple9:
+            // M3, A17 Pro - Latest architecture, tightest tolerances
+            return ToleranceConfiguration(
+                epsilon: 1e-7,
+                float16Epsilon: 5e-4,
+                normalizationEpsilon: 1e-6,
+                gpuCpuThreshold: 2048,
+                minBufferSize: 64,
+                optimalBufferSize: 2048,
+                maxInFlightBuffers: 4,
+                preferredLatencyFrames: 2,
+                windowFloorEpsilon: 1e-9,   // Tightened: robust ISTFT floor handling
+                fftAccuracy: 1e-6,          // Tightened: correct FFT normalization
+                convolutionAccuracy: 1e-6,  // Tightened: correct FFT-based convolution
+                nnLayerAccuracy: 1e-4       // Tightened: stable sigmoid, proper init
+            )
+
+        case .apple8:
+            // M2, A15 - Excellent precision, can push tolerances
+            return ToleranceConfiguration(
+                epsilon: 1e-7,
+                float16Epsilon: 5e-4,
+                normalizationEpsilon: 1e-6,
+                gpuCpuThreshold: 2048,
+                minBufferSize: 64,
+                optimalBufferSize: 2048,
+                maxInFlightBuffers: 3,
+                preferredLatencyFrames: 2,
+                windowFloorEpsilon: 1e-9,   // Tightened
+                fftAccuracy: 1e-6,          // Tightened
+                convolutionAccuracy: 1e-6,  // Tightened
+                nnLayerAccuracy: 1e-4       // Tightened
+            )
+
+        case .apple7:
+            // M1, A14 - First Apple Silicon Macs, very stable
+            return ToleranceConfiguration(
+                epsilon: 5e-8,
+                float16Epsilon: 5e-4,
+                normalizationEpsilon: 1e-5,
+                gpuCpuThreshold: 4096,
+                minBufferSize: 128,
+                optimalBufferSize: 4096,
+                maxInFlightBuffers: 3,
+                preferredLatencyFrames: 3,
+                windowFloorEpsilon: 1e-8,
+                fftAccuracy: 1e-5,          // Tightened from 1e-4
+                convolutionAccuracy: 1e-5,  // Tightened from 1e-4
+                nnLayerAccuracy: 5e-4       // Tightened from 1e-3
+            )
+
+        case .apple5, .apple6:
+            // A12, A13 - Older iOS devices, more conservative
+            return ToleranceConfiguration(
+                epsilon: 1e-7,
+                float16Epsilon: 1e-3,
+                normalizationEpsilon: 1e-5,
+                gpuCpuThreshold: 8192,
+                minBufferSize: 256,
+                optimalBufferSize: 4096,
+                maxInFlightBuffers: 3,
+                preferredLatencyFrames: 4,
+                windowFloorEpsilon: 1e-7,
+                fftAccuracy: 1e-4,          // Tightened from 5e-4
+                convolutionAccuracy: 1e-4,  // Tightened from 5e-4
+                nnLayerAccuracy: 5e-4       // Tightened from 1e-3
+            )
+
+        case .mac2, .unknown:
+            // Intel Mac or unknown - use conservative defaults
+            return conservative()
+        }
+    }
+
+    /// Conservative configuration safe for all hardware
+    /// Tightened after production readiness fixes while remaining safe
+    public static func conservative() -> ToleranceConfiguration {
+        ToleranceConfiguration(
+            epsilon: 1e-7,
+            float16Epsilon: 1e-3,
+            normalizationEpsilon: 1e-5,
+            gpuCpuThreshold: 4096,
+            minBufferSize: 256,
+            optimalBufferSize: 4096,
+            maxInFlightBuffers: 3,
+            preferredLatencyFrames: 4,
+            windowFloorEpsilon: 1e-8,
+            fftAccuracy: 1e-5,          // Tightened from 1e-4
+            convolutionAccuracy: 1e-5,  // Tightened from 1e-4
+            nnLayerAccuracy: 5e-4       // Tightened from 1e-3
+        )
+    }
+
+    /// Aggressive configuration for maximum precision (may impact performance)
+    /// Now achievable with production readiness fixes
+    public static func aggressive() -> ToleranceConfiguration {
+        ToleranceConfiguration(
+            epsilon: 1e-8,
+            float16Epsilon: 1e-4,
+            normalizationEpsilon: 1e-7,
+            gpuCpuThreshold: 1024,
+            minBufferSize: 32,
+            optimalBufferSize: 1024,
+            maxInFlightBuffers: 4,
+            preferredLatencyFrames: 1,
+            windowFloorEpsilon: 1e-10,  // Tightened from 1e-9
+            fftAccuracy: 5e-7,          // Tightened from 1e-6
+            convolutionAccuracy: 5e-7,  // Tightened from 1e-6
+            nnLayerAccuracy: 5e-5       // Tightened from 1e-4
+        )
+    }
+}
+
+// MARK: - Debug Description
+
+extension ToleranceConfiguration: CustomStringConvertible {
+    public var description: String {
+        """
+        ToleranceConfiguration:
+          Epsilon: \(epsilon)
+          GPU/CPU Threshold: \(gpuCpuThreshold) samples
+          FFT Accuracy: \(fftAccuracy)
+          Max In-Flight Buffers: \(maxInFlightBuffers)
+        """
+    }
+}

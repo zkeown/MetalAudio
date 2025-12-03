@@ -10,7 +10,10 @@ using namespace metal;
 
 constant float PI = 3.14159265358979323846f;
 constant float TWO_PI = 6.28318530717958647692f;
+
+// Default epsilon for numerical stability (can be overridden via function constants)
 constant float EPSILON = 1e-8f;
+constant float NORM_EPSILON = 1e-6f;  // For normalization operations
 
 // MARK: - Complex Number Operations
 
@@ -52,6 +55,42 @@ inline float complex_abs_squared(Complex a) {
 
 inline Complex complex_exp(float phase) {
     return Complex(cos(phase), sin(phase));
+}
+
+// MARK: - Precision-Safe Utilities
+
+/// Safe division that avoids divide-by-zero
+inline float safe_divide(float a, float b, float eps = EPSILON) {
+    return a / max(abs(b), eps);
+}
+
+/// Safe square root with floor to avoid sqrt of negative/tiny values
+inline float safe_sqrt(float x, float eps = EPSILON) {
+    return sqrt(max(x, eps));
+}
+
+/// Safe reciprocal square root
+inline float safe_rsqrt(float x, float eps = EPSILON) {
+    return rsqrt(max(x, eps));
+}
+
+/// Safe log that avoids log(0)
+inline float safe_log(float x, float eps = EPSILON) {
+    return log(max(x, eps));
+}
+
+/// Safe log10 that avoids log10(0)
+inline float safe_log10(float x, float eps = EPSILON) {
+    return log10(max(x, eps));
+}
+
+// Half-precision (Float16) versions for when using half types
+inline half safe_divide_h(half a, half b, half eps = half(5e-4f)) {
+    return a / max(abs(b), eps);
+}
+
+inline half safe_sqrt_h(half x, half eps = half(5e-4f)) {
+    return sqrt(max(x, eps));
 }
 
 // MARK: - Audio Utility Functions
@@ -96,8 +135,19 @@ inline float blackman_window(uint index, uint length) {
 
 // MARK: - Activation Functions (for NN inference)
 
+/// Numerically stable sigmoid that avoids overflow for extreme values
+/// For x >= 0: 1 / (1 + exp(-x))
+/// For x < 0:  exp(x) / (1 + exp(x))
 inline float sigmoid(float x) {
-    return 1.0f / (1.0f + exp(-x));
+    // Clamp to prevent overflow even in edge cases
+    x = clamp(x, -88.0f, 88.0f);
+    if (x >= 0.0f) {
+        float z = exp(-x);
+        return 1.0f / (1.0f + z);
+    } else {
+        float z = exp(x);
+        return z / (1.0f + z);
+    }
 }
 
 inline float relu(float x) {
@@ -137,14 +187,19 @@ inline float cubic_interp(float y0, float y1, float y2, float y3, float t) {
 }
 
 // MARK: - Simple Kernels
+//
+// All kernels include bounds checking to prevent GPU memory corruption
+// when grid size doesn't exactly match buffer size.
 
 /// Element-wise addition
 kernel void add_arrays(
     device const float* a [[buffer(0)]],
     device const float* b [[buffer(1)]],
     device float* result [[buffer(2)]],
+    constant uint& length [[buffer(3)]],
     uint id [[thread_position_in_grid]]
 ) {
+    if (id >= length) return;
     result[id] = a[id] + b[id];
 }
 
@@ -153,8 +208,10 @@ kernel void multiply_arrays(
     device const float* a [[buffer(0)]],
     device const float* b [[buffer(1)]],
     device float* result [[buffer(2)]],
+    constant uint& length [[buffer(3)]],
     uint id [[thread_position_in_grid]]
 ) {
+    if (id >= length) return;
     result[id] = a[id] * b[id];
 }
 
@@ -163,8 +220,10 @@ kernel void scale_array(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
     constant float& scale [[buffer(2)]],
+    constant uint& length [[buffer(3)]],
     uint id [[thread_position_in_grid]]
 ) {
+    if (id >= length) return;
     output[id] = input[id] * scale;
 }
 
@@ -172,8 +231,10 @@ kernel void scale_array(
 kernel void apply_gain_db(
     device float* audio [[buffer(0)]],
     constant float& gain_db [[buffer(1)]],
+    constant uint& length [[buffer(2)]],
     uint id [[thread_position_in_grid]]
 ) {
+    if (id >= length) return;
     float gain = db_to_linear(gain_db);
     audio[id] *= gain;
 }
@@ -182,7 +243,9 @@ kernel void apply_gain_db(
 kernel void soft_clip_audio(
     device float* audio [[buffer(0)]],
     constant float& threshold [[buffer(1)]],
+    constant uint& length [[buffer(2)]],
     uint id [[thread_position_in_grid]]
 ) {
+    if (id >= length) return;
     audio[id] = soft_clip(audio[id], threshold);
 }

@@ -5,7 +5,21 @@ import MetalAudioKit
 
 /// LSTM layer for sequential audio processing
 /// Optimized for inference with pre-computed weights
-public final class LSTM: NNLayer, @unchecked Sendable {
+///
+/// ## Thread Safety
+/// `LSTM` is **NOT** thread-safe for concurrent `forward()` calls.
+/// The hidden and cell states are shared mutable state. Concurrent inference
+/// calls will corrupt these states and produce incorrect results.
+///
+/// For thread-safe usage:
+/// - Use separate LSTM instances per thread, OR
+/// - Serialize all `forward()` calls with external synchronization
+///
+/// Weight loading (`loadWeights`) must complete before any inference calls.
+public final class LSTM: NNLayer {
+
+    /// Lock for protecting hidden/cell state during forward pass
+    private var stateLock = os_unfair_lock()
 
     public let inputShape: [Int]  // [sequenceLength, inputSize]
     public let outputShape: [Int]  // [sequenceLength, hiddenSize] or [sequenceLength, hiddenSize * 2] for bidirectional
@@ -83,6 +97,7 @@ public final class LSTM: NNLayer, @unchecked Sendable {
     ///   - weightsHH: Hidden-hidden weights [4*hidden, hidden]
     ///   - biasIH: Input-hidden bias [4*hidden]
     ///   - biasHH: Hidden-hidden bias [4*hidden]
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if weight array sizes don't match
     public func loadWeights(
         layer: Int,
         direction: Int,
@@ -90,14 +105,14 @@ public final class LSTM: NNLayer, @unchecked Sendable {
         weightsHH: [Float],
         biasIH: [Float],
         biasHH: [Float]
-    ) {
+    ) throws {
         let numDirections = bidirectional ? 2 : 1
         let idx = layer * numDirections + direction
 
-        self.weightsIH[idx].copy(from: weightsIH)
-        self.weightsHH[idx].copy(from: weightsHH)
-        self.biasIH[idx].copy(from: biasIH)
-        self.biasHH[idx].copy(from: biasHH)
+        try self.weightsIH[idx].copy(from: weightsIH)
+        try self.weightsHH[idx].copy(from: weightsHH)
+        try self.biasIH[idx].copy(from: biasIH)
+        try self.biasHH[idx].copy(from: biasHH)
     }
 
     /// Reset hidden and cell states to zero
@@ -112,6 +127,10 @@ public final class LSTM: NNLayer, @unchecked Sendable {
         // For LSTM, we process sequentially on CPU for now
         // GPU parallelization of LSTM is complex due to sequential dependencies
         // Future optimization: use cuDNN-style fused LSTM or parallel scan algorithms
+
+        // Lock to protect hidden/cell state from concurrent access
+        os_unfair_lock_lock(&stateLock)
+        defer { os_unfair_lock_unlock(&stateLock) }
 
         try forwardCPU(input: input, output: output)
     }
@@ -188,6 +207,10 @@ public final class LSTM: NNLayer, @unchecked Sendable {
                         // Update cell state: c = f * c + i * g
                         c[j] = f_gate * c[j] + i_gate * g_gate
 
+                        // Clip cell state to prevent divergence
+                        // Large cell states cause NaN when passed through tanh
+                        c[j] = max(-50.0, min(50.0, c[j]))
+
                         // Update hidden state: h = o * tanh(c)
                         h[j] = o_gate * tanh(c[j])
                     }
@@ -206,11 +229,20 @@ public final class LSTM: NNLayer, @unchecked Sendable {
         }
 
         // Copy final output
-        output.copy(from: layerInput)
+        try output.copy(from: layerInput)
     }
 
+    /// Numerically stable sigmoid that avoids overflow for extreme values
+    /// For x >= 0: 1 / (1 + exp(-x))
+    /// For x < 0:  exp(x) / (1 + exp(x))
     private func sigmoid(_ x: Float) -> Float {
-        return 1.0 / (1.0 + exp(-x))
+        if x >= 0 {
+            let z = exp(-x)
+            return 1.0 / (1.0 + z)
+        } else {
+            let z = exp(x)
+            return z / (1.0 + z)
+        }
     }
 
     private func tanh(_ x: Float) -> Float {
@@ -221,7 +253,21 @@ public final class LSTM: NNLayer, @unchecked Sendable {
 // MARK: - GRU Layer
 
 /// GRU layer (simpler than LSTM, often faster)
-public final class GRU: NNLayer, @unchecked Sendable {
+///
+/// ## Thread Safety
+/// `GRU` is **NOT** thread-safe for concurrent `forward()` calls.
+/// The hidden state is shared mutable state. Concurrent inference
+/// calls will corrupt the state and produce incorrect results.
+///
+/// For thread-safe usage:
+/// - Use separate GRU instances per thread, OR
+/// - Serialize all `forward()` calls with external synchronization
+///
+/// Weight loading (`loadWeights`) must complete before any inference calls.
+public final class GRU: NNLayer {
+
+    /// Lock for protecting hidden state during forward pass
+    private var stateLock = os_unfair_lock()
 
     public let inputShape: [Int]
     public let outputShape: [Int]
@@ -230,12 +276,14 @@ public final class GRU: NNLayer, @unchecked Sendable {
     private let inputSize: Int
     private let hiddenSize: Int
     private let bidirectional: Bool
+    private let numDirections: Int
 
-    private var weightsIH: Tensor?
-    private var weightsHH: Tensor?
-    private var biasIH: Tensor?
-    private var biasHH: Tensor?
-    private var hiddenState: Tensor?
+    // Weights for each direction (bidirectional has 2)
+    private var weightsIH: [Tensor] = []
+    private var weightsHH: [Tensor] = []
+    private var biasIH: [Tensor] = []
+    private var biasHH: [Tensor] = []
+    private var hiddenState: [Tensor] = []
 
     public init(
         device: AudioDevice,
@@ -248,33 +296,51 @@ public final class GRU: NNLayer, @unchecked Sendable {
         self.inputSize = inputSize
         self.hiddenSize = hiddenSize
         self.bidirectional = bidirectional
+        self.numDirections = bidirectional ? 2 : 1
 
         self.inputShape = [sequenceLength, inputSize]
-        let outputSize = bidirectional ? hiddenSize * 2 : hiddenSize
+        let outputSize = hiddenSize * numDirections
         self.outputShape = [sequenceLength, outputSize]
 
         // GRU has 3 gates: reset, update, new
-        self.weightsIH = try Tensor(device: device, shape: [3 * hiddenSize, inputSize])
-        self.weightsHH = try Tensor(device: device, shape: [3 * hiddenSize, hiddenSize])
-        self.biasIH = try Tensor(device: device, shape: [3 * hiddenSize])
-        self.biasHH = try Tensor(device: device, shape: [3 * hiddenSize])
-        self.hiddenState = try Tensor(device: device, shape: [hiddenSize])
+        // Allocate weights for each direction
+        for _ in 0..<numDirections {
+            weightsIH.append(try Tensor(device: device, shape: [3 * hiddenSize, inputSize]))
+            weightsHH.append(try Tensor(device: device, shape: [3 * hiddenSize, hiddenSize]))
+            biasIH.append(try Tensor(device: device, shape: [3 * hiddenSize]))
+            biasHH.append(try Tensor(device: device, shape: [3 * hiddenSize]))
+            hiddenState.append(try Tensor(device: device, shape: [hiddenSize]))
+        }
     }
 
+    /// Load weights for a specific direction
+    /// - Parameters:
+    ///   - direction: 0 for forward, 1 for backward (bidirectional only)
+    ///   - weightsIH: Input-hidden weights [3*hidden, input]
+    ///   - weightsHH: Hidden-hidden weights [3*hidden, hidden]
+    ///   - biasIH: Input-hidden bias [3*hidden]
+    ///   - biasHH: Hidden-hidden bias [3*hidden]
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if weight array sizes don't match
     public func loadWeights(
+        direction: Int = 0,
         weightsIH: [Float],
         weightsHH: [Float],
         biasIH: [Float],
         biasHH: [Float]
-    ) {
-        self.weightsIH?.copy(from: weightsIH)
-        self.weightsHH?.copy(from: weightsHH)
-        self.biasIH?.copy(from: biasIH)
-        self.biasHH?.copy(from: biasHH)
+    ) throws {
+        guard direction < numDirections else {
+            throw MetalAudioError.invalidConfiguration("Direction \(direction) invalid for \(bidirectional ? "bidirectional" : "unidirectional") GRU")
+        }
+        try self.weightsIH[direction].copy(from: weightsIH)
+        try self.weightsHH[direction].copy(from: weightsHH)
+        try self.biasIH[direction].copy(from: biasIH)
+        try self.biasHH[direction].copy(from: biasHH)
     }
 
     public func resetState() {
-        hiddenState?.zero()
+        for state in hiddenState {
+            state.zero()
+        }
     }
 
     public func forward(input: Tensor, output: Tensor, encoder: MTLComputeCommandEncoder) throws {
@@ -284,71 +350,90 @@ public final class GRU: NNLayer, @unchecked Sendable {
         // n = tanh(W_in @ x + b_in + r * (W_hn @ h + b_hn))
         // h' = (1 - z) * n + z * h
 
+        // Lock to protect hidden state from concurrent access
+        os_unfair_lock_lock(&stateLock)
+        defer { os_unfair_lock_unlock(&stateLock) }
+
         // CPU implementation for now
         try forwardCPU(input: input, output: output)
     }
 
     private func forwardCPU(input: Tensor, output: Tensor) throws {
-        guard let wih = weightsIH?.floatPointer,
-              let whh = weightsHH?.floatPointer,
-              let bih = biasIH?.floatPointer,
-              let bhh = biasHH?.floatPointer,
-              let h = hiddenState?.floatPointer else {
-            throw MetalAudioError.invalidConfiguration("GRU weights not loaded")
-        }
-
         let sequenceLength = input.shape[0]
         let inputData = input.toArray()
 
-        var outputData = [Float](repeating: 0, count: sequenceLength * hiddenSize)
+        var outputData = [Float](repeating: 0, count: sequenceLength * hiddenSize * numDirections)
 
-        for t in 0..<sequenceLength {
-            let inputOffset = t * inputSize
+        for direction in 0..<numDirections {
+            let reverse = direction == 1
 
-            // Compute gates
-            var gates = [Float](repeating: 0, count: 3 * hiddenSize)
-            var hhGates = [Float](repeating: 0, count: 3 * hiddenSize)
+            let wih = weightsIH[direction].floatPointer
+            let whh = weightsHH[direction].floatPointer
+            let bih = biasIH[direction].floatPointer
+            let bhh = biasHH[direction].floatPointer
+            let h = hiddenState[direction].floatPointer
 
-            // W_ih @ x + b_ih
-            cblas_sgemv(
-                CblasRowMajor, CblasNoTrans,
-                Int32(3 * hiddenSize), Int32(inputSize),
-                1.0, wih, Int32(inputSize),
-                inputData.withUnsafeBufferPointer { $0.baseAddress! + inputOffset }, 1,
-                0.0, &gates, 1
-            )
-            vDSP_vadd(gates, 1, bih, 1, &gates, 1, vDSP_Length(3 * hiddenSize))
+            // Process sequence (reversed for backward direction)
+            let indices = reverse ?
+                Array((0..<sequenceLength).reversed()) :
+                Array(0..<sequenceLength)
 
-            // W_hh @ h + b_hh
-            cblas_sgemv(
-                CblasRowMajor, CblasNoTrans,
-                Int32(3 * hiddenSize), Int32(hiddenSize),
-                1.0, whh, Int32(hiddenSize),
-                h, 1,
-                0.0, &hhGates, 1
-            )
-            vDSP_vadd(hhGates, 1, bhh, 1, &hhGates, 1, vDSP_Length(3 * hiddenSize))
+            for t in indices {
+                let inputOffset = t * inputSize
 
-            // Apply GRU equations
-            for j in 0..<hiddenSize {
-                let r = sigmoid(gates[j] + hhGates[j])                           // Reset gate
-                let z = sigmoid(gates[hiddenSize + j] + hhGates[hiddenSize + j]) // Update gate
-                let n = Darwin.tanh(gates[2 * hiddenSize + j] + r * hhGates[2 * hiddenSize + j])  // New gate
+                // Compute gates
+                var gates = [Float](repeating: 0, count: 3 * hiddenSize)
+                var hhGates = [Float](repeating: 0, count: 3 * hiddenSize)
 
-                h[j] = (1 - z) * n + z * h[j]
-            }
+                // W_ih @ x + b_ih
+                cblas_sgemv(
+                    CblasRowMajor, CblasNoTrans,
+                    Int32(3 * hiddenSize), Int32(inputSize),
+                    1.0, wih, Int32(inputSize),
+                    inputData.withUnsafeBufferPointer { $0.baseAddress! + inputOffset }, 1,
+                    0.0, &gates, 1
+                )
+                vDSP_vadd(gates, 1, bih, 1, &gates, 1, vDSP_Length(3 * hiddenSize))
 
-            // Copy to output
-            let outputOffset = t * hiddenSize
-            outputData.withUnsafeMutableBufferPointer { ptr in
-                memcpy(ptr.baseAddress! + outputOffset, h, hiddenSize * MemoryLayout<Float>.stride)
+                // W_hh @ h + b_hh
+                cblas_sgemv(
+                    CblasRowMajor, CblasNoTrans,
+                    Int32(3 * hiddenSize), Int32(hiddenSize),
+                    1.0, whh, Int32(hiddenSize),
+                    h, 1,
+                    0.0, &hhGates, 1
+                )
+                vDSP_vadd(hhGates, 1, bhh, 1, &hhGates, 1, vDSP_Length(3 * hiddenSize))
+
+                // Apply GRU equations
+                for j in 0..<hiddenSize {
+                    let r = sigmoid(gates[j] + hhGates[j])                           // Reset gate
+                    let z = sigmoid(gates[hiddenSize + j] + hhGates[hiddenSize + j]) // Update gate
+                    let n = Darwin.tanh(gates[2 * hiddenSize + j] + r * hhGates[2 * hiddenSize + j])  // New gate
+
+                    h[j] = (1 - z) * n + z * h[j]
+                }
+
+                // Store output at correct position (same layout as LSTM bidirectional)
+                // Output format: [forward[0], backward[0], forward[1], backward[1], ...]
+                let outputOffset = t * hiddenSize * numDirections + direction * hiddenSize
+                outputData.withUnsafeMutableBufferPointer { ptr in
+                    memcpy(ptr.baseAddress! + outputOffset, h, hiddenSize * MemoryLayout<Float>.stride)
+                }
             }
         }
 
-        output.copy(from: outputData)
+        try output.copy(from: outputData)
     }
 
+    /// Numerically stable sigmoid that avoids overflow for extreme values
     private func sigmoid(_ x: Float) -> Float {
-        return 1.0 / (1.0 + exp(-x))
+        if x >= 0 {
+            let z = exp(-x)
+            return 1.0 / (1.0 + z)
+        } else {
+            let z = exp(x)
+            return z / (1.0 + z)
+        }
     }
 }

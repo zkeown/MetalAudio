@@ -4,7 +4,7 @@ import Accelerate
 import MetalAudioKit
 
 /// 1D Convolution layer optimized for audio processing
-public final class Conv1D: NNLayer, @unchecked Sendable {
+public final class Conv1D: NNLayer {
 
     public let inputShape: [Int]  // [channels, length]
     public let outputShape: [Int]  // [outputChannels, outputLength]
@@ -32,6 +32,7 @@ public final class Conv1D: NNLayer, @unchecked Sendable {
     ///   - groups: Number of groups for grouped convolution
     ///   - useBias: Whether to use bias
     ///   - inputLength: Expected input sequence length (for shape calculation)
+    ///   - weightInit: Weight initialization strategy (default: he for ReLU compatibility)
     public init(
         device: AudioDevice,
         inputChannels: Int,
@@ -42,7 +43,8 @@ public final class Conv1D: NNLayer, @unchecked Sendable {
         dilation: Int = 1,
         groups: Int = 1,
         useBias: Bool = true,
-        inputLength: Int = 0
+        inputLength: Int = 0,
+        weightInit: WeightInitialization = .he
     ) throws {
         self.device = device
         self.kernelSize = kernelSize
@@ -65,8 +67,14 @@ public final class Conv1D: NNLayer, @unchecked Sendable {
             shape: [outputChannels, inputChannels / groups, kernelSize]
         )
 
+        // Initialize weights - fanIn = inputChannels/groups * kernelSize
+        let fanIn = (inputChannels / groups) * kernelSize
+        let fanOut = outputChannels * kernelSize
+        try weightInit.apply(to: weights, fanIn: fanIn, fanOut: fanOut)
+
         if useBias {
             self.bias = try Tensor(device: device, shape: [outputChannels])
+            bias?.zero()  // Standard: bias initialized to zeros
         } else {
             self.bias = nil
         }
@@ -79,10 +87,11 @@ public final class Conv1D: NNLayer, @unchecked Sendable {
     }
 
     /// Load weights from arrays
-    public func loadWeights(_ weightData: [Float], bias biasData: [Float]? = nil) {
-        weights.copy(from: weightData)
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if weight array sizes don't match
+    public func loadWeights(_ weightData: [Float], bias biasData: [Float]? = nil) throws {
+        try weights.copy(from: weightData)
         if let biasData = biasData, let bias = bias {
-            bias.copy(from: biasData)
+            try bias.copy(from: biasData)
         }
     }
 
@@ -180,7 +189,8 @@ public final class Conv1D: NNLayer, @unchecked Sendable {
             for (uint k = 0; k < params.kernelSize; k++) {
                 int inputPos = int(outPos * params.stride) - int(params.padding) + int(k * params.dilation);
 
-                if (inputPos >= 0 && uint(inputPos) < params.inputLength) {
+                // Note: Keep comparison as signed to avoid uint wraparound when inputPos < 0
+                if (inputPos >= 0 && inputPos < int(params.inputLength)) {
                     uint inputIdx = inputChannel * params.inputLength + uint(inputPos);
                     uint weightIdx = outChannel * groupSize * params.kernelSize + ic * params.kernelSize + k;
 
@@ -202,7 +212,7 @@ public final class Conv1D: NNLayer, @unchecked Sendable {
 // MARK: - Transposed Conv1D (for upsampling)
 
 /// 1D Transposed Convolution for upsampling
-public final class ConvTranspose1D: NNLayer, @unchecked Sendable {
+public final class ConvTranspose1D: NNLayer {
 
     public let inputShape: [Int]
     public let outputShape: [Int]
@@ -217,6 +227,18 @@ public final class ConvTranspose1D: NNLayer, @unchecked Sendable {
 
     private var pipeline: MTLComputePipelineState?
 
+    /// Initialize ConvTranspose1D layer
+    /// - Parameters:
+    ///   - device: Audio device
+    ///   - inputChannels: Number of input channels
+    ///   - outputChannels: Number of output channels
+    ///   - kernelSize: Size of convolution kernel
+    ///   - stride: Stride of convolution
+    ///   - padding: Padding amount
+    ///   - outputPadding: Additional padding for output
+    ///   - useBias: Whether to use bias
+    ///   - inputLength: Expected input sequence length
+    ///   - weightInit: Weight initialization strategy (default: he)
     public init(
         device: AudioDevice,
         inputChannels: Int,
@@ -226,7 +248,8 @@ public final class ConvTranspose1D: NNLayer, @unchecked Sendable {
         padding: Int = 0,
         outputPadding: Int = 0,
         useBias: Bool = true,
-        inputLength: Int = 0
+        inputLength: Int = 0,
+        weightInit: WeightInitialization = .he
     ) throws {
         self.device = device
         self.kernelSize = kernelSize
@@ -247,8 +270,14 @@ public final class ConvTranspose1D: NNLayer, @unchecked Sendable {
             shape: [inputChannels, outputChannels, kernelSize]
         )
 
+        // Initialize weights - for transposed conv, fanIn/fanOut are swapped
+        let fanIn = inputChannels * kernelSize
+        let fanOut = outputChannels * kernelSize
+        try weightInit.apply(to: weights, fanIn: fanIn, fanOut: fanOut)
+
         if useBias {
             self.bias = try Tensor(device: device, shape: [outputChannels])
+            bias?.zero()  // Standard: bias initialized to zeros
         } else {
             self.bias = nil
         }
@@ -259,10 +288,12 @@ public final class ConvTranspose1D: NNLayer, @unchecked Sendable {
         )
     }
 
-    public func loadWeights(_ weightData: [Float], bias biasData: [Float]? = nil) {
-        weights.copy(from: weightData)
+    /// Load weights from arrays
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if weight array sizes don't match
+    public func loadWeights(_ weightData: [Float], bias biasData: [Float]? = nil) throws {
+        try weights.copy(from: weightData)
         if let biasData = biasData, let bias = bias {
-            bias.copy(from: biasData)
+            try bias.copy(from: biasData)
         }
     }
 

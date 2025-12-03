@@ -6,13 +6,33 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// MARK: - Helper Functions
+
+/// Numerically stable sigmoid that avoids overflow for extreme values
+inline float stable_sigmoid(float x) {
+    // Clamp to prevent overflow
+    x = clamp(x, -88.0f, 88.0f);
+    if (x >= 0.0f) {
+        float z = exp(-x);
+        return 1.0f / (1.0f + z);
+    } else {
+        float z = exp(x);
+        return z / (1.0f + z);
+    }
+}
+
 // MARK: - Activation Functions
+//
+// All activation kernels include bounds checking to prevent GPU memory corruption
+// when grid size doesn't exactly match buffer size.
 
 kernel void relu_kernel(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
+    constant uint& length [[buffer(2)]],
     uint id [[thread_position_in_grid]]
 ) {
+    if (id >= length) return;
     output[id] = max(0.0f, input[id]);
 }
 
@@ -20,8 +40,10 @@ kernel void leaky_relu_kernel(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
     constant float& alpha [[buffer(2)]],
+    constant uint& length [[buffer(3)]],
     uint id [[thread_position_in_grid]]
 ) {
+    if (id >= length) return;
     float x = input[id];
     output[id] = x > 0.0f ? x : alpha * x;
 }
@@ -29,8 +51,10 @@ kernel void leaky_relu_kernel(
 kernel void gelu_kernel(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
+    constant uint& length [[buffer(2)]],
     uint id [[thread_position_in_grid]]
 ) {
+    if (id >= length) return;
     float x = input[id];
     const float sqrt_2_over_pi = 0.7978845608f;
     float x3 = x * x * x;
@@ -40,26 +64,32 @@ kernel void gelu_kernel(
 kernel void sigmoid_kernel(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
+    constant uint& length [[buffer(2)]],
     uint id [[thread_position_in_grid]]
 ) {
-    output[id] = 1.0f / (1.0f + exp(-input[id]));
+    if (id >= length) return;
+    output[id] = stable_sigmoid(input[id]);
 }
 
 kernel void tanh_kernel(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
+    constant uint& length [[buffer(2)]],
     uint id [[thread_position_in_grid]]
 ) {
+    if (id >= length) return;
     output[id] = tanh(input[id]);
 }
 
 kernel void swish_kernel(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
+    constant uint& length [[buffer(2)]],
     uint id [[thread_position_in_grid]]
 ) {
+    if (id >= length) return;
     float x = input[id];
-    output[id] = x / (1.0f + exp(-x));
+    output[id] = x * stable_sigmoid(x);
 }
 
 // MARK: - Normalization
@@ -69,6 +99,7 @@ struct LayerNormParams {
     float epsilon;
 };
 
+// Legacy O(n²) layer norm - kept for compatibility with small feature sizes
 kernel void layer_norm(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
@@ -99,6 +130,78 @@ kernel void layer_norm(
     // Normalize
     float normalized = (input[id] - mean) / sqrt(variance + params.epsilon);
     output[id] = gamma[featureIdx] * normalized + beta[featureIdx];
+}
+
+// Optimized layer norm using parallel reduction
+// Dispatch: one threadgroup per batch element (row)
+// Threadgroup size: min(featureSize, 256) threads
+// Complexity: O(n log n) per row instead of O(n²)
+constant uint LAYER_NORM_THREADGROUP_SIZE = 256;
+
+kernel void layer_norm_parallel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    device const float* gamma [[buffer(2)]],
+    device const float* beta [[buffer(3)]],
+    constant LayerNormParams& params [[buffer(4)]],
+    uint groupId [[threadgroup_position_in_grid]],
+    uint localId [[thread_index_in_threadgroup]],
+    uint threadsPerGroup [[threads_per_threadgroup]]
+) {
+    // Shared memory for reduction
+    threadgroup float sharedSum[LAYER_NORM_THREADGROUP_SIZE];
+    threadgroup float sharedSumSq[LAYER_NORM_THREADGROUP_SIZE];
+    threadgroup float sharedMean;
+    threadgroup float sharedInvStd;
+
+    uint batchIdx = groupId;
+    uint startIdx = batchIdx * params.featureSize;
+
+    // Phase 1: Each thread computes partial sum and sum of squares
+    float localSum = 0.0f;
+    float localSumSq = 0.0f;
+
+    // Grid-stride loop: each thread handles multiple elements
+    for (uint i = localId; i < params.featureSize; i += threadsPerGroup) {
+        float val = input[startIdx + i];
+        localSum += val;
+        localSumSq += val * val;
+    }
+
+    sharedSum[localId] = localSum;
+    sharedSumSq[localId] = localSumSq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 2: Tree reduction for sum and sum of squares
+    for (uint stride = threadsPerGroup / 2; stride > 0; stride >>= 1) {
+        if (localId < stride) {
+            sharedSum[localId] += sharedSum[localId + stride];
+            sharedSumSq[localId] += sharedSumSq[localId + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // Thread 0 computes final mean and inverse std
+    if (localId == 0) {
+        float mean = sharedSum[0] / float(params.featureSize);
+        // Var(X) = E[X²] - E[X]² (computational formula)
+        float variance = sharedSumSq[0] / float(params.featureSize) - mean * mean;
+        // Clamp variance to avoid numerical issues with perfectly constant inputs
+        variance = max(variance, 0.0f);
+        sharedMean = mean;
+        sharedInvStd = rsqrt(variance + params.epsilon);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 3: Each thread normalizes its elements
+    float mean = sharedMean;
+    float invStd = sharedInvStd;
+
+    for (uint i = localId; i < params.featureSize; i += threadsPerGroup) {
+        float val = input[startIdx + i];
+        float normalized = (val - mean) * invStd;
+        output[startIdx + i] = gamma[i] * normalized + beta[i];
+    }
 }
 
 struct BatchNormParams {
@@ -245,7 +348,8 @@ kernel void attention_scores(
     scores[queryIdx * params.seqLength + keyIdx] = sum * params.scale;
 }
 
-// Softmax along last dimension
+// Legacy softmax along last dimension - kept for compatibility with small lengths
+// Each thread handles one row sequentially
 kernel void softmax_1d(
     device float* data [[buffer(0)]],
     constant uint& length [[buffer(1)]],
@@ -272,14 +376,93 @@ kernel void softmax_1d(
     }
 }
 
+// Optimized softmax using parallel reduction
+// Dispatch: one threadgroup per row
+// Threadgroup size: min(length, 256) threads
+// Complexity: O(n log n) per row instead of O(n) serial with 3 passes
+constant uint SOFTMAX_THREADGROUP_SIZE = 256;
+
+kernel void softmax_1d_parallel(
+    device float* data [[buffer(0)]],
+    constant uint& length [[buffer(1)]],
+    uint groupId [[threadgroup_position_in_grid]],
+    uint localId [[thread_index_in_threadgroup]],
+    uint threadsPerGroup [[threads_per_threadgroup]]
+) {
+    // Shared memory for reduction
+    threadgroup float sharedMax[SOFTMAX_THREADGROUP_SIZE];
+    threadgroup float sharedSum[SOFTMAX_THREADGROUP_SIZE];
+    threadgroup float sharedGlobalMax;
+    threadgroup float sharedGlobalSum;
+
+    uint rowOffset = groupId * length;
+
+    // Phase 1: Find local max using grid-stride loop
+    float localMax = -INFINITY;
+    for (uint i = localId; i < length; i += threadsPerGroup) {
+        localMax = max(localMax, data[rowOffset + i]);
+    }
+    sharedMax[localId] = localMax;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 2: Tree reduction for max
+    for (uint stride = threadsPerGroup / 2; stride > 0; stride >>= 1) {
+        if (localId < stride) {
+            sharedMax[localId] = max(sharedMax[localId], sharedMax[localId + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // Broadcast max to all threads
+    if (localId == 0) {
+        sharedGlobalMax = sharedMax[0];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float globalMax = sharedGlobalMax;
+
+    // Phase 3: Compute exp(x - max) in-place and accumulate partial sum
+    float localSum = 0.0f;
+    for (uint i = localId; i < length; i += threadsPerGroup) {
+        float expVal = exp(data[rowOffset + i] - globalMax);
+        data[rowOffset + i] = expVal;
+        localSum += expVal;
+    }
+    sharedSum[localId] = localSum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 4: Tree reduction for sum
+    for (uint stride = threadsPerGroup / 2; stride > 0; stride >>= 1) {
+        if (localId < stride) {
+            sharedSum[localId] += sharedSum[localId + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // Broadcast sum to all threads
+    if (localId == 0) {
+        sharedGlobalSum = sharedSum[0];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float invSum = 1.0f / sharedGlobalSum;
+
+    // Phase 5: Normalize
+    for (uint i = localId; i < length; i += threadsPerGroup) {
+        data[rowOffset + i] *= invSum;
+    }
+}
+
 // MARK: - Residual and Element-wise
+//
+// All element-wise kernels include bounds checking to prevent GPU memory corruption.
 
 kernel void residual_add(
     device const float* input [[buffer(0)]],
     device const float* residual [[buffer(1)]],
     device float* output [[buffer(2)]],
+    constant uint& length [[buffer(3)]],
     uint id [[thread_position_in_grid]]
 ) {
+    if (id >= length) return;
     output[id] = input[id] + residual[id];
 }
 
@@ -289,8 +472,10 @@ kernel void scale_add(
     device float* output [[buffer(2)]],
     constant float& scaleA [[buffer(3)]],
     constant float& scaleB [[buffer(4)]],
+    constant uint& length [[buffer(5)]],
     uint id [[thread_position_in_grid]]
 ) {
+    if (id >= length) return;
     output[id] = scaleA * a[id] + scaleB * b[id];
 }
 
@@ -298,8 +483,10 @@ kernel void elementwise_multiply(
     device const float* a [[buffer(0)]],
     device const float* b [[buffer(1)]],
     device float* output [[buffer(2)]],
+    constant uint& length [[buffer(3)]],
     uint id [[thread_position_in_grid]]
 ) {
+    if (id >= length) return;
     output[id] = a[id] * b[id];
 }
 
@@ -314,5 +501,5 @@ kernel void glu(
 
     float a = input[id];
     float b = input[id + size];
-    output[id] = a * (1.0f / (1.0f + exp(-b)));  // a * sigmoid(b)
+    output[id] = a * stable_sigmoid(b);
 }

@@ -1,8 +1,27 @@
 import Metal
 import MetalAudioKit
 
+/// Errors for sequential model operations
+public enum SequentialModelError: Error, LocalizedError {
+    case shapeMismatch(layerIndex: Int, expectedInput: [Int], actualInput: [Int])
+    case emptyModel
+
+    public var errorDescription: String? {
+        switch self {
+        case .shapeMismatch(let index, let expected, let actual):
+            return "Layer \(index) shape mismatch: expected input \(expected), got \(actual)"
+        case .emptyModel:
+            return "Cannot run inference on empty model"
+        }
+    }
+}
+
 /// A sequential neural network model for audio inference
-public final class Sequential: @unchecked Sendable {
+///
+/// ## Thread Safety
+/// `Sequential` is safe for concurrent inference after `build()` is called.
+/// Layer addition and building should be done from a single thread before inference.
+public final class Sequential {
 
     private let device: AudioDevice
     private let context: ComputeContext
@@ -16,8 +35,44 @@ public final class Sequential: @unchecked Sendable {
         self.context = ComputeContext(device: device)
     }
 
-    /// Add a layer to the model
-    public func add(_ layer: NNLayer) {
+    /// Add a layer to the model with optional shape validation
+    /// - Parameter layer: The layer to add
+    /// - Throws: `SequentialModelError.shapeMismatch` if layer input doesn't match previous output
+    public func add(_ layer: NNLayer) throws {
+        // Validate shape compatibility with previous layer
+        if let lastLayer = layers.last {
+            let previousOutput = lastLayer.outputShape
+            let newInput = layer.inputShape
+
+            // First check: dimension counts must match
+            guard previousOutput.count == newInput.count else {
+                throw SequentialModelError.shapeMismatch(
+                    layerIndex: layers.count,
+                    expectedInput: previousOutput,
+                    actualInput: newInput
+                )
+            }
+
+            // Second check: each dimension must be compatible
+            // (allow for dimension flexibility with 0s representing dynamic dimensions)
+            let compatible = zip(previousOutput, newInput).allSatisfy { prev, new in
+                prev == new || prev == 0 || new == 0
+            }
+
+            if !compatible {
+                throw SequentialModelError.shapeMismatch(
+                    layerIndex: layers.count,
+                    expectedInput: previousOutput,
+                    actualInput: newInput
+                )
+            }
+        }
+
+        layers.append(layer)
+    }
+
+    /// Add a layer without shape validation (for dynamic shapes)
+    public func addUnchecked(_ layer: NNLayer) {
         layers.append(layer)
     }
 
@@ -35,9 +90,13 @@ public final class Sequential: @unchecked Sendable {
     /// Run inference
     /// - Parameter input: Input tensor
     /// - Returns: Output tensor
+    /// - Throws: `SequentialModelError.emptyModel` if no layers, or layer errors
     public func forward(_ input: Tensor) throws -> Tensor {
         guard !layers.isEmpty else {
-            throw MetalAudioError.invalidConfiguration("No layers in model")
+            throw SequentialModelError.emptyModel
+        }
+        guard !intermediateBuffers.isEmpty else {
+            throw MetalAudioError.invalidConfiguration("Model not built. Call build() first.")
         }
 
         var currentInput = input
@@ -50,13 +109,18 @@ public final class Sequential: @unchecked Sendable {
             }
         }
 
-        return intermediateBuffers.last!
+        // Safe: We checked intermediateBuffers is not empty above
+        return intermediateBuffers[intermediateBuffers.count - 1]
     }
 
     /// Run inference asynchronously
     public func forwardAsync(_ input: Tensor, completion: @escaping (Result<Tensor, Error>) -> Void) {
         guard !layers.isEmpty else {
-            completion(.failure(MetalAudioError.invalidConfiguration("No layers in model")))
+            completion(.failure(SequentialModelError.emptyModel))
+            return
+        }
+        guard !intermediateBuffers.isEmpty else {
+            completion(.failure(MetalAudioError.invalidConfiguration("Model not built. Call build() first.")))
             return
         }
 
@@ -72,7 +136,8 @@ public final class Sequential: @unchecked Sendable {
             if let error = error {
                 completion(.failure(error))
             } else {
-                completion(.success(self.intermediateBuffers.last!))
+                // Safe: We checked intermediateBuffers is not empty above
+                completion(.success(self.intermediateBuffers[self.intermediateBuffers.count - 1]))
             }
         })
     }
@@ -97,22 +162,86 @@ public protocol ModelWeights {
 }
 
 /// Load model from a simple binary format
-public final class BinaryModelLoader: @unchecked Sendable {
+/// Error types for model loading
+public enum ModelLoaderError: Error, LocalizedError {
+    case fileTooSmall(expected: Int, actual: Int)
+    case invalidMagicNumber(found: UInt32)
+    case invalidVersion(found: UInt32, supported: UInt32)
+    case unexpectedEndOfFile(at: Int, needed: Int, fileSize: Int)
+    case invalidTensorName
+    case dataSizeMismatch(tensorName: String, declared: Int, shapeSize: Int)
+    case checksumMismatch(expected: UInt32, actual: UInt32)
+
+    public var errorDescription: String? {
+        switch self {
+        case .fileTooSmall(let expected, let actual):
+            return "File too small: expected at least \(expected) bytes, got \(actual)"
+        case .invalidMagicNumber(let found):
+            return "Invalid magic number: 0x\(String(found, radix: 16))"
+        case .invalidVersion(let found, let supported):
+            return "Unsupported version \(found), only version \(supported) is supported"
+        case .unexpectedEndOfFile(let at, let needed, let fileSize):
+            return "Unexpected end of file at offset \(at): needed \(needed) bytes, file size is \(fileSize)"
+        case .invalidTensorName:
+            return "Invalid tensor name (not valid UTF-8)"
+        case .dataSizeMismatch(let name, let declared, let shapeSize):
+            return "Tensor '\(name)' declares \(declared) bytes but shape requires \(shapeSize) bytes"
+        case .checksumMismatch(let expected, let actual):
+            return "Checksum mismatch: expected 0x\(String(expected, radix: 16)), got 0x\(String(actual, radix: 16))"
+        }
+    }
+}
+
+public final class BinaryModelLoader {
 
     /// Header format for binary model files
+    /// Version 2 adds CRC32 checksum for data integrity verification
     public struct Header {
-        public let magic: UInt32 = 0x4D544C41  // "MTLA"
-        public let version: UInt32 = 1
-        public let numTensors: UInt32
-        public let reserved: UInt32 = 0
+        public static let magic: UInt32 = 0x4D544C41  // "MTLA"
+        public static let currentVersion: UInt32 = 2
+        public static let legacyVersion: UInt32 = 1
+        public static let size = 20  // 5 UInt32 fields (v2)
+        public static let legacySize = 16  // 4 UInt32 fields (v1)
 
-        public init(numTensors: Int) {
+        public let magic: UInt32
+        public let version: UInt32
+        public let numTensors: UInt32
+        public let checksum: UInt32  // CRC32 of data after header
+        public let reserved: UInt32
+
+        public init(numTensors: Int, checksum: UInt32 = 0) {
+            self.magic = Self.magic
+            self.version = Self.currentVersion
             self.numTensors = UInt32(numTensors)
+            self.checksum = checksum
+            self.reserved = 0
         }
+    }
+
+    /// Compute CRC32 checksum of data
+    /// Uses standard CRC32 polynomial (0xEDB88320)
+    private static func computeCRC32(_ data: Data, startOffset: Int = 0) -> UInt32 {
+        var crc: UInt32 = 0xFFFFFFFF
+
+        for i in startOffset..<data.count {
+            let byte = data[i]
+            crc ^= UInt32(byte)
+            for _ in 0..<8 {
+                if crc & 1 != 0 {
+                    crc = (crc >> 1) ^ 0xEDB88320
+                } else {
+                    crc >>= 1
+                }
+            }
+        }
+
+        return ~crc
     }
 
     /// Tensor entry in binary file
     public struct TensorEntry {
+        public static let headerSize = 16  // 4 UInt32 fields
+
         public let nameLength: UInt32
         public let numDims: UInt32
         public let dataType: UInt32  // 0 = float32
@@ -125,55 +254,125 @@ public final class BinaryModelLoader: @unchecked Sendable {
         self.device = device
     }
 
-    /// Load tensors from binary file
+    /// Load tensors from binary file with comprehensive bounds checking
     /// - Parameter url: File URL
     /// - Returns: Dictionary of tensor name to Tensor
+    /// - Throws: `ModelLoaderError` for malformed files
     public func load(from url: URL) throws -> [String: Tensor] {
         let data = try Data(contentsOf: url)
         var offset = 0
 
-        // Read header
-        let headerSize = MemoryLayout<Header>.size
-        guard data.count >= headerSize else {
-            throw MetalAudioError.invalidConfiguration("File too small")
+        // Helper to safely read from data
+        func readBytes(count: Int) throws -> Int {
+            guard offset + count <= data.count else {
+                throw ModelLoaderError.unexpectedEndOfFile(
+                    at: offset,
+                    needed: count,
+                    fileSize: data.count
+                )
+            }
+            let currentOffset = offset
+            offset += count
+            return currentOffset
         }
 
-        let magic = data.withUnsafeBytes { $0.load(fromByteOffset: 0, as: UInt32.self) }
-        guard magic == 0x4D544C41 else {
-            throw MetalAudioError.invalidConfiguration("Invalid magic number")
+        func readUInt32() throws -> UInt32 {
+            let readOffset = try readBytes(count: 4)
+            return data.withUnsafeBytes { $0.load(fromByteOffset: readOffset, as: UInt32.self) }
         }
 
-        let numTensors = data.withUnsafeBytes { $0.load(fromByteOffset: 8, as: UInt32.self) }
-        offset = headerSize
+        // Validate header (minimum size for legacy v1)
+        guard data.count >= Header.legacySize else {
+            throw ModelLoaderError.fileTooSmall(expected: Header.legacySize, actual: data.count)
+        }
+
+        let magic = try readUInt32()
+        guard magic == Header.magic else {
+            throw ModelLoaderError.invalidMagicNumber(found: magic)
+        }
+
+        let version = try readUInt32()
+
+        // Support both legacy v1 and current v2
+        let isLegacy = version == Header.legacyVersion
+        guard version == Header.currentVersion || isLegacy else {
+            throw ModelLoaderError.invalidVersion(found: version, supported: Header.currentVersion)
+        }
+
+        let numTensors = try readUInt32()
+
+        // Version 2: read and verify checksum
+        var storedChecksum: UInt32 = 0
+        var dataStartOffset: Int = 0
+
+        if isLegacy {
+            _ = try readUInt32()  // reserved (v1)
+            dataStartOffset = Header.legacySize
+        } else {
+            // Validate v2 header size
+            guard data.count >= Header.size else {
+                throw ModelLoaderError.fileTooSmall(expected: Header.size, actual: data.count)
+            }
+            storedChecksum = try readUInt32()
+            _ = try readUInt32()  // reserved
+            dataStartOffset = Header.size
+
+            // Verify checksum
+            let computedChecksum = Self.computeCRC32(data, startOffset: dataStartOffset)
+            guard computedChecksum == storedChecksum else {
+                throw ModelLoaderError.checksumMismatch(
+                    expected: storedChecksum,
+                    actual: computedChecksum
+                )
+            }
+        }
 
         var tensors: [String: Tensor] = [:]
 
         for _ in 0..<numTensors {
-            // Read tensor entry
-            let nameLength = data.withUnsafeBytes { $0.load(fromByteOffset: offset, as: UInt32.self) }
-            let numDims = data.withUnsafeBytes { $0.load(fromByteOffset: offset + 4, as: UInt32.self) }
-            let dataSize = data.withUnsafeBytes { $0.load(fromByteOffset: offset + 12, as: UInt32.self) }
-            offset += 16
+            // Read tensor entry header
+            let nameLength = try readUInt32()
+            let numDims = try readUInt32()
+            _ = try readUInt32()  // dataType (unused, assume float32)
+            let dataSize = try readUInt32()
+
+            // Validate name length is reasonable
+            guard nameLength < 1024 else {
+                throw ModelLoaderError.invalidTensorName
+            }
 
             // Read name
-            let nameData = data.subdata(in: offset..<(offset + Int(nameLength)))
-            let name = String(data: nameData, encoding: .utf8) ?? ""
-            offset += Int(nameLength)
+            let nameOffset = try readBytes(count: Int(nameLength))
+            let nameData = data.subdata(in: nameOffset..<(nameOffset + Int(nameLength)))
+            guard let name = String(data: nameData, encoding: .utf8) else {
+                throw ModelLoaderError.invalidTensorName
+            }
 
             // Read shape
             var shape: [Int] = []
             for _ in 0..<numDims {
-                let dim = data.withUnsafeBytes { $0.load(fromByteOffset: offset, as: UInt32.self) }
+                let dim = try readUInt32()
                 shape.append(Int(dim))
-                offset += 4
             }
 
-            // Create tensor and read data
+            // Validate data size matches shape
+            let expectedBytes = shape.reduce(1, *) * MemoryLayout<Float>.size
+            guard dataSize == expectedBytes else {
+                throw ModelLoaderError.dataSizeMismatch(
+                    tensorName: name,
+                    declared: Int(dataSize),
+                    shapeSize: expectedBytes
+                )
+            }
+
+            // Read tensor data
+            let dataOffset = try readBytes(count: Int(dataSize))
+
+            // Create tensor and copy data
             let tensor = try Tensor(device: device, shape: shape)
             data.withUnsafeBytes { ptr in
-                memcpy(tensor.buffer.contents(), ptr.baseAddress! + offset, Int(dataSize))
+                memcpy(tensor.buffer.contents(), ptr.baseAddress! + dataOffset, Int(dataSize))
             }
-            offset += Int(dataSize)
 
             tensors[name] = tensor
         }
@@ -181,16 +380,16 @@ public final class BinaryModelLoader: @unchecked Sendable {
         return tensors
     }
 
-    /// Save tensors to binary file
+    /// Save tensors to binary file with CRC32 checksum
     public func save(tensors: [String: Tensor], to url: URL) throws {
-        var data = Data()
+        // First, build tensor data (without header)
+        var tensorData = Data()
 
-        // Write header
-        var header = Header(numTensors: tensors.count)
-        withUnsafeBytes(of: &header) { data.append(contentsOf: $0) }
+        // Sort keys for deterministic output
+        let sortedKeys = tensors.keys.sorted()
 
-        // Write tensors
-        for (name, tensor) in tensors {
+        for name in sortedKeys {
+            guard let tensor = tensors[name] else { continue }
             let nameData = name.data(using: .utf8) ?? Data()
 
             var entry = TensorEntry(
@@ -199,17 +398,39 @@ public final class BinaryModelLoader: @unchecked Sendable {
                 dataType: 0,
                 dataSize: UInt32(tensor.byteSize)
             )
-            withUnsafeBytes(of: &entry) { data.append(contentsOf: $0) }
+            withUnsafeBytes(of: &entry) { tensorData.append(contentsOf: $0) }
 
-            data.append(nameData)
+            tensorData.append(nameData)
 
             for dim in tensor.shape {
                 var d = UInt32(dim)
-                withUnsafeBytes(of: &d) { data.append(contentsOf: $0) }
+                withUnsafeBytes(of: &d) { tensorData.append(contentsOf: $0) }
             }
 
-            data.append(Data(bytes: tensor.buffer.contents(), count: tensor.byteSize))
+            tensorData.append(Data(bytes: tensor.buffer.contents(), count: tensor.byteSize))
         }
+
+        // Compute checksum of tensor data
+        let checksum = Self.computeCRC32(tensorData)
+
+        // Build final data with header
+        var data = Data()
+
+        // Write header with checksum
+        var magic = Header.magic
+        var version = Header.currentVersion
+        var numTensors = UInt32(tensors.count)
+        var checksumVal = checksum
+        var reserved: UInt32 = 0
+
+        withUnsafeBytes(of: &magic) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: &version) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: &numTensors) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: &checksumVal) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: &reserved) { data.append(contentsOf: $0) }
+
+        // Append tensor data
+        data.append(tensorData)
 
         try data.write(to: url)
     }

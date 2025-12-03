@@ -3,7 +3,12 @@ import Foundation
 import Accelerate
 
 /// A multi-dimensional tensor backed by Metal buffer for GPU compute
-public final class Tensor: @unchecked Sendable {
+///
+/// ## Thread Safety
+/// `Tensor` is NOT thread-safe. Concurrent reads are safe, but concurrent writes
+/// or read/write combinations require external synchronization. This follows
+/// the same model as NumPy arrays.
+public final class Tensor {
 
     /// Underlying Metal buffer
     public let buffer: MTLBuffer
@@ -56,7 +61,28 @@ public final class Tensor: @unchecked Sendable {
         }
         self.strides = strides
 
-        let byteSize = shape.reduce(1, *) * dataType.size
+        // Calculate element count with overflow checking
+        var elementCount = 1
+        for dim in shape {
+            let (newCount, overflow) = elementCount.multipliedReportingOverflow(by: dim)
+            guard !overflow else {
+                throw MetalAudioError.integerOverflow(operation: "tensor shape multiplication")
+            }
+            elementCount = newCount
+        }
+
+        // Calculate byte size with overflow checking
+        let (byteSize, byteSizeOverflow) = elementCount.multipliedReportingOverflow(by: dataType.size)
+        guard !byteSizeOverflow else {
+            throw MetalAudioError.integerOverflow(operation: "tensor byte size calculation")
+        }
+
+        // Check against device maximum buffer size
+        let maxBufferLength = device.device.maxBufferLength
+        guard byteSize <= maxBufferLength else {
+            throw MetalAudioError.bufferTooLarge(requested: byteSize, maxAllowed: maxBufferLength)
+        }
+
         guard let buffer = device.device.makeBuffer(
             length: max(byteSize, 1),
             options: device.preferredStorageMode
@@ -67,11 +93,20 @@ public final class Tensor: @unchecked Sendable {
     }
 
     /// Initialize by wrapping an existing buffer
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if buffer is too small for shape
     public init(
         buffer: MTLBuffer,
         shape: [Int],
         dataType: TensorDataType = .float32
-    ) {
+    ) throws {
+        let requiredBytes = shape.reduce(1, *) * dataType.size
+        guard buffer.length >= requiredBytes else {
+            throw MetalAudioError.bufferSizeMismatch(
+                expected: requiredBytes,
+                actual: buffer.length
+            )
+        }
+
         self.buffer = buffer
         self.shape = shape
         self.dataType = dataType
@@ -89,8 +124,14 @@ public final class Tensor: @unchecked Sendable {
     }
 
     /// Copy data from Swift array
-    public func copy(from array: [Float]) {
-        precondition(array.count == count, "Array size mismatch")
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if array size doesn't match tensor
+    public func copy(from array: [Float]) throws {
+        guard array.count == count else {
+            throw MetalAudioError.bufferSizeMismatch(
+                expected: count,
+                actual: array.count
+            )
+        }
         array.withUnsafeBufferPointer { ptr in
             memcpy(buffer.contents(), ptr.baseAddress!, byteSize)
         }
@@ -164,6 +205,7 @@ public enum TensorDataType {
 
 extension Tensor {
     /// Create a reshaped view (must have same total elements)
+    /// - Note: This creates a view sharing the same buffer - modifications affect both tensors
     public func reshaped(_ newShape: [Int]) throws -> Tensor {
         let newCount = newShape.reduce(1, *)
         guard newCount == count else {
@@ -171,20 +213,25 @@ extension Tensor {
                 "Cannot reshape \(shape) to \(newShape): element count mismatch"
             )
         }
-        return Tensor(buffer: buffer, shape: newShape, dataType: dataType)
+        // Safe to use try! here because we validated counts match above
+        return try! Tensor(buffer: buffer, shape: newShape, dataType: dataType)
     }
 
     /// Squeeze dimensions of size 1
+    /// - Note: This creates a view sharing the same buffer - modifications affect both tensors
     public func squeezed() -> Tensor {
         let newShape = shape.filter { $0 != 1 }
-        return Tensor(buffer: buffer, shape: newShape.isEmpty ? [1] : newShape, dataType: dataType)
+        // Safe to use try! here because squeezed shape has same or fewer elements
+        return try! Tensor(buffer: buffer, shape: newShape.isEmpty ? [1] : newShape, dataType: dataType)
     }
 
     /// Unsqueeze (add dimension of size 1 at index)
+    /// - Note: This creates a view sharing the same buffer - modifications affect both tensors
     public func unsqueezed(at dim: Int) -> Tensor {
         var newShape = shape
         newShape.insert(1, at: dim)
-        return Tensor(buffer: buffer, shape: newShape, dataType: dataType)
+        // Safe to use try! here because unsqueezed shape has same element count
+        return try! Tensor(buffer: buffer, shape: newShape, dataType: dataType)
     }
 
     /// Get a human-readable description
@@ -196,9 +243,19 @@ extension Tensor {
 // MARK: - Subscript Access
 
 extension Tensor {
-    /// Linear index from multi-dimensional indices
-    public func linearIndex(_ indices: [Int]) -> Int {
-        precondition(indices.count == rank, "Index rank mismatch")
+    /// Linear index from multi-dimensional indices (throws on out-of-bounds)
+    /// - Throws: `MetalAudioError.indexOutOfBounds` if indices are invalid
+    public func linearIndex(_ indices: [Int]) throws -> Int {
+        guard indices.count == rank else {
+            throw MetalAudioError.indexOutOfBounds(index: indices, shape: shape)
+        }
+
+        for i in 0..<rank {
+            guard indices[i] >= 0 && indices[i] < shape[i] else {
+                throw MetalAudioError.indexOutOfBounds(index: indices, shape: shape)
+            }
+        }
+
         var idx = 0
         for i in 0..<rank {
             idx += indices[i] * strides[i]
@@ -206,13 +263,48 @@ extension Tensor {
         return idx
     }
 
-    /// Get element at indices (Float tensors)
+    /// Linear index from multi-dimensional indices (unchecked - for performance-critical code)
+    /// - Warning: Does not validate bounds. Use only when indices are known to be valid.
+    @inline(__always)
+    public func linearIndexUnchecked(_ indices: [Int]) -> Int {
+        var idx = 0
+        for i in 0..<rank {
+            idx += indices[i] * strides[i]
+        }
+        return idx
+    }
+
+    /// Get element at indices with bounds checking (Float tensors)
+    /// - Throws: `MetalAudioError.indexOutOfBounds` if indices are invalid
+    public func get(_ indices: Int...) throws -> Float {
+        let idx = try linearIndex(indices)
+        return floatPointer[idx]
+    }
+
+    /// Set element at indices with bounds checking (Float tensors)
+    /// - Throws: `MetalAudioError.indexOutOfBounds` if indices are invalid
+    public func set(_ value: Float, at indices: Int...) throws {
+        let idx = try linearIndex(indices)
+        floatPointer[idx] = value
+        #if os(macOS)
+        if buffer.storageMode == .managed {
+            let byteOffset = idx * dataType.size
+            buffer.didModifyRange(byteOffset..<(byteOffset + dataType.size))
+        }
+        #endif
+    }
+
+    /// Get element at indices (unchecked subscript for performance)
+    /// - Warning: No bounds checking. Use `get(_:)` for safe access.
     public subscript(indices: Int...) -> Float {
         get {
-            floatPointer[linearIndex(indices)]
+            // Validate rank at minimum to prevent completely wrong access
+            assert(indices.count == rank, "Index rank mismatch: expected \(rank), got \(indices.count)")
+            return floatPointer[linearIndexUnchecked(indices)]
         }
         set {
-            floatPointer[linearIndex(indices)] = newValue
+            assert(indices.count == rank, "Index rank mismatch: expected \(rank), got \(indices.count)")
+            floatPointer[linearIndexUnchecked(indices)] = newValue
         }
     }
 }

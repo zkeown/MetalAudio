@@ -191,32 +191,77 @@ struct BiquadParams {
     float a1, a2;
 };
 
-/// Biquad filter (batch processing, parallel across samples with delay)
-/// Note: This is for offline/batch processing, not real-time sample-by-sample
-kernel void biquad_filter_batch(
+/// Biquad filter - processes multiple independent channels in parallel
+/// Each channel has its own state and processes sequentially within the channel
+/// This is the standard pattern for multi-channel audio filtering on GPU
+///
+/// Input/output layout: [channel][sample] - interleaved as [ch0_s0, ch0_s1, ..., ch1_s0, ch1_s1, ...]
+kernel void biquad_filter_multichannel(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
     constant BiquadParams& params [[buffer(2)]],
     device float2* state [[buffer(3)]],  // [z1, z2] per channel
-    constant uint& length [[buffer(4)]],
-    uint id [[thread_position_in_grid]]
+    constant uint& numChannels [[buffer(4)]],
+    constant uint& samplesPerChannel [[buffer(5)]],
+    uint channel [[thread_position_in_grid]]
 ) {
-    if (id >= length) return;
+    if (channel >= numChannels) return;
 
-    // For parallel processing, we need to handle dependencies
-    // This simplified version processes in chunks where each chunk
-    // can be parallelized after the previous chunk's state is known
+    // Each thread processes one channel sequentially
+    float z1 = state[channel].x;
+    float z2 = state[channel].y;
 
-    // Single-threaded reference (for comparison):
-    // output[id] = params.b0 * input[id] + state[0].x;
-    // state[0].x = params.b1 * input[id] - params.a1 * output[id] + state[0].y;
-    // state[0].y = params.b2 * input[id] - params.a2 * output[id];
+    uint offset = channel * samplesPerChannel;
 
-    // For GPU, we typically process multiple independent channels in parallel
-    // or use time-domain parallel IIR techniques (more complex)
+    for (uint i = 0; i < samplesPerChannel; i++) {
+        float x = input[offset + i];
 
-    // Placeholder - actual implementation would use parallel IIR algorithms
-    output[id] = input[id];  // Pass-through for now
+        // Direct Form II Transposed
+        float y = params.b0 * x + z1;
+        z1 = params.b1 * x - params.a1 * y + z2;
+        z2 = params.b2 * x - params.a2 * y;
+
+        output[offset + i] = y;
+    }
+
+    // Store updated state
+    state[channel] = float2(z1, z2);
+}
+
+/// Block-parallel biquad filter using state-space formulation
+/// Processes a block of samples, propagating state from previous block
+/// This enables some parallelism within large buffers by processing blocks independently
+/// after computing their initial state contribution
+struct BiquadBlockParams {
+    float b0, b1, b2;
+    float a1, a2;
+    uint blockSize;
+    uint numBlocks;
+};
+
+/// Pre-compute state contributions for each block
+/// This kernel computes what each block contributes to future states
+kernel void biquad_compute_block_contributions(
+    device const float* input [[buffer(0)]],
+    device float2* blockStates [[buffer(1)]],  // [2*numBlocks] - each block has in/out state
+    constant BiquadBlockParams& params [[buffer(2)]],
+    uint blockIdx [[thread_position_in_grid]]
+) {
+    if (blockIdx >= params.numBlocks) return;
+
+    uint offset = blockIdx * params.blockSize;
+    float z1 = 0.0f, z2 = 0.0f;
+
+    // Process block with zero initial state to get transfer contribution
+    for (uint i = 0; i < params.blockSize; i++) {
+        float x = input[offset + i];
+        float y = params.b0 * x + z1;
+        z1 = params.b1 * x - params.a1 * y + z2;
+        z2 = params.b2 * x - params.a2 * y;
+    }
+
+    // Store the final state this block produces with zero initial state
+    blockStates[blockIdx] = float2(z1, z2);
 }
 
 // MARK: - Spectral Processing
@@ -277,7 +322,7 @@ kernel void to_decibels(
 
 // MARK: - Overlap-Add
 
-/// Overlap-add kernel for STFT synthesis
+/// Overlap-add kernel for STFT synthesis (sequential frame processing)
 kernel void overlap_add(
     device const float* frame [[buffer(0)]],
     device float* output [[buffer(1)]],
@@ -292,10 +337,32 @@ kernel void overlap_add(
     uint outIdx = outputOffset + id;
     float w = window[id];
 
-    // Atomic add would be needed for true parallel overlap-add
-    // This version assumes sequential frame processing
+    // Non-atomic version for sequential frame processing
     output[outIdx] += frame[id] * w;
     window_sum[outIdx] += w * w;
+}
+
+/// Atomic overlap-add kernel for parallel STFT synthesis
+/// Use this when multiple frames are being processed concurrently
+kernel void overlap_add_atomic(
+    device const float* frame [[buffer(0)]],
+    device atomic_float* output [[buffer(1)]],
+    device atomic_float* window_sum [[buffer(2)]],
+    constant uint& frameSize [[buffer(3)]],
+    constant uint& outputOffset [[buffer(4)]],
+    constant float* window [[buffer(5)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= frameSize) return;
+
+    uint outIdx = outputOffset + id;
+    float w = window[id];
+    float windowed_sample = frame[id] * w;
+    float w_squared = w * w;
+
+    // Use relaxed memory order for performance - appropriate for accumulation
+    atomic_fetch_add_explicit(&output[outIdx], windowed_sample, memory_order_relaxed);
+    atomic_fetch_add_explicit(&window_sum[outIdx], w_squared, memory_order_relaxed);
 }
 
 /// Normalize by window sum

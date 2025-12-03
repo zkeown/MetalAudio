@@ -4,9 +4,9 @@ import XCTest
 
 final class BiquadFilterTests: XCTestCase {
 
-    func testLowpassFilter() {
+    func testLowpassFilter() throws {
         let filter = BiquadFilter()
-        filter.configure(
+        try filter.configure(
             type: .lowpass,
             frequency: 1000,
             sampleRate: 44100,
@@ -44,9 +44,9 @@ final class BiquadFilterTests: XCTestCase {
         XCTAssertGreaterThan(lowRMS, highRMS * 5, "Low frequency should pass, high frequency should be attenuated")
     }
 
-    func testHighpassFilter() {
+    func testHighpassFilter() throws {
         let filter = BiquadFilter()
-        filter.configure(
+        try filter.configure(
             type: .highpass,
             frequency: 5000,
             sampleRate: 44100,
@@ -89,9 +89,9 @@ final class FilterBankTests: XCTestCase {
         device = try AudioDevice()
     }
 
-    func testFilterBankCreation() {
+    func testFilterBankCreation() throws {
         let bank = FilterBank(device: device, bandCount: 10)
-        bank.configureAsEQ(
+        try bank.configureAsEQ(
             lowFreq: 20,
             highFreq: 20000,
             sampleRate: 44100
@@ -99,9 +99,9 @@ final class FilterBankTests: XCTestCase {
         // Just verify it doesn't crash
     }
 
-    func testFilterBankProcessing() {
+    func testFilterBankProcessing() throws {
         let bank = FilterBank(device: device, bandCount: 3)
-        bank.configureAsEQ(
+        try bank.configureAsEQ(
             lowFreq: 100,
             highFreq: 10000,
             sampleRate: 44100
