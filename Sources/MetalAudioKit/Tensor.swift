@@ -132,8 +132,11 @@ public final class Tensor {
                 actual: array.count
             )
         }
+        // Handle empty arrays safely (no-op, but consistent with size check above)
+        guard !array.isEmpty else { return }
         array.withUnsafeBufferPointer { ptr in
-            memcpy(buffer.contents(), ptr.baseAddress!, byteSize)
+            guard let baseAddress = ptr.baseAddress else { return }
+            memcpy(buffer.contents(), baseAddress, byteSize)
         }
         #if os(macOS)
         if buffer.storageMode == .managed {
@@ -144,9 +147,11 @@ public final class Tensor {
 
     /// Copy data to Swift array
     public func toArray() -> [Float] {
+        guard count > 0 else { return [] }
         var result = [Float](repeating: 0, count: count)
         result.withUnsafeMutableBufferPointer { ptr in
-            memcpy(ptr.baseAddress!, buffer.contents(), byteSize)
+            guard let baseAddress = ptr.baseAddress else { return }
+            memcpy(baseAddress, buffer.contents(), byteSize)
         }
         return result
     }
@@ -206,6 +211,8 @@ public enum TensorDataType {
 extension Tensor {
     /// Create a reshaped view (must have same total elements)
     /// - Note: This creates a view sharing the same buffer - modifications affect both tensors
+    /// - Throws: `MetalAudioError.invalidConfiguration` if element counts don't match,
+    ///           `MetalAudioError.bufferSizeMismatch` if buffer validation fails
     public func reshaped(_ newShape: [Int]) throws -> Tensor {
         let newCount = newShape.reduce(1, *)
         guard newCount == count else {
@@ -213,25 +220,24 @@ extension Tensor {
                 "Cannot reshape \(shape) to \(newShape): element count mismatch"
             )
         }
-        // Safe to use try! here because we validated counts match above
-        return try! Tensor(buffer: buffer, shape: newShape, dataType: dataType)
+        return try Tensor(buffer: buffer, shape: newShape, dataType: dataType)
     }
 
     /// Squeeze dimensions of size 1
     /// - Note: This creates a view sharing the same buffer - modifications affect both tensors
-    public func squeezed() -> Tensor {
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if buffer validation fails (should not happen)
+    public func squeezed() throws -> Tensor {
         let newShape = shape.filter { $0 != 1 }
-        // Safe to use try! here because squeezed shape has same or fewer elements
-        return try! Tensor(buffer: buffer, shape: newShape.isEmpty ? [1] : newShape, dataType: dataType)
+        return try Tensor(buffer: buffer, shape: newShape.isEmpty ? [1] : newShape, dataType: dataType)
     }
 
     /// Unsqueeze (add dimension of size 1 at index)
     /// - Note: This creates a view sharing the same buffer - modifications affect both tensors
-    public func unsqueezed(at dim: Int) -> Tensor {
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if buffer validation fails (should not happen)
+    public func unsqueezed(at dim: Int) throws -> Tensor {
         var newShape = shape
         newShape.insert(1, at: dim)
-        // Safe to use try! here because unsqueezed shape has same element count
-        return try! Tensor(buffer: buffer, shape: newShape, dataType: dataType)
+        return try Tensor(buffer: buffer, shape: newShape, dataType: dataType)
     }
 
     /// Get a human-readable description
@@ -306,5 +312,136 @@ extension Tensor {
             assert(indices.count == rank, "Index rank mismatch: expected \(rank), got \(indices.count)")
             floatPointer[linearIndexUnchecked(indices)] = newValue
         }
+    }
+}
+
+// MARK: - Half Precision Support
+
+extension Tensor {
+    /// Access data as Float16 pointer (for half-precision tensors)
+    public var float16Pointer: UnsafeMutablePointer<Float16> {
+        buffer.contents().assumingMemoryBound(to: Float16.self)
+    }
+
+    /// Copy Float data to half-precision tensor with conversion
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if sizes don't match
+    public func copyFromFloat(_ array: [Float]) throws {
+        guard array.count == count else {
+            throw MetalAudioError.bufferSizeMismatch(expected: count, actual: array.count)
+        }
+        guard dataType == .float16 else {
+            // If it's a float32 tensor, use regular copy
+            try copy(from: array)
+            return
+        }
+
+        // Convert float32 to float16
+        let ptr = float16Pointer
+        for i in 0..<count {
+            ptr[i] = Float16(array[i])
+        }
+
+        #if os(macOS)
+        if buffer.storageMode == .managed {
+            buffer.didModifyRange(0..<byteSize)
+        }
+        #endif
+    }
+
+    /// Copy half-precision tensor to Float array with conversion
+    public func toFloatArray() -> [Float] {
+        guard count > 0 else { return [] }
+
+        if dataType == .float32 {
+            return toArray()
+        }
+
+        // Convert float16 to float32
+        var result = [Float](repeating: 0, count: count)
+        let ptr = float16Pointer
+        for i in 0..<count {
+            result[i] = Float(ptr[i])
+        }
+        return result
+    }
+
+    /// Create a half-precision copy of this tensor
+    /// - Returns: New tensor with float16 data type containing converted values
+    public func toHalf() throws -> Tensor {
+        guard let device = device else {
+            throw MetalAudioError.deviceNotFound
+        }
+
+        let halfTensor = try Tensor(device: device, shape: shape, dataType: .float16)
+
+        if dataType == .float32 {
+            // Convert float32 -> float16
+            let srcPtr = floatPointer
+            let dstPtr = halfTensor.float16Pointer
+            for i in 0..<count {
+                dstPtr[i] = Float16(srcPtr[i])
+            }
+        } else if dataType == .float16 {
+            // Just copy
+            memcpy(halfTensor.buffer.contents(), buffer.contents(), byteSize)
+        }
+
+        #if os(macOS)
+        if halfTensor.buffer.storageMode == .managed {
+            halfTensor.buffer.didModifyRange(0..<halfTensor.byteSize)
+        }
+        #endif
+
+        return halfTensor
+    }
+
+    /// Create a float32 copy from this tensor
+    /// - Returns: New tensor with float32 data type containing converted values
+    public func toFloat() throws -> Tensor {
+        guard let device = device else {
+            throw MetalAudioError.deviceNotFound
+        }
+
+        let floatTensor = try Tensor(device: device, shape: shape, dataType: .float32)
+
+        if dataType == .float16 {
+            // Convert float16 -> float32
+            let srcPtr = float16Pointer
+            let dstPtr = floatTensor.floatPointer
+            for i in 0..<count {
+                dstPtr[i] = Float(srcPtr[i])
+            }
+        } else if dataType == .float32 {
+            // Just copy
+            memcpy(floatTensor.buffer.contents(), buffer.contents(), byteSize)
+        }
+
+        #if os(macOS)
+        if floatTensor.buffer.storageMode == .managed {
+            floatTensor.buffer.didModifyRange(0..<floatTensor.byteSize)
+        }
+        #endif
+
+        return floatTensor
+    }
+
+    /// Fill half-precision tensor with a constant value
+    public func fillHalf(_ value: Float) {
+        guard dataType == .float16 else {
+            fill(value)
+            return
+        }
+
+        let halfValue = Float16(value)
+        let ptr = float16Pointer
+        for i in 0..<count {
+            ptr[i] = halfValue
+        }
+
+        #if os(macOS)
+        if buffer.storageMode == .managed {
+            buffer.didModifyRange(0..<byteSize)
+        }
+        #endif
     }
 }

@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:MetalAudio}",
+            "name": "Debug Benchmark",
+            "target": "Benchmark",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug Benchmark"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:MetalAudio}",
+            "name": "Release Benchmark",
+            "target": "Benchmark",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release Benchmark"
+        }
+    ]
+}

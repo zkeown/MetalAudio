@@ -18,6 +18,7 @@ public enum MetalAudioError: Error, LocalizedError {
     case typeSizeMismatch(requestedBytes: Int, bufferBytes: Int)
     case gpuTimeout(TimeInterval)
     case deviceLost
+    case invalidPointer
 
     public var errorDescription: String? {
         switch self {
@@ -51,6 +52,8 @@ public enum MetalAudioError: Error, LocalizedError {
             return "GPU operation timed out after \(timeout) seconds"
         case .deviceLost:
             return "GPU device was disconnected or lost"
+        case .invalidPointer:
+            return "Invalid or null pointer provided"
         }
     }
 }
@@ -132,6 +135,18 @@ public final class AudioDevice: @unchecked Sendable {
     /// Internal storage for device availability
     private var _isDeviceAvailable: Bool = true
 
+    // MARK: - Pipeline Caching
+
+    /// Lock for thread-safe access to pipeline cache
+    private var cacheLock = os_unfair_lock()
+
+    /// Cache for compiled compute pipelines (source hash -> pipeline)
+    /// Key is hash of (source + functionName) to avoid storing large source strings
+    private var pipelineCache: [Int: MTLComputePipelineState] = [:]
+
+    /// Cache for library function pipelines (functionName -> pipeline)
+    private var libraryPipelineCache: [String: MTLComputePipelineState] = [:]
+
     /// Whether the device is currently available (thread-safe)
     public var isDeviceAvailable: Bool {
         os_unfair_lock_lock(&stateLock)
@@ -184,9 +199,21 @@ public final class AudioDevice: @unchecked Sendable {
             return false
         }
 
-        // Commit immediately - an empty command buffer is valid and completes instantly
+        // Commit and wait with timeout - avoid blocking indefinitely on hung GPU
+        let semaphore = DispatchSemaphore(value: 0)
+        commandBuffer.addCompletedHandler { _ in
+            semaphore.signal()
+        }
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
+
+        // Use a short timeout (5 seconds) - device check should be fast
+        let timeout: TimeInterval = 5.0
+        let result = semaphore.wait(timeout: .now() + timeout)
+
+        if result == .timedOut {
+            setDeviceUnavailable()
+            return false
+        }
 
         // Check if the command buffer completed successfully
         if commandBuffer.status == .error {
@@ -206,17 +233,22 @@ public final class AudioDevice: @unchecked Sendable {
     /// Internal thread-safe method to mark device unavailable and notify delegate
     private func setDeviceUnavailable() {
         var shouldNotify = false
+        var delegate: DeviceLossDelegate?
 
         os_unfair_lock_lock(&stateLock)
         if _isDeviceAvailable {
             _isDeviceAvailable = false
             shouldNotify = true
+            // Capture delegate reference while holding lock to prevent TOCTOU race
+            // where delegate is deallocated between unlock and call
+            delegate = deviceLossDelegate
         }
         os_unfair_lock_unlock(&stateLock)
 
         // Notify outside of lock to avoid potential deadlock with delegate
+        // Using captured strong reference ensures delegate won't be deallocated mid-call
         if shouldNotify {
-            deviceLossDelegate?.audioDevice(self, didLoseDevice: false)
+            delegate?.audioDevice(self, didLoseDevice: false)
         }
     }
 
@@ -249,36 +281,110 @@ public final class AudioDevice: @unchecked Sendable {
     }
 
     /// Create a compute pipeline for a named kernel function
+    ///
+    /// This method caches compiled pipelines for reuse. Subsequent calls with
+    /// the same function name return the cached pipeline without recompilation.
+    ///
     /// - Parameter functionName: Name of the Metal kernel function
     /// - Returns: Compiled compute pipeline state
     /// - Throws: `MetalAudioError.functionNotFound` if function doesn't exist,
     ///           `MetalAudioError.pipelineCreationFailed` if compilation fails
     public func makeComputePipeline(functionName: String) throws -> MTLComputePipelineState {
+        // Check cache first (thread-safe)
+        os_unfair_lock_lock(&cacheLock)
+        if let cached = libraryPipelineCache[functionName] {
+            os_unfair_lock_unlock(&cacheLock)
+            return cached
+        }
+        os_unfair_lock_unlock(&cacheLock)
+
+        // Compile pipeline
         guard let function = library.makeFunction(name: functionName) else {
             throw MetalAudioError.functionNotFound(functionName)
         }
+
+        let pipeline: MTLComputePipelineState
         do {
-            return try device.makeComputePipelineState(function: function)
+            pipeline = try device.makeComputePipelineState(function: function)
         } catch {
             throw MetalAudioError.pipelineCreationFailed(error.localizedDescription)
         }
+
+        // Store in cache (thread-safe)
+        os_unfair_lock_lock(&cacheLock)
+        libraryPipelineCache[functionName] = pipeline
+        os_unfair_lock_unlock(&cacheLock)
+
+        return pipeline
     }
 
     /// Create a compute pipeline from external source code
+    ///
+    /// This method caches compiled pipelines for reuse. Subsequent calls with
+    /// identical source code and function name return the cached pipeline without
+    /// recompilation. This is crucial for performance as shader compilation
+    /// typically takes 100-500ms.
+    ///
     /// - Parameters:
     ///   - source: Metal shader source code
     ///   - functionName: Name of the kernel function
     /// - Returns: Compiled compute pipeline state
+    /// - Throws: `MetalAudioError.functionNotFound` if function doesn't exist,
+    ///           `MetalAudioError.pipelineCreationFailed` if compilation fails
     public func makeComputePipeline(source: String, functionName: String) throws -> MTLComputePipelineState {
+        // Generate cache key from source and function name
+        var hasher = Hasher()
+        hasher.combine(source)
+        hasher.combine(functionName)
+        let cacheKey = hasher.finalize()
+
+        // Check cache first (thread-safe)
+        os_unfair_lock_lock(&cacheLock)
+        if let cached = pipelineCache[cacheKey] {
+            os_unfair_lock_unlock(&cacheLock)
+            return cached
+        }
+        os_unfair_lock_unlock(&cacheLock)
+
+        // Compile shader (expensive operation, ~100-500ms)
         let library = try device.makeLibrary(source: source, options: nil)
         guard let function = library.makeFunction(name: functionName) else {
             throw MetalAudioError.functionNotFound(functionName)
         }
+
+        let pipeline: MTLComputePipelineState
         do {
-            return try device.makeComputePipelineState(function: function)
+            pipeline = try device.makeComputePipelineState(function: function)
         } catch {
             throw MetalAudioError.pipelineCreationFailed(error.localizedDescription)
         }
+
+        // Store in cache (thread-safe)
+        os_unfair_lock_lock(&cacheLock)
+        pipelineCache[cacheKey] = pipeline
+        os_unfair_lock_unlock(&cacheLock)
+
+        return pipeline
+    }
+
+    /// Clear the pipeline cache
+    ///
+    /// Call this if you need to force recompilation of shaders (e.g., after
+    /// changing shader source). In normal operation, the cache should persist
+    /// for the lifetime of the AudioDevice.
+    public func clearPipelineCache() {
+        os_unfair_lock_lock(&cacheLock)
+        pipelineCache.removeAll()
+        libraryPipelineCache.removeAll()
+        os_unfair_lock_unlock(&cacheLock)
+    }
+
+    /// Number of cached pipelines (for debugging/diagnostics)
+    public var cachedPipelineCount: Int {
+        os_unfair_lock_lock(&cacheLock)
+        let count = pipelineCache.count + libraryPipelineCache.count
+        os_unfair_lock_unlock(&cacheLock)
+        return count
     }
 }
 

@@ -108,34 +108,9 @@ public final class ComputeContext: @unchecked Sendable {
         return result
     }
 
-    /// Wait for command buffer completion with timeout
-    /// - Parameters:
-    ///   - commandBuffer: Command buffer to wait on (must NOT be committed yet)
-    ///   - timeout: Maximum wait time in seconds
-    /// - Returns: Command buffer status after waiting
-    /// - Note: Call this BEFORE committing the command buffer. This method commits it.
-    private func commitAndWaitWithTimeout(commandBuffer: MTLCommandBuffer, timeout: TimeInterval) throws -> MTLCommandBufferStatus {
-        let semaphore = DispatchSemaphore(value: 0)
-
-        // Add completion handler BEFORE commit
-        commandBuffer.addCompletedHandler { _ in
-            semaphore.signal()
-        }
-
-        commandBuffer.commit()
-
-        let result = semaphore.wait(timeout: .now() + timeout)
-
-        if result == .timedOut {
-            return commandBuffer.status
-        }
-
-        return commandBuffer.status
-    }
-
     /// Execute a compute operation asynchronously with completion handler
     ///
-    /// - Warning: This method blocks if no command buffer slots are available.
+    /// - Warning: This method blocks up to 30 seconds if no command buffer slots are available.
     ///   For real-time audio callbacks, use `tryExecuteAsync(_:completion:)` instead.
     ///
     /// - Parameters:
@@ -145,8 +120,12 @@ public final class ComputeContext: @unchecked Sendable {
         _ encode: @escaping (MTLComputeCommandEncoder) throws -> Void,
         completion: @escaping (Error?) -> Void
     ) {
-        // Wait for a slot (blocking)
-        inFlightSemaphore.wait()
+        // Wait for a slot with timeout to prevent indefinite blocking
+        let waitResult = inFlightSemaphore.wait(timeout: .now() + Self.defaultGPUTimeout)
+        guard waitResult == .success else {
+            completion(MetalAudioError.gpuTimeout(Self.defaultGPUTimeout))
+            return
+        }
 
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             inFlightSemaphore.signal()
@@ -390,15 +369,19 @@ extension ComputeContext {
     }
 
     /// Wait on CPU for GPU to complete work up to a fence value
+    ///
+    /// - Warning: **Not real-time safe**. This method may block for up to `timeout` seconds.
+    ///   Do not call from audio render callbacks. Use fence-based async patterns instead.
+    ///
     /// - Parameters:
     ///   - fenceValue: The fence value to wait for
-    ///   - timeout: Maximum time to wait (nil = wait forever)
+    ///   - timeout: Maximum time to wait (nil = use defaultGPUTimeout)
     /// - Returns: `true` if the fence was reached, `false` if timed out
     @discardableResult
     public func waitForGPU(fenceValue: UInt64, timeout: TimeInterval? = nil) -> Bool {
         guard let event = sharedEvent else { return true }
 
-        // Check if already signaled
+        // Check if already signaled (fast path)
         if event.signaledValue >= fenceValue {
             return true
         }
@@ -411,12 +394,19 @@ extension ComputeContext {
             semaphore.signal()
         }
 
-        if let timeout = timeout {
-            return semaphore.wait(timeout: .now() + timeout) == .success
-        } else {
-            semaphore.wait()
-            return true
-        }
+        // Always use a timeout to prevent indefinite blocking
+        let effectiveTimeout = timeout ?? Self.defaultGPUTimeout
+        let result = semaphore.wait(timeout: .now() + effectiveTimeout)
+
+        // Note: If we timed out, the listener callback may still fire later.
+        // The listener is retained by the event until the notification fires or
+        // the event is deallocated. We keep 'listener' alive until this method
+        // returns to ensure the callback can safely access 'semaphore'.
+        // After return, if the callback fires later, it will signal an orphaned
+        // semaphore which is harmless.
+        _ = listener  // Keep listener alive until method returns
+
+        return result == .success
     }
 
     /// Wait on GPU for CPU to signal a fence value
@@ -481,9 +471,10 @@ extension ComputeContext {
     /// Setup triple buffering for audio callback integration
     /// - Parameters:
     ///   - bufferSize: Size in bytes for each buffer
+    /// - Note: Thread-safe. Will block if audio callbacks are currently accessing buffers.
     public func setupTripleBuffering(bufferSize: Int) throws {
-        tripleBuffer.removeAll()
-
+        // Allocate new buffers first (outside lock to avoid blocking audio callbacks during allocation)
+        var newBuffers: [MTLBuffer] = []
         for _ in 0..<3 {
             guard let buffer = device.device.makeBuffer(
                 length: bufferSize,
@@ -491,17 +482,47 @@ extension ComputeContext {
             ) else {
                 throw MetalAudioError.bufferAllocationFailed(bufferSize)
             }
-            tripleBuffer.append(buffer)
+            newBuffers.append(buffer)
         }
+
+        // Swap atomically under lock
+        os_unfair_lock_lock(&unfairLock)
+        tripleBuffer = newBuffers
+        currentWriteIndex = 0
+        os_unfair_lock_unlock(&unfairLock)
     }
 
     /// Access the current write buffer for GPU output with lock held during access
     ///
     /// This closure-based API prevents TOCTOU race conditions by ensuring the lock
-    /// is held while the buffer is being accessed. The buffer reference is only
-    /// valid within the closure scope.
+    /// is held while the buffer is being accessed.
     ///
-    /// - Parameter access: Closure to access the buffer while lock is held
+    /// - Warning: **CRITICAL**: The buffer reference is ONLY valid within the closure scope.
+    ///   Do NOT capture, store, or pass the buffer reference to async operations.
+    ///   Doing so will cause data races and undefined behavior when `setupTripleBuffering()`
+    ///   or `advanceTripleBuffer()` is called.
+    ///
+    /// - Warning: **Real-time safety**: This method acquires a lock. While `os_unfair_lock`
+    ///   is real-time safe (no priority inversion), avoid calling from audio render callbacks
+    ///   if `setupTripleBuffering()` might be called concurrently from another thread.
+    ///
+    /// ## Safe Usage
+    /// ```swift
+    /// context.withWriteBuffer { buffer in
+    ///     encoder.setBuffer(buffer, offset: 0, index: 0)  // OK - synchronous use
+    /// }
+    /// ```
+    ///
+    /// ## UNSAFE Usage (will cause crashes)
+    /// ```swift
+    /// var captured: MTLBuffer?
+    /// context.withWriteBuffer { buffer in
+    ///     captured = buffer  // UNSAFE - buffer escapes closure!
+    /// }
+    /// captured?.contents()  // CRASH - buffer may be deallocated
+    /// ```
+    ///
+    /// - Parameter access: Closure to access the buffer while lock is held. Must not escape.
     /// - Returns: Result of the access closure, or nil if buffer unavailable
     @discardableResult
     public func withWriteBuffer<T>(_ access: (MTLBuffer) -> T) -> T? {
@@ -517,7 +538,15 @@ extension ComputeContext {
     /// is held while the buffer is being accessed. Use this from audio callbacks
     /// to safely read GPU-produced data.
     ///
-    /// - Parameter access: Closure to access the buffer while lock is held
+    /// - Warning: **CRITICAL**: The buffer reference is ONLY valid within the closure scope.
+    ///   Do NOT capture, store, or pass the buffer reference to async operations.
+    ///   See `withWriteBuffer(_:)` documentation for safe/unsafe usage examples.
+    ///
+    /// - Warning: **Real-time safety**: This method acquires a lock. While `os_unfair_lock`
+    ///   is real-time safe, ensure `setupTripleBuffering()` is not called concurrently
+    ///   during audio processing to avoid blocking.
+    ///
+    /// - Parameter access: Closure to access the buffer while lock is held. Must not escape.
     /// - Returns: Result of the access closure, or nil if buffer unavailable
     @discardableResult
     public func withReadBuffer<T>(_ access: (MTLBuffer) -> T) -> T? {
@@ -537,5 +566,220 @@ extension ComputeContext {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
         currentWriteIndex = (currentWriteIndex + 1) % 3
+    }
+}
+
+// MARK: - Swift Concurrency Support
+
+@available(macOS 10.15, iOS 13.0, *)
+extension ComputeContext {
+
+    /// Execute a compute operation using Swift async/await
+    /// - Parameters:
+    ///   - timeout: Maximum time to wait for GPU completion (nil = use defaultGPUTimeout)
+    ///   - encode: Closure to encode compute commands
+    /// - Returns: Result after GPU completion
+    /// - Throws: `MetalAudioError.gpuTimeout` if timeout is exceeded
+    public func execute<T>(
+        timeout: TimeInterval? = nil,
+        _ encode: @escaping (MTLComputeCommandEncoder) throws -> T
+    ) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            do {
+                let result = try executeSync(timeout: timeout, encode)
+                continuation.resume(returning: result)
+            } catch {
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
+    /// Execute a compute operation asynchronously and return when GPU completes
+    /// - Parameter encode: Closure to encode compute commands
+    /// - Throws: Any error from encoding or GPU execution
+    public func execute(
+        _ encode: @escaping (MTLComputeCommandEncoder) throws -> Void
+    ) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            executeAsync(encode) { error in
+                if let error = error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            }
+        }
+    }
+
+    /// Execute with fence and return the fence value
+    /// - Parameter encode: Closure to encode compute commands
+    /// - Returns: Fence value for CPU synchronization
+    public func executeWithFence(
+        _ encode: @escaping (MTLComputeCommandEncoder) throws -> Void
+    ) async throws -> UInt64 {
+        try await withCheckedThrowingContinuation { continuation in
+            executeWithFence(encode) { result in
+                continuation.resume(with: result)
+            }
+        }
+    }
+}
+
+// MARK: - Async Pipeline Coordination
+
+/// A composable GPU pipeline stage
+@available(macOS 10.15, iOS 13.0, *)
+public struct GPUPipelineStage {
+    let encode: (MTLComputeCommandEncoder) throws -> Void
+
+    public init(_ encode: @escaping (MTLComputeCommandEncoder) throws -> Void) {
+        self.encode = encode
+    }
+}
+
+/// Coordinates execution of multi-stage GPU pipelines with optional parallelism
+@available(macOS 10.15, iOS 13.0, *)
+public final class AsyncPipeline {
+
+    private let context: ComputeContext
+    private var stages: [GPUPipelineStage] = []
+
+    public init(context: ComputeContext) {
+        self.context = context
+    }
+
+    /// Add a stage to the pipeline
+    @discardableResult
+    public func then(_ stage: GPUPipelineStage) -> AsyncPipeline {
+        stages.append(stage)
+        return self
+    }
+
+    /// Add a stage using a closure
+    @discardableResult
+    public func then(_ encode: @escaping (MTLComputeCommandEncoder) throws -> Void) -> AsyncPipeline {
+        stages.append(GPUPipelineStage(encode))
+        return self
+    }
+
+    /// Execute all stages in a single command buffer (most efficient)
+    /// - Parameter timeout: Maximum time to wait for GPU completion
+    public func executeSequential(timeout: TimeInterval? = nil) async throws {
+        guard !stages.isEmpty else { return }
+
+        let passes = stages.map { $0.encode }
+        try context.executeBatch(passes, timeout: timeout)
+    }
+
+    /// Execute stages in separate command buffers (allows progress tracking)
+    /// - Parameter progress: Called after each stage completes with (completed, total)
+    public func executeWithProgress(
+        progress: @escaping (Int, Int) -> Void
+    ) async throws {
+        let total = stages.count
+        for (index, stage) in stages.enumerated() {
+            try await context.execute(stage.encode)
+            progress(index + 1, total)
+        }
+    }
+
+    /// Execute and return fence value for final result synchronization
+    public func executeWithFence() async throws -> UInt64 {
+        guard !stages.isEmpty else { return 0 }
+
+        // Execute all but last as batch
+        if stages.count > 1 {
+            let allButLast = stages.dropLast().map { $0.encode }
+            try context.executeBatch(Array(allButLast))
+        }
+
+        // Execute last with fence
+        return try await context.executeWithFence(stages.last!.encode)
+    }
+
+    /// Clear all stages for reuse
+    public func reset() {
+        stages.removeAll()
+    }
+}
+
+// MARK: - Parallel Async Execution
+
+@available(macOS 10.15, iOS 13.0, *)
+extension ComputeContext {
+
+    /// Execute multiple independent operations in parallel
+    /// - Parameter operations: Array of encode closures that can run independently
+    /// - Returns: Array of results in same order as input
+    ///
+    /// Each operation gets its own command buffer, allowing true GPU parallelism
+    /// on devices that support it.
+    public func executeParallel<T>(
+        _ operations: [(MTLComputeCommandEncoder) throws -> T]
+    ) async throws -> [T] {
+        try await withThrowingTaskGroup(of: (Int, T).self) { group in
+            for (index, operation) in operations.enumerated() {
+                group.addTask {
+                    let result = try await self.execute(operation)
+                    return (index, result)
+                }
+            }
+
+            var results: [(Int, T)] = []
+            for try await result in group {
+                results.append(result)
+            }
+
+            return results.sorted { $0.0 < $1.0 }.map { $0.1 }
+        }
+    }
+
+    /// Execute multiple void operations in parallel
+    /// - Parameter operations: Array of encode closures that can run independently
+    public func executeParallel(
+        _ operations: [(MTLComputeCommandEncoder) throws -> Void]
+    ) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for operation in operations {
+                group.addTask {
+                    try await self.execute(operation)
+                }
+            }
+            try await group.waitForAll()
+        }
+    }
+
+    /// Stream processing helper - processes data in chunks with double buffering
+    /// - Parameters:
+    ///   - chunks: Number of chunks to process
+    ///   - setup: Called once before processing starts with chunk count
+    ///   - processChunk: Called for each chunk with (chunkIndex, encoder)
+    ///   - onChunkComplete: Called after each chunk completes on GPU
+    public func streamProcess(
+        chunks: Int,
+        setup: ((Int) throws -> Void)? = nil,
+        processChunk: @escaping (Int, MTLComputeCommandEncoder) throws -> Void,
+        onChunkComplete: ((Int) -> Void)? = nil
+    ) async throws {
+        try setup?(chunks)
+
+        // Process with overlap - submit next while previous executes
+        for chunkIndex in 0..<chunks {
+            try await execute { encoder in
+                try processChunk(chunkIndex, encoder)
+            }
+            onChunkComplete?(chunkIndex)
+        }
+    }
+}
+
+// MARK: - Pipeline Builder DSL
+
+@available(macOS 10.15, iOS 13.0, *)
+extension ComputeContext {
+
+    /// Create a new pipeline builder
+    public func pipeline() -> AsyncPipeline {
+        AsyncPipeline(context: self)
     }
 }

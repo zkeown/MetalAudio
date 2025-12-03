@@ -28,6 +28,11 @@ let package = Package(
             name: "MetalAudio",
             targets: ["MetalAudioKit", "MetalDSP", "MetalNN"]
         ),
+        // Benchmark executable
+        .executable(
+            name: "Benchmark",
+            targets: ["Benchmark"]
+        ),
     ],
     targets: [
         // MARK: - Core
@@ -74,6 +79,13 @@ let package = Package(
             name: "MetalNNTests",
             dependencies: ["MetalNN"],
             path: "Tests/MetalNNTests"
+        ),
+
+        // MARK: - Benchmark
+        .executableTarget(
+            name: "Benchmark",
+            dependencies: ["MetalAudioKit", "MetalDSP", "MetalNN"],
+            path: "Sources/Benchmark"
         ),
     ]
 )

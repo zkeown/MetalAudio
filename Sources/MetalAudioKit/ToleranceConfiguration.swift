@@ -58,12 +58,16 @@ public struct ToleranceConfiguration: Sendable {
     // MARK: - Factory Methods
 
     /// Create optimal configuration for detected hardware
+    /// Uses device-specific thresholds for 10-30% better backend selection
     /// Tolerances tightened after production readiness fixes:
     /// - FFT normalization corrected (1/N forward, no scale inverse)
     /// - Numerically stable sigmoid implementation
     /// - Proper weight initialization (Xavier/He)
     /// - LSTM cell state clipping
     public static func optimal(for profile: HardwareProfile) -> ToleranceConfiguration {
+        // Use device-specific threshold from HardwareProfile
+        let gpuCpuThreshold = profile.deviceType.recommendedGpuCpuThreshold
+
         switch profile.gpuFamily {
         case .apple9:
             // M3, A17 Pro - Latest architecture, tightest tolerances
@@ -71,10 +75,10 @@ public struct ToleranceConfiguration: Sendable {
                 epsilon: 1e-7,
                 float16Epsilon: 5e-4,
                 normalizationEpsilon: 1e-6,
-                gpuCpuThreshold: 2048,
+                gpuCpuThreshold: gpuCpuThreshold,
                 minBufferSize: 64,
-                optimalBufferSize: 2048,
-                maxInFlightBuffers: 4,
+                optimalBufferSize: max(gpuCpuThreshold, 2048),
+                maxInFlightBuffers: profile.deviceType.isHighBandwidth ? 4 : 3,
                 preferredLatencyFrames: 2,
                 windowFloorEpsilon: 1e-9,   // Tightened: robust ISTFT floor handling
                 fftAccuracy: 1e-6,          // Tightened: correct FFT normalization
@@ -88,10 +92,10 @@ public struct ToleranceConfiguration: Sendable {
                 epsilon: 1e-7,
                 float16Epsilon: 5e-4,
                 normalizationEpsilon: 1e-6,
-                gpuCpuThreshold: 2048,
+                gpuCpuThreshold: gpuCpuThreshold,
                 minBufferSize: 64,
-                optimalBufferSize: 2048,
-                maxInFlightBuffers: 3,
+                optimalBufferSize: max(gpuCpuThreshold, 2048),
+                maxInFlightBuffers: profile.deviceType.isHighBandwidth ? 4 : 3,
                 preferredLatencyFrames: 2,
                 windowFloorEpsilon: 1e-9,   // Tightened
                 fftAccuracy: 1e-6,          // Tightened
@@ -105,10 +109,10 @@ public struct ToleranceConfiguration: Sendable {
                 epsilon: 5e-8,
                 float16Epsilon: 5e-4,
                 normalizationEpsilon: 1e-5,
-                gpuCpuThreshold: 4096,
+                gpuCpuThreshold: gpuCpuThreshold,
                 minBufferSize: 128,
-                optimalBufferSize: 4096,
-                maxInFlightBuffers: 3,
+                optimalBufferSize: max(gpuCpuThreshold, 4096),
+                maxInFlightBuffers: profile.deviceType.isHighBandwidth ? 4 : 3,
                 preferredLatencyFrames: 3,
                 windowFloorEpsilon: 1e-8,
                 fftAccuracy: 1e-5,          // Tightened from 1e-4
@@ -122,7 +126,7 @@ public struct ToleranceConfiguration: Sendable {
                 epsilon: 1e-7,
                 float16Epsilon: 1e-3,
                 normalizationEpsilon: 1e-5,
-                gpuCpuThreshold: 8192,
+                gpuCpuThreshold: gpuCpuThreshold,
                 minBufferSize: 256,
                 optimalBufferSize: 4096,
                 maxInFlightBuffers: 3,

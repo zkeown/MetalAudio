@@ -108,6 +108,12 @@ public final class AudioBuffer {
     }
 
     /// Copy data from CPU to GPU buffer
+    ///
+    /// - Warning: **GPU Synchronization**: If the GPU is currently reading from this buffer,
+    ///   writing to it may cause data races or undefined behavior. Ensure any GPU operations
+    ///   using this buffer have completed before calling. On Apple Silicon with `storageModeShared`,
+    ///   the GPU and CPU share memory, so proper synchronization is essential.
+    ///
     /// - Parameters:
     ///   - data: Source data pointer
     ///   - size: Number of bytes to copy (must not exceed buffer size)
@@ -149,9 +155,23 @@ public final class AudioBuffer {
         #endif
     }
 
-    /// Copy data from GPU buffer to CPU
+    /// Copy data from GPU buffer to CPU (raw pointer version)
+    ///
+    /// - Warning: **Memory Safety**: This method cannot validate that the destination
+    ///   pointer is valid or has sufficient capacity. The caller is responsible for
+    ///   ensuring the destination buffer is allocated and has at least `size` bytes.
+    ///   Passing an invalid or undersized pointer will cause memory corruption.
+    ///
+    /// - Warning: **GPU Synchronization**: If the GPU recently wrote to this buffer,
+    ///   you must ensure the GPU operation has completed before calling this method.
+    ///   Use `ComputeContext.waitForGPU(fenceValue:)` or wait for command buffer
+    ///   completion before reading. On Apple Silicon with `storageModeShared`, the
+    ///   CPU may see stale cached data if you don't synchronize properly.
+    ///
+    /// For safer alternatives, use `toArray()` or `copyToCPU(_:)` with typed buffer.
+    ///
     /// - Parameters:
-    ///   - destination: Destination data pointer
+    ///   - destination: Destination data pointer (must be valid and have capacity >= size)
     ///   - size: Number of bytes to copy (must not exceed buffer size)
     /// - Throws: `MetalAudioError.bufferSizeMismatch` if size exceeds buffer capacity
     public func copyToCPU(_ destination: UnsafeMutableRawPointer, size: Int) throws {
@@ -159,6 +179,33 @@ public final class AudioBuffer {
             throw MetalAudioError.bufferSizeMismatch(expected: size, actual: byteSize)
         }
         memcpy(destination, buffer.contents(), size)
+    }
+
+    /// Copy data from GPU buffer to CPU (safe typed buffer version)
+    ///
+    /// This overload is safer than the raw pointer version because the buffer
+    /// carries its capacity, allowing validation before the copy.
+    ///
+    /// - Warning: **GPU Synchronization**: If the GPU recently wrote to this buffer,
+    ///   you must ensure the GPU operation has completed before calling this method.
+    ///   Use `ComputeContext.waitForGPU(fenceValue:)` or wait for command buffer
+    ///   completion before reading.
+    ///
+    /// - Parameters:
+    ///   - destination: Destination buffer with capacity information
+    ///   - size: Number of bytes to copy (must not exceed source or destination capacity)
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if size exceeds either buffer capacity
+    public func copyToCPU(_ destination: UnsafeMutableRawBufferPointer, size: Int) throws {
+        guard size <= byteSize else {
+            throw MetalAudioError.bufferSizeMismatch(expected: size, actual: byteSize)
+        }
+        guard size <= destination.count else {
+            throw MetalAudioError.bufferSizeMismatch(expected: size, actual: destination.count)
+        }
+        guard let destBase = destination.baseAddress else {
+            throw MetalAudioError.invalidPointer
+        }
+        memcpy(destBase, buffer.contents(), size)
     }
 
     /// Copy entire buffer to Float array

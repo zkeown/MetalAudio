@@ -54,7 +54,35 @@ swift test --filter MetalDSPTests
 
 # Run single test
 swift test --filter FFTTests/testFFTForwardInverse
+
+# Run tests with coverage
+swift test --enable-code-coverage
+
+# Generate coverage report
+BINARY=$(swift build --show-bin-path)/MetalAudioPackageTests.xctest/Contents/MacOS/MetalAudioPackageTests
+xcrun llvm-cov report "$BINARY" \
+  -instr-profile=.build/arm64-apple-macosx/debug/codecov/default.profdata \
+  -ignore-filename-regex=".build|Tests"
 ```
+
+## Test Coverage
+
+**Overall: 48% line coverage** (97 tests across 3 test suites)
+
+| File | Coverage | Notes |
+|------|----------|-------|
+| LSTM.swift | 95% | Well tested |
+| Conv1D.swift | 95% | Well tested |
+| Convolution.swift | 92% | Well tested |
+| ToleranceProvider.swift | 82% | Well tested |
+| Tensor.swift | 62% | Moderate |
+| Filters.swift | 58% | Moderate |
+| FFT.swift | 39% | Needs work |
+| AudioDevice.swift | 32% | Needs work |
+| ComputeContext.swift | 31% | Needs work |
+| Layers.swift | 28% | Needs work |
+| Model.swift | 17% | Needs work |
+| MemoryPressureObserver.swift | 0% | No tests |
 
 ## Architecture Notes
 

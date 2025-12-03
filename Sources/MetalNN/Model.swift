@@ -278,7 +278,8 @@ public final class BinaryModelLoader {
 
         func readUInt32() throws -> UInt32 {
             let readOffset = try readBytes(count: 4)
-            return data.withUnsafeBytes { $0.load(fromByteOffset: readOffset, as: UInt32.self) }
+            // Use loadUnaligned to handle non-4-byte-aligned offsets safely
+            return data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: readOffset, as: UInt32.self) }
         }
 
         // Validate header (minimum size for legacy v1)
