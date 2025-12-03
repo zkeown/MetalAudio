@@ -1,0 +1,70 @@
+# Xcode
+.DS_Store
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.xcuserstate
+*.moved-aside
+DerivedData/
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# CocoaPods
+Pods/
+
+# Carthage
+Carthage/Build/
+
+# fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+# Code coverage
+*.gcno
+*.gcda
+*.gcov
+
+# Instruments
+*.trace
+
+# Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# Model files (large binaries)
+*.bin
+*.pt
+*.pth
+*.onnx
+*.mlmodel
+*.mlmodelc
+*.mlpackage
+
+# Audio test files
+*.wav
+*.mp3
+*.aiff
+*.flac
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
