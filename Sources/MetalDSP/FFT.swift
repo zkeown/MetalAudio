@@ -1649,9 +1649,12 @@ extension FFT {
     /// Applies analysis window to each frame before FFT. Use `istft()` for reconstruction,
     /// which applies synthesis window and normalizes by window sum for COLA compliance.
     ///
+    /// ## Performance
+    /// Uses batch FFT processing for better throughput. For large audio files with many frames,
+    /// this is significantly faster than processing frames sequentially.
+    ///
     /// ## Note on Memory
-    /// Uses pre-allocated windowing buffer. Frame outputs are allocated per-frame as they
-    /// become part of the returned result. For streaming real-time STFT, consider using
+    /// Pre-allocates arrays for all frames. For streaming real-time STFT, consider using
     /// the lower-level `forward()` method with caller-managed buffers.
     ///
     /// - Parameter input: Audio samples (must have at least `config.size` samples)
@@ -1659,48 +1662,43 @@ extension FFT {
     /// - Throws: `FFTError.inputTooShort` if input has fewer than `config.size` samples
     public func stft(input: [Float]) throws -> STFTResult {
         let hopSize = config.hopSize
+        let fftSize = config.size
 
         // Throw error for input shorter than FFT size - silent empty return is misleading
-        guard input.count >= config.size else {
-            throw FFTError.inputTooShort(inputSize: input.count, requiredSize: config.size)
+        guard input.count >= fftSize else {
+            throw FFTError.inputTooShort(inputSize: input.count, requiredSize: fftSize)
         }
 
-        let frameCount = (input.count - config.size) / hopSize + 1
+        let frameCount = (input.count - fftSize) / hopSize + 1
 
-        var realFrames: [[Float]] = []
-        var imagFrames: [[Float]] = []
-        realFrames.reserveCapacity(frameCount)
-        imagFrames.reserveCapacity(frameCount)
+        // Pre-allocate windowed frames array
+        var windowedFrames = [[Float]](repeating: [Float](repeating: 0, count: fftSize), count: frameCount)
 
-        for frameIdx in 0..<frameCount {
-            let start = frameIdx * hopSize
-            var frameReal = [Float](repeating: 0, count: config.size)
-            var frameImag = [Float](repeating: 0, count: config.size)
+        // Apply window to all frames in parallel
+        input.withUnsafeBufferPointer { inputPtr in
+            guard let baseAddress = inputPtr.baseAddress else { return }
 
-            // Apply analysis window to this frame using pre-allocated buffer
-            input.withUnsafeBufferPointer { inputPtr in
-                guard let baseAddress = inputPtr.baseAddress else { return }
+            DispatchQueue.concurrentPerform(iterations: frameCount) { frameIdx in
+                let start = frameIdx * hopSize
+                var windowedFrame = [Float](repeating: 0, count: fftSize)
+
+                // Apply analysis window
                 vDSP_vmul(
                     baseAddress + start, 1,
                     windowBuffer, 1,
-                    &workWindowedFrame, 1,
-                    vDSP_Length(config.size)
+                    &windowedFrame, 1,
+                    vDSP_Length(fftSize)
                 )
-            }
 
-            // FFT the windowed frame
-            workWindowedFrame.withUnsafeBufferPointer { ptr in
-                guard let baseAddress = ptr.baseAddress else { return }
-                forward(
-                    input: baseAddress,
-                    outputReal: &frameReal,
-                    outputImag: &frameImag
-                )
+                windowedFrames[frameIdx] = windowedFrame
             }
-
-            realFrames.append(frameReal)
-            imagFrames.append(frameImag)
         }
+
+        // Batch FFT all frames
+        var realFrames = [[Float]](repeating: [Float](repeating: 0, count: fftSize), count: frameCount)
+        var imagFrames = [[Float]](repeating: [Float](repeating: 0, count: fftSize), count: frameCount)
+
+        try forwardBatch(inputs: windowedFrames, outputsReal: &realFrames, outputsImag: &imagFrames)
 
         return STFTResult(real: realFrames, imag: imagFrames)
     }
@@ -1920,41 +1918,123 @@ extension FFT {
         // Lock released by defer
     }
 
-    /// Inverse Short-Time Fourier Transform
-    /// - Parameter stft: STFT result
-    /// - Returns: Reconstructed audio samples
-    public func istft(stft: STFTResult) -> [Float] {
-        let hopSize = config.hopSize
-        let outputLength = (stft.frameCount - 1) * hopSize + config.size
+    /// Perform batch inverse FFT on multiple inputs
+    ///
+    /// Uses parallel vDSP for CPU batch processing. Each inverse FFT is normalized by 1/N.
+    ///
+    /// - Parameters:
+    ///   - inputsReal: Array of real parts (each of size `config.size`)
+    ///   - inputsImag: Array of imaginary parts (each of size `config.size`)
+    ///   - outputs: Array of output buffers for time-domain results
+    public func inverseBatch(
+        inputsReal: [[Float]],
+        inputsImag: [[Float]],
+        outputs: inout [[Float]]
+    ) throws {
+        let batchSize = inputsReal.count
+        guard batchSize > 0 else { return }
+        guard inputsImag.count == batchSize else { return }
 
-        var output = [Float](repeating: 0, count: outputLength)
-        var windowSum = [Float](repeating: 0, count: outputLength)
+        // Ensure outputs are properly sized
+        if outputs.count != batchSize {
+            outputs = [[Float]](repeating: [Float](repeating: 0, count: config.size), count: batchSize)
+        }
 
-        for frameIdx in 0..<stft.frameCount {
-            var frame = [Float](repeating: 0, count: config.size)
-            let start = frameIdx * hopSize
+        // Use parallel vDSP for CPU batch processing
+        let scale = Float(1.0 / Float(config.size))
 
-            // Safely handle empty frames (should not happen with valid STFT result)
-            guard !stft.real[frameIdx].isEmpty, !stft.imag[frameIdx].isEmpty else {
-                continue
-            }
+        DispatchQueue.concurrentPerform(iterations: batchSize) { idx in
+            var outBuffer = [Float](repeating: 0, count: config.size)
+            var outImag = [Float](repeating: 0, count: config.size)
 
-            stft.real[frameIdx].withUnsafeBufferPointer { realPtr in
-                stft.imag[frameIdx].withUnsafeBufferPointer { imagPtr in
+            inputsReal[idx].withUnsafeBufferPointer { realPtr in
+                inputsImag[idx].withUnsafeBufferPointer { imagPtr in
                     guard let realBase = realPtr.baseAddress,
-                          let imagBase = imagPtr.baseAddress else { return }
-                    inverse(
-                        inputReal: realBase,
-                        inputImag: imagBase,
-                        output: &frame
+                          let imagBase = imagPtr.baseAddress,
+                          let setup = fftSetup else { return }
+
+                    vDSP_DFT_Execute(
+                        setup,
+                        realBase, imagBase,
+                        &outBuffer, &outImag
                     )
                 }
             }
 
-            // Overlap-add with window
-            for i in 0..<config.size {
-                output[start + i] += frame[i] * windowBuffer[i]
-                windowSum[start + i] += windowBuffer[i] * windowBuffer[i]
+            // Normalize by 1/N
+            var s = scale
+            vDSP_vsmul(outBuffer, 1, &s, &outBuffer, 1, vDSP_Length(config.size))
+
+            // Store result (thread-safe: each index is unique)
+            outputs[idx] = outBuffer
+        }
+    }
+
+    /// Inverse Short-Time Fourier Transform
+    ///
+    /// ## Performance
+    /// Uses batch inverse FFT processing for better throughput. For large STFT results
+    /// with many frames, this is significantly faster than processing frames sequentially.
+    ///
+    /// - Parameter stft: STFT result
+    /// - Returns: Reconstructed audio samples
+    public func istft(stft: STFTResult) -> [Float] {
+        let hopSize = config.hopSize
+        let fftSize = config.size
+        let frameCount = stft.frameCount
+        let outputLength = (frameCount - 1) * hopSize + fftSize
+
+        guard frameCount > 0 else { return [] }
+
+        // Filter out empty frames (should not happen with valid STFT result)
+        var validReal: [[Float]] = []
+        var validImag: [[Float]] = []
+        var validIndices: [Int] = []
+
+        for frameIdx in 0..<frameCount {
+            if !stft.real[frameIdx].isEmpty && !stft.imag[frameIdx].isEmpty {
+                validReal.append(stft.real[frameIdx])
+                validImag.append(stft.imag[frameIdx])
+                validIndices.append(frameIdx)
+            }
+        }
+
+        guard !validReal.isEmpty else { return [Float](repeating: 0, count: outputLength) }
+
+        // Batch inverse FFT all valid frames
+        var frames = [[Float]](repeating: [Float](repeating: 0, count: fftSize), count: validReal.count)
+        try? inverseBatch(inputsReal: validReal, inputsImag: validImag, outputs: &frames)
+
+        // Overlap-add with window (sequential due to overlapping writes, but vectorized per frame)
+        var output = [Float](repeating: 0, count: outputLength)
+        var windowSum = [Float](repeating: 0, count: outputLength)
+
+        // Pre-compute window squared (constant for all frames)
+        var windowSquared = [Float](repeating: 0, count: fftSize)
+        vDSP_vsq(windowBuffer, 1, &windowSquared, 1, vDSP_Length(fftSize))
+
+        // Pre-allocate windowed frame buffer
+        var windowedFrame = [Float](repeating: 0, count: fftSize)
+
+        for (batchIdx, frameIdx) in validIndices.enumerated() {
+            let start = frameIdx * hopSize
+
+            // Apply window to frame: windowedFrame = frame * window
+            frames[batchIdx].withUnsafeBufferPointer { framePtr in
+                vDSP_vmul(framePtr.baseAddress!, 1, windowBuffer, 1, &windowedFrame, 1, vDSP_Length(fftSize))
+            }
+
+            // Overlap-add using vDSP_vadd
+            output.withUnsafeMutableBufferPointer { outPtr in
+                windowedFrame.withUnsafeBufferPointer { winPtr in
+                    vDSP_vadd(outPtr.baseAddress! + start, 1, winPtr.baseAddress!, 1, outPtr.baseAddress! + start, 1, vDSP_Length(fftSize))
+                }
+            }
+
+            windowSum.withUnsafeMutableBufferPointer { sumPtr in
+                windowSquared.withUnsafeBufferPointer { sqPtr in
+                    vDSP_vadd(sumPtr.baseAddress! + start, 1, sqPtr.baseAddress!, 1, sumPtr.baseAddress! + start, 1, vDSP_Length(fftSize))
+                }
             }
         }
 
@@ -1967,11 +2047,16 @@ extension FFT {
         // If misconfigured (zero or negative), fall back to a safe default
         let configuredFloor = ToleranceProvider.shared.tolerances.windowFloorEpsilon
         let windowFloor = configuredFloor > 0 ? configuredFloor : Float(1e-6)
-        for i in 0..<outputLength {
-            // Use regularization instead of hard threshold to prevent click artifacts
-            // This smoothly attenuates samples where window coverage is poor
-            let normalizer = max(windowSum[i], windowFloor)
-            output[i] /= normalizer
+
+        // Vectorized: clamp window sum to minimum floor value and divide
+        windowSum.withUnsafeMutableBufferPointer { sumPtr in
+            output.withUnsafeMutableBufferPointer { outPtr in
+                var floorVal = windowFloor
+                // Clamp to floor: sum[i] = max(sum[i], floor)
+                vDSP_vthr(sumPtr.baseAddress!, 1, &floorVal, sumPtr.baseAddress!, 1, vDSP_Length(outputLength))
+                // Divide: out[i] = out[i] / sum[i]
+                vDSP_vdiv(sumPtr.baseAddress!, 1, outPtr.baseAddress!, 1, outPtr.baseAddress!, 1, vDSP_Length(outputLength))
+            }
         }
 
         return output

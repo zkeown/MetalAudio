@@ -916,3 +916,56 @@ extension AudioBufferPool: MemoryPressureResponder {
         }
     }
 }
+
+// MARK: - Memory Budget Support
+
+extension AudioBufferPool: MemoryBudgetable {
+
+    /// Bytes per buffer in this pool
+    public var bytesPerBuffer: Int {
+        sampleCount * channelCount * format.bytesPerSample
+    }
+
+    /// Current memory usage (available buffers only)
+    public var currentMemoryUsage: Int {
+        availableCount * bytesPerBuffer
+    }
+
+    /// Memory budget storage
+    private static var budgets: [ObjectIdentifier: Int] = [:]
+    private static var budgetLock = os_unfair_lock()
+
+    /// Set memory budget for this pool
+    ///
+    /// When set, the pool will automatically shrink if memory exceeds budget.
+    /// - Parameter bytes: Maximum bytes for pool buffers, or nil to remove constraint
+    public func setMemoryBudget(_ bytes: Int?) {
+        let id = ObjectIdentifier(self)
+
+        os_unfair_lock_lock(&Self.budgetLock)
+        defer { os_unfair_lock_unlock(&Self.budgetLock) }
+
+        if let bytes = bytes {
+            Self.budgets[id] = bytes
+
+            // Calculate target buffer count that fits in budget
+            let perBuffer = bytesPerBuffer
+            let targetCount = bytes / max(1, perBuffer)
+
+            // Shrink if over budget
+            if availableCount > targetCount {
+                shrinkAvailable(to: targetCount)
+            }
+        } else {
+            Self.budgets.removeValue(forKey: id)
+        }
+    }
+
+    /// Current memory budget, if set
+    public var memoryBudget: Int? {
+        let id = ObjectIdentifier(self)
+        os_unfair_lock_lock(&Self.budgetLock)
+        defer { os_unfair_lock_unlock(&Self.budgetLock) }
+        return Self.budgets[id]
+    }
+}

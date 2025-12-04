@@ -112,6 +112,18 @@ func printCSV() {
         let safeOperation = r.operation.replacingOccurrences(of: ",", with: ";")
         print("\(r.category),\(safeOperation),\(r.iterations),\(String(format: "%.2f", r.totalMs)),\(String(format: "%.2f", r.avgUs)),\(throughputStr),\(extraStr)")
     }
+
+    // Memory results
+    if !memoryBenchmarkResults.isEmpty {
+        print("")
+        print("# Memory Benchmarks")
+        print("category,operation,iterations,total_ms,avg_us,mem_delta_mb,peak_gpu_mb,peak_process_mb,leak_detected,warnings")
+        for r in memoryBenchmarkResults {
+            let safeOperation = r.operation.replacingOccurrences(of: ",", with: ";")
+            let warningsStr = r.warnings.map { $0.description }.joined(separator: "; ")
+            print("\(r.category),\(safeOperation),\(r.iterations),\(String(format: "%.2f", r.totalMs)),\(String(format: "%.2f", r.avgUs)),\(String(format: "%.2f", r.memoryDeltaMB)),\(String(format: "%.2f", r.peakGPUMB)),\(String(format: "%.2f", r.peakProcessMB)),\(r.leakDetected),\(warningsStr)")
+        }
+    }
 }
 
 if verboseOutput {
@@ -123,12 +135,24 @@ if verboseOutput {
 
 let device = try! AudioDevice()
 
+// Initialize memory tracker if memory mode enabled
+if memoryMode || memoryOnlyMode {
+    memoryTracker = MemoryTracker(device: device.device)
+}
+
 if verboseOutput {
     print("GPU: \(device.name)")
     print("Max Threads/Threadgroup: \(device.maxThreadsPerThreadgroup)")
     print("Unified Memory: \(device.hasUnifiedMemory)")
+    if memoryMode || memoryOnlyMode {
+        print("Memory Tracking: Enabled")
+    }
     print("")
 }
+
+// MARK: - Performance Benchmarks (skipped in --memory-only mode)
+
+if !memoryOnlyMode {
 
 // MARK: - FFT Benchmarks (Accelerate)
 
@@ -285,6 +309,101 @@ for size in crossoverSizes {
 if verboseOutput {
     print("\n  Recommendation: Use vDSP for single FFTs (always faster)")
     print("                  Use GPU/MPSGraph only for batch operations")
+}
+
+// MARK: - Convolution Mode Crossover Analysis
+
+if verboseOutput { print("\n--- Conv: Direct vs FFT Crossover Analysis ---") }
+
+// Test same configurations with both direct and FFT modes to find crossover point
+let crossoverConfigs: [(input: Int, kernel: Int)] = [
+    // Small kernels - direct should win
+    (2048, 128),
+    (4096, 256),
+    // Medium-large kernels
+    (4096, 2048),
+    (8192, 4096),
+    // Very large kernels - find where FFT wins
+    (16384, 8192),
+    (16384, 16384),
+    (32768, 8192),
+    (32768, 16384),
+    (32768, 32768),
+]
+
+struct ConvCrossoverResult {
+    let inputLen: Int
+    let kernelLen: Int
+    let directUs: Double
+    let fftUs: Double
+    var speedup: Double { directUs / fftUs }
+    var winner: String { fftUs < directUs ? "FFT" : "Direct" }
+}
+
+var convCrossoverResults: [ConvCrossoverResult] = []
+
+for cfg in crossoverConfigs {
+    let input = (0..<cfg.input).map { Float(sin(Double($0) * 0.1)) }
+    let kernel = [Float](repeating: 1.0 / Float(cfg.kernel), count: cfg.kernel)
+
+    // Adjust iterations based on problem size
+    let problemSize = cfg.input + cfg.kernel
+    let baseIterations = problemSize > 32768 ? 20 : (problemSize > 16384 ? 50 : 100)
+
+    // Direct mode
+    let convDirect = Convolution(device: device, mode: .direct)
+    try! convDirect.setKernel(kernel)
+    var outputDirect = [Float](repeating: 0, count: cfg.input + cfg.kernel - 1)
+
+    // Warm up
+    try! convDirect.process(input: input, output: &outputDirect)
+
+    let (_, directUs) = measureTime(baseIterations) {
+        try! convDirect.process(input: input, output: &outputDirect)
+    }
+
+    // FFT mode
+    let convFFT = Convolution(device: device, mode: .fft)
+    try! convFFT.setKernel(kernel, expectedInputSize: cfg.input)
+    var outputFFT = [Float](repeating: 0, count: cfg.input + cfg.kernel - 1)
+
+    // Warm up
+    try! convFFT.process(input: input, output: &outputFFT)
+
+    let (_, fftUs) = measureTime(baseIterations) {
+        try! convFFT.process(input: input, output: &outputFFT)
+    }
+
+    let result = ConvCrossoverResult(inputLen: cfg.input, kernelLen: cfg.kernel, directUs: directUs, fftUs: fftUs)
+    convCrossoverResults.append(result)
+
+    recordResult(category: "Conv-Crossover", operation: "in=\(cfg.input) k=\(cfg.kernel)",
+                 iterations: baseIterations * 2, totalMs: 0, avgUs: min(directUs, fftUs),
+                 extra: "\(result.winner) (\(String(format: "%.1fx", result.speedup)))")
+
+    if verboseOutput {
+        let marker = result.winner == "FFT" ? "→" : " "
+        print("  \(marker) in=\(String(format: "%5d", cfg.input)) k=\(String(format: "%4d", cfg.kernel)): Direct=\(String(format: "%7.1f", directUs))µs  FFT=\(String(format: "%7.1f", fftUs))µs  \(result.winner) (\(String(format: "%.1fx", result.speedup)))")
+    }
+}
+
+// Summarize crossover findings
+if verboseOutput {
+    let fftWins = convCrossoverResults.filter { $0.winner == "FFT" }
+    if let firstFFTWin = fftWins.first {
+        print("\n  Crossover: FFT starts winning at kernel size ~\(firstFFTWin.kernelLen) (input=\(firstFFTWin.inputLen))")
+    }
+
+    // Calculate ratio threshold
+    let directWins = convCrossoverResults.filter { $0.winner == "Direct" }
+    if !directWins.isEmpty && !fftWins.isEmpty {
+        // Find the kernel/input ratio where FFT starts winning
+        let ratios = convCrossoverResults.map { (Double($0.kernelLen) / Double($0.inputLen), $0.winner) }
+        let fftRatios = ratios.filter { $0.1 == "FFT" }.map { $0.0 }
+        if let minFFTRatio = fftRatios.min() {
+            print("  Rule of thumb: Use FFT when kernel/input ratio > \(String(format: "%.2f", minFFTRatio)) (kernel > \(String(format: "%.0f", minFFTRatio * 100))% of input)")
+        }
+    }
 }
 
 // MARK: - Convolution Benchmarks
@@ -814,6 +933,153 @@ for cfg in gruConfigs {
     }
 }
 
+// MARK: - BNNS Graph Comparison (macOS 15+ / iOS 18+)
+
+if #available(macOS 15.0, iOS 18.0, *) {
+    if verboseOutput { print("\n--- BNNS Graph vs Metal NN Comparison ---") }
+
+    // Check for test model (relative to executable or in source tree)
+    let possiblePaths = [
+        "TestModels/simple_lstm.mlmodelc",
+        "../../../TestModels/simple_lstm.mlmodelc",  // From .build/debug
+        "simple_lstm.mlmodelc"
+    ]
+    let testModelPath = possiblePaths.map { URL(fileURLWithPath: $0) }
+        .first { FileManager.default.fileExists(atPath: $0.path) }
+        ?? URL(fileURLWithPath: "TestModels/simple_lstm.mlmodelc")
+    let modelExists = FileManager.default.fileExists(atPath: testModelPath.path)
+
+    if modelExists {
+        // Run BNNS Graph benchmark
+        do {
+            let bnnsInference = try BNNSInference(modelPath: testModelPath, singleThreaded: true)
+
+            // Benchmark setup - match LSTM 128→256 config
+            let inputSize = 128 * 100  // 100 timesteps, 128 features
+            let outputSize = 256 * 100
+            var input = [Float](repeating: 0, count: inputSize)
+            var output = [Float](repeating: 0, count: outputSize)
+            for i in 0..<inputSize { input[i] = Float.random(in: -1...1) }
+
+            // Warm up and verify execution
+            var errorCode: Int32 = 0
+            input.withUnsafeBufferPointer { inPtr in
+                output.withUnsafeMutableBufferPointer { outPtr in
+                    errorCode = bnnsInference.predictWithErrorCode(
+                        input: inPtr.baseAddress!,
+                        output: outPtr.baseAddress!,
+                        inputSize: inputSize,
+                        outputSize: outputSize
+                    )
+                }
+            }
+            let warmupSuccess = errorCode == 0
+
+            // Check if output was actually modified (sanity check)
+            let outputNonZero = output.contains { $0 != 0 }
+
+            if !warmupSuccess {
+                if verboseOutput {
+                    print("  BNNS Graph: predict() returned error code \(errorCode)")
+                    print("  Workspace size: \(bnnsInference.workspaceMemoryUsage) bytes")
+                    print("  Argument count: \(bnnsInference.debugArgumentCount)")
+                    print("  Input position: \(bnnsInference.debugInputPosition)")
+                    print("  Output position: \(bnnsInference.debugOutputPosition)")
+                    print("  Input size: \(inputSize) floats, Output size: \(outputSize) floats")
+                }
+                recordResult(category: "BNNS-Graph", operation: "LSTM 128→256 seq=100",
+                            iterations: 0, totalMs: 0, avgUs: 0, extra: "Error \(errorCode)")
+            } else if !outputNonZero {
+                if verboseOutput {
+                    print("  BNNS Graph: Output unchanged (all zeros) - model may not be running correctly")
+                }
+                recordResult(category: "BNNS-Graph", operation: "LSTM 128→256 seq=100",
+                            iterations: 0, totalMs: 0, avgUs: 0, extra: "Output unchanged")
+            } else {
+                // Benchmark BNNS Graph
+                let bnnsIterations = adjustedIterations(100)
+                var successCount = 0
+                let (_, bnnsUs) = measureTime(bnnsIterations) {
+                    input.withUnsafeBufferPointer { inPtr in
+                        output.withUnsafeMutableBufferPointer { outPtr in
+                            if bnnsInference.predict(
+                                input: inPtr.baseAddress!,
+                                output: outPtr.baseAddress!,
+                                inputSize: inputSize,
+                                outputSize: outputSize
+                            ) {
+                                successCount += 1
+                            }
+                        }
+                    }
+                }
+
+                recordResult(category: "BNNS-Graph", operation: "LSTM 128→256 seq=100",
+                            iterations: bnnsIterations, totalMs: bnnsUs * Double(bnnsIterations) / 1000.0,
+                            avgUs: bnnsUs)
+
+                // Also run Metal LSTM for direct comparison
+                let metalLstm = try! LSTM(device: device, inputSize: 128, hiddenSize: 256, numLayers: 2)
+                let metalInput = try! Tensor(device: device, shape: [100, 128])
+                let metalOutput = try! Tensor(device: device, shape: [100, 256])  // seq_len x hidden_size
+                var metalInputData = [Float](repeating: 0, count: 100 * 128)
+                for i in 0..<metalInputData.count { metalInputData[i] = Float.random(in: -1...1) }
+                try! metalInput.copy(from: metalInputData)
+
+                let metalLstmContext = try! ComputeContext(device: device)
+
+                // Warmup Metal
+                try! metalLstmContext.executeSync { encoder in
+                    try metalLstm.forward(input: metalInput, output: metalOutput, encoder: encoder)
+                }
+
+                let metalIterations = adjustedIterations(20)
+                let (_, metalUs) = measureTime(metalIterations) {
+                    try! metalLstmContext.executeSync { encoder in
+                        try! metalLstm.forward(input: metalInput, output: metalOutput, encoder: encoder)
+                    }
+                }
+
+                if verboseOutput {
+                    print("  BNNS Graph LSTM: \(String(format: "%8.1f", bnnsUs)) µs (success: \(successCount)/\(bnnsIterations))")
+                    print("  Metal LSTM:      \(String(format: "%8.1f", metalUs)) µs")
+                    if bnnsUs > 0 {
+                        let speedup = metalUs / bnnsUs
+                        print("  Speedup:         \(String(format: "%.1fx", speedup)) (BNNS vs Metal)")
+                    }
+                    print("  Output sample:   [\(String(format: "%.4f", output[0])), \(String(format: "%.4f", output[1])), ...]")
+                    if bnnsInference.hasValidShapes {
+                        print("  Queried shapes:  in=\(bnnsInference.inputShape) out=\(bnnsInference.outputShape)")
+                    }
+                }
+            }
+        } catch {
+            if verboseOutput {
+                print("  BNNS Graph error: \(error)")
+            }
+        }
+    } else {
+        if verboseOutput {
+            print("  No test model found at: \(testModelPath.path)")
+            print("  To create a test model:")
+            print("    1. pip install coremltools torch")
+            print("    2. Create LSTM in PyTorch, convert with coremltools")
+            print("    3. Compile: xcrun coremlcompiler compile model.mlpackage TestModels/")
+            print("")
+            print("  Expected BNNS Graph performance (Apple WWDC 2024):")
+            print("    - 2x faster than legacy BNNS kernels")
+            print("    - Zero runtime allocations")
+            print("    - Single-threaded for audio safety")
+        }
+        recordResult(category: "BNNS-Graph", operation: "No model", iterations: 0, totalMs: 0, avgUs: 0, extra: "See TestModels/README.md")
+    }
+} else {
+    if verboseOutput {
+        print("\n--- BNNS Graph ---")
+        print("  Requires macOS 15+ / iOS 18+ (WWDC 2024 API)")
+    }
+}
+
 // MARK: - STFT Benchmarks
 
 if verboseOutput { print("\n--- STFT (Short-Time Fourier Transform) ---") }
@@ -842,6 +1108,54 @@ for cfg in stftConfigs {
     recordResult(category: "STFT", operation: cfg.name, iterations: iterations, totalMs: totalMs, avgUs: avgUs, throughput: framesPerSec, extra: "\(result.real.count) frames")
     if verboseOutput {
         print("  \(cfg.name): \(String(format: "%7.1f", avgUs)) µs (\(result.real.count) frames, \(String(format: "%.0f", framesPerSec)) frames/sec)")
+    }
+}
+
+// MARK: - STFT/iSTFT Round-Trip Benchmarks
+
+if verboseOutput { print("\n--- STFT/iSTFT Round-Trip (Batch Processing) ---") }
+
+let roundTripConfigs: [(size: Int, hop: Int, inputLen: Int, name: String)] = [
+    (1024, 256, 16384, "1024/256 in=16K"),
+    (2048, 512, 65536, "2048/512 in=64K"),
+    (4096, 1024, 131072, "4096/1024 in=128K"),
+]
+
+for cfg in roundTripConfigs {
+    let fft = try! FFT(device: device, config: FFT.Config(size: cfg.size, windowType: .hann, hopSize: cfg.hop))
+    let input = (0..<cfg.inputLen).map { Float(sin(Double($0) * 0.1)) }
+
+    // Warm up
+    let stftResult = try! fft.stft(input: input)
+    _ = fft.istft(stft: stftResult)
+
+    // STFT benchmark
+    let stftIterations = 30
+    let (_, stftUs) = measureTime(stftIterations) {
+        _ = try! fft.stft(input: input)
+    }
+
+    // iSTFT benchmark
+    let (_, istftUs) = measureTime(stftIterations) {
+        _ = fft.istft(stft: stftResult)
+    }
+
+    // Round-trip benchmark
+    let (_, roundTripUs) = measureTime(stftIterations) {
+        let stft = try! fft.stft(input: input)
+        _ = fft.istft(stft: stft)
+    }
+
+    let frameCount = stftResult.real.count
+    recordResult(category: "STFT-Batch", operation: cfg.name, iterations: stftIterations, totalMs: stftUs * Double(stftIterations) / 1000.0, avgUs: stftUs, extra: "\(frameCount) frames")
+    recordResult(category: "iSTFT-Batch", operation: cfg.name, iterations: stftIterations, totalMs: istftUs * Double(stftIterations) / 1000.0, avgUs: istftUs, extra: "\(frameCount) frames")
+    recordResult(category: "RoundTrip", operation: cfg.name, iterations: stftIterations, totalMs: roundTripUs * Double(stftIterations) / 1000.0, avgUs: roundTripUs)
+
+    if verboseOutput {
+        print("  \(cfg.name) (\(frameCount) frames):")
+        print("    STFT:      \(String(format: "%7.1f", stftUs)) µs")
+        print("    iSTFT:     \(String(format: "%7.1f", istftUs)) µs")
+        print("    RoundTrip: \(String(format: "%7.1f", roundTripUs)) µs")
     }
 }
 
@@ -970,14 +1284,33 @@ if verboseOutput { print("\n--- Contention Tests (Multi-threaded) ---") }
 
 let threadCounts = [2, 4, 8]
 
-// Partitioned Convolution Contention
-if verboseOutput { print("\n  Partitioned Convolution:") }
+// Partitioned Convolution Contention - DIAGNOSTIC VERSION
+// Investigating the anomalous negative overhead
+if verboseOutput { print("\n  Partitioned Convolution (Contention Analysis):") }
+
+let irLength = 16384
+let inputLength = 2048
+let blockSize = 512
+let baseInput = (0..<inputLength).map { Float(sin(Double($0) * 0.1)) }
+
+// STEP 1: Measure baseline BEFORE any concurrent work (cold state)
+let baselineConv = Convolution(device: device, mode: .partitioned(blockSize: blockSize))
+try! baselineConv.setKernel([Float](repeating: 1.0 / Float(irLength), count: irLength))
+var baselineOutput = [Float](repeating: 0, count: inputLength + irLength - 1)
+
+// Warm up
+try! baselineConv.process(input: baseInput, output: &baselineOutput)
+baselineConv.reset()
+
+let (_, baselineSingleUs) = measureTime(50) {
+    try! baselineConv.process(input: baseInput, output: &baselineOutput)
+}
+
+if verboseOutput {
+    print("    Baseline (cold): \(String(format: "%.1f", baselineSingleUs))µs/op")
+}
 
 for threadCount in threadCounts {
-    let irLength = 16384
-    let inputLength = 2048
-    let blockSize = 512
-
     // Create separate instances per thread
     var convolutions: [Convolution] = []
     for _ in 0..<threadCount {
@@ -987,15 +1320,20 @@ for threadCount in threadCounts {
         convolutions.append(conv)
     }
 
-    let input = (0..<inputLength).map { Float(sin(Double($0) * 0.1)) }
     var outputs = [[Float]](repeating: [Float](repeating: 0, count: inputLength + irLength - 1), count: threadCount)
+
+    // Warm up all instances
+    for idx in 0..<threadCount {
+        try! convolutions[idx].process(input: baseInput, output: &outputs[idx])
+        convolutions[idx].reset()
+    }
 
     let iterations = 50
     let start = DispatchTime.now()
 
     for _ in 0..<iterations {
         DispatchQueue.concurrentPerform(iterations: threadCount) { idx in
-            try! convolutions[idx].process(input: input, output: &outputs[idx])
+            try! convolutions[idx].process(input: baseInput, output: &outputs[idx])
         }
     }
 
@@ -1003,19 +1341,32 @@ for threadCount in threadCounts {
     let totalMs = Double(end.uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
     let avgUs = totalMs * 1000 / Double(iterations)
 
-    // Get single-threaded baseline for comparison
-    let singleConv = Convolution(device: device, mode: .partitioned(blockSize: blockSize))
-    try! singleConv.setKernel([Float](repeating: 1.0 / Float(irLength), count: irLength))
-    var singleOutput = [Float](repeating: 0, count: inputLength + irLength - 1)
-    let (_, singleUs) = measureTime(iterations) {
-        try! singleConv.process(input: input, output: &singleOutput)
+    // STEP 2: Measure single-threaded AFTER concurrent (warm/thermal state)
+    let warmConv = Convolution(device: device, mode: .partitioned(blockSize: blockSize))
+    try! warmConv.setKernel([Float](repeating: 1.0 / Float(irLength), count: irLength))
+    var warmOutput = [Float](repeating: 0, count: inputLength + irLength - 1)
+    try! warmConv.process(input: baseInput, output: &warmOutput) // warm up
+    warmConv.reset()
+    let (_, singleUsAfter) = measureTime(iterations) {
+        try! warmConv.process(input: baseInput, output: &warmOutput)
     }
 
-    let overhead = (avgUs / Double(threadCount)) / singleUs
-    recordResult(category: "Contention-PartConv", operation: "\(threadCount) threads", iterations: iterations * threadCount, totalMs: totalMs, avgUs: avgUs, extra: String(format: "%.0f%% overhead", (overhead - 1) * 100))
+    // Calculate overhead both ways
+    let perThreadUs = avgUs / Double(threadCount)
+    let overheadVsCold = (perThreadUs / baselineSingleUs - 1) * 100
+    let overheadVsWarm = (perThreadUs / singleUsAfter - 1) * 100
+    let thermalDelta = singleUsAfter - baselineSingleUs
+
+    recordResult(category: "Contention-PartConv", operation: "\(threadCount) threads",
+                 iterations: iterations * threadCount, totalMs: totalMs, avgUs: avgUs,
+                 extra: String(format: "%.0f%% (cold), %.0f%% (warm)", overheadVsCold, overheadVsWarm))
 
     if verboseOutput {
-        print("    \(threadCount) threads: \(String(format: "%.1f", avgUs))µs total, \(String(format: "%.0f", (overhead - 1) * 100))% contention overhead")
+        print("    \(threadCount) threads:")
+        print("      Total time: \(String(format: "%.1f", avgUs))µs (\(String(format: "%.1f", perThreadUs))µs/thread)")
+        print("      vs cold baseline: \(String(format: "%+.0f", overheadVsCold))% overhead")
+        print("      vs warm baseline: \(String(format: "%+.0f", overheadVsWarm))% overhead")
+        print("      Thermal drift: \(String(format: "%+.1f", thermalDelta))µs (cold→warm)")
     }
 }
 
@@ -1052,6 +1403,466 @@ for threadCount in threadCounts {
 
     if verboseOutput {
         print("    \(threadCount) threads: \(successCount)/\(iterations) success (\(String(format: "%.0f", successRate))%)")
+    }
+}
+
+} // End of !memoryOnlyMode
+
+// MARK: - Memory Benchmarks
+
+if memoryMode || memoryOnlyMode {
+    guard let tracker = memoryTracker else {
+        fatalError("Memory tracker not initialized")
+    }
+
+    if verboseOutput {
+        print("\n" + String(repeating: "=", count: 60))
+        print("MEMORY BENCHMARKS")
+        print(String(repeating: "=", count: 60))
+    }
+
+    // Helper to record memory benchmark results
+    func recordMemoryResult(
+        category: String,
+        operation: String,
+        iterations: Int,
+        totalMs: Double,
+        avgUs: Double,
+        delta: MemoryDelta,
+        warnings: [MemoryWarning],
+        leakDetected: Bool = false
+    ) {
+        let watermarks = tracker.getWatermarks()
+        memoryBenchmarkResults.append(MemoryBenchmarkResult(
+            category: category,
+            operation: operation,
+            iterations: iterations,
+            totalMs: totalMs,
+            avgUs: avgUs,
+            memoryDeltaMB: delta.processDeltaMB,
+            peakGPUMB: watermarks.peakGPUMB,
+            peakProcessMB: watermarks.peakProcessMB,
+            leakDetected: leakDetected,
+            warnings: warnings
+        ))
+    }
+
+    // MARK: Memory-Alloc: Tensor Allocation Tests
+
+    if verboseOutput { print("\n--- Memory-Alloc: Tensor Allocation ---") }
+
+    let tensorAllocShapes: [([Int], String)] = [
+        ([1024], "1K"),
+        ([4096], "4K"),
+        ([64, 1024], "64x1K"),
+        ([256, 4096], "256x4K"),
+        ([512, 8192], "512x8K (4MB)"),
+    ]
+
+    for (shape, name) in tensorAllocShapes {
+        tracker.reset()
+        let iterations = adjustedIterations(50)
+
+        let (totalDelta, _, warnings) = try! tracker.measureForLeaks(iterations: iterations) {
+            let tensor = try! Tensor(device: device, shape: shape)
+            _ = tensor.count // Force allocation
+        }
+
+        let totalMs = Double(totalDelta.elapsedNanoseconds) / 1_000_000
+        let avgUs = totalMs * 1000 / Double(iterations)
+
+        let leakDetected = warnings.contains { if case .potentialLeak = $0 { return true } else { return false } }
+
+        recordMemoryResult(
+            category: "Memory-Alloc",
+            operation: "Tensor \(name)",
+            iterations: iterations,
+            totalMs: totalMs,
+            avgUs: avgUs,
+            delta: totalDelta,
+            warnings: warnings,
+            leakDetected: leakDetected
+        )
+
+        if verboseOutput {
+            let warningStr = warnings.isEmpty ? "" : " [!]"
+            print("  Tensor \(name): delta=\(String(format: "%.2f", totalDelta.processDeltaMB))MB, \(String(format: "%.1f", avgUs))µs/iter\(warningStr)")
+        }
+    }
+
+    // MARK: Memory-Pool: Buffer Pool Tests
+
+    if verboseOutput { print("\n--- Memory-Pool: Buffer Pool ---") }
+
+    let poolConfigs: [(poolSize: Int, sampleCount: Int)] = [
+        (8, 1024),
+        (16, 4096),
+        (32, 4096),
+    ]
+
+    for cfg in poolConfigs {
+        tracker.reset()
+        let pool = try! AudioBufferPool(device: device, sampleCount: cfg.sampleCount, poolSize: cfg.poolSize)
+
+        let before = tracker.record()
+
+        // Acquire all, then release all
+        var buffers: [AudioBuffer] = []
+        for _ in 0..<cfg.poolSize {
+            if let buffer = pool.acquireIfAvailable() {
+                buffers.append(buffer)
+            }
+        }
+        for buffer in buffers {
+            _ = pool.releaseIfValid(buffer)
+        }
+        buffers.removeAll()
+
+        let after = tracker.record()
+        let delta = after - before
+
+        var warnings: [MemoryWarning] = []
+
+        // Check if pool memory allocation is reasonable
+        // Use GPU delta (not cumulative peak) to measure just this pool's allocation
+        let expectedPoolMB = Double(cfg.poolSize * cfg.sampleCount * 4) / (1024 * 1024)
+        let actualPoolMB = abs(delta.gpuDeltaMB)  // Use delta, not cumulative peak
+        if actualPoolMB > expectedPoolMB * 2.0 {
+            // Only warn if allocation is >2x expected (allows for alignment overhead)
+            warnings.append(.highAllocation(bytes: Int64(actualPoolMB * 1024 * 1024), threshold: Int(expectedPoolMB * 1024 * 1024)))
+        }
+
+        memoryBenchmarkResults.append(MemoryBenchmarkResult(
+            category: "Memory-Pool",
+            operation: "pool=\(cfg.poolSize) samples=\(cfg.sampleCount)",
+            iterations: 1,
+            totalMs: Double(delta.elapsedNanoseconds) / 1_000_000,
+            avgUs: Double(delta.elapsedNanoseconds) / 1000,
+            memoryDeltaMB: actualPoolMB,
+            peakGPUMB: actualPoolMB,  // Use actual pool allocation, not cumulative
+            peakProcessMB: delta.processDeltaMB,
+            leakDetected: false,
+            warnings: warnings
+        ))
+
+        if verboseOutput {
+            let warningStr = warnings.isEmpty ? "" : " [!]"
+            print("  pool=\(cfg.poolSize) samples=\(cfg.sampleCount): GPU=\(String(format: "%.2f", actualPoolMB))MB (expected: \(String(format: "%.2f", expectedPoolMB))MB)\(warningStr)")
+        }
+    }
+
+    // MARK: Memory-GPU: GPU Memory Tests
+
+    if verboseOutput { print("\n--- Memory-GPU: GPU Operations ---") }
+
+    // FFT GPU memory
+    let fftGPUSizes = [2048, 4096, 8192, 16384]
+
+    for size in fftGPUSizes {
+        tracker.reset()
+        let before = tracker.record()
+
+        let fft = try! FFT(device: device, config: FFT.Config(size: size))
+        var input = [Float](repeating: 0, count: size * 2)
+        for i in 0..<size { input[i * 2] = Float(sin(Double(i) * 0.1)) }
+        var output = [Float](repeating: 0, count: size * 2)
+
+        // Run GPU FFT
+        try! fft.forwardGPU(input: input, output: &output)
+
+        let after = tracker.record()
+        let delta = after - before
+        let watermarks = tracker.getWatermarks()
+
+        var warnings: [MemoryWarning] = []
+        if delta.gpuDelta > Int64(A11MemoryThresholds.singleAllocationWarning) {
+            warnings.append(.highAllocation(bytes: delta.gpuDelta, threshold: A11MemoryThresholds.singleAllocationWarning))
+        }
+
+        memoryBenchmarkResults.append(MemoryBenchmarkResult(
+            category: "Memory-GPU",
+            operation: "FFT GPU size=\(size)",
+            iterations: 1,
+            totalMs: Double(delta.elapsedNanoseconds) / 1_000_000,
+            avgUs: Double(delta.elapsedNanoseconds) / 1000,
+            memoryDeltaMB: delta.gpuDeltaMB,
+            peakGPUMB: watermarks.peakGPUMB,
+            peakProcessMB: watermarks.peakProcessMB,
+            leakDetected: false,
+            warnings: warnings
+        ))
+
+        if verboseOutput {
+            let warningStr = warnings.isEmpty ? "" : " [!]"
+            print("  FFT GPU size=\(size): GPU delta=\(String(format: "%.2f", delta.gpuDeltaMB))MB\(warningStr)")
+        }
+    }
+
+    // Partitioned Convolution memory (long IRs)
+    let partConvIRs = [8192, 16384, 32768, 65536]
+
+    for irLen in partConvIRs {
+        tracker.reset()
+        let before = tracker.record()
+
+        let conv = Convolution(device: device, mode: .partitioned(blockSize: 1024))
+        let kernel = [Float](repeating: 1.0 / Float(irLen), count: irLen)
+        try! conv.setKernel(kernel)
+
+        let after = tracker.record()
+        let delta = after - before
+        let watermarks = tracker.getWatermarks()
+
+        var warnings: [MemoryWarning] = []
+        if delta.processDelta > Int64(A11MemoryThresholds.singleAllocationWarning) {
+            warnings.append(.highAllocation(bytes: delta.processDelta, threshold: A11MemoryThresholds.singleAllocationWarning))
+        }
+
+        memoryBenchmarkResults.append(MemoryBenchmarkResult(
+            category: "Memory-GPU",
+            operation: "PartConv IR=\(irLen / 1024)K",
+            iterations: 1,
+            totalMs: Double(delta.elapsedNanoseconds) / 1_000_000,
+            avgUs: Double(delta.elapsedNanoseconds) / 1000,
+            memoryDeltaMB: delta.processDeltaMB,
+            peakGPUMB: watermarks.peakGPUMB,
+            peakProcessMB: watermarks.peakProcessMB,
+            leakDetected: false,
+            warnings: warnings
+        ))
+
+        if verboseOutput {
+            let warningStr = warnings.isEmpty ? "" : " [!]"
+            print("  PartConv IR=\(irLen / 1024)K: delta=\(String(format: "%.2f", delta.processDeltaMB))MB\(warningStr)")
+        }
+    }
+
+    // MARK: Memory-Leak: Leak Detection Tests
+    //
+    // These tests detect ACTUAL memory leaks by reusing the same objects repeatedly.
+    // Memory should remain stable when reusing objects - growth indicates a leak.
+    //
+    // NOTE: Creating NEW objects each iteration would show "leaks" that are actually
+    // expected GPU buffer pool growth. That tests allocation patterns, not leaks.
+
+    if verboseOutput { print("\n--- Memory-Leak: Leak Detection ---") }
+
+    // Tensor reuse test: Create tensor ONCE, repeatedly write data to it
+    // A real leak would show GPU memory growing despite reusing the same tensor
+    // NOTE: We avoid toArray() here as it allocates a new Swift array each call
+    tracker.reset()
+    let tensorLeakIterations = adjustedIterations(100)
+
+    // Create tensor and data buffer ONCE outside the measurement loop
+    let reusedTensor = try! Tensor(device: device, shape: [256, 1024])
+    let tensorDataSize = 256 * 1024
+    var tensorWriteData = [Float](repeating: 0, count: tensorDataSize)
+
+    // Pre-fill with test data
+    for i in 0..<tensorDataSize { tensorWriteData[i] = Float(i) * 0.001 }
+
+    // Warm-up: First copy triggers Metal driver allocations
+    try! reusedTensor.copy(from: tensorWriteData)
+
+    let (tensorLeakDelta, _, tensorLeakWarnings) = try! tracker.measureForLeaks(iterations: tensorLeakIterations) {
+        // Reuse the same tensor and buffer - zero allocations inside loop
+        // Simple increment avoids random number generator allocations
+        tensorWriteData[0] += 1.0
+        try! reusedTensor.copy(from: tensorWriteData)
+    }
+
+    let tensorLeakDetected = tensorLeakWarnings.contains { if case .potentialLeak = $0 { return true } else { return false } }
+    let tensorLeakMs = Double(tensorLeakDelta.elapsedNanoseconds) / 1_000_000
+    let tensorLeakWatermarks = tracker.getWatermarks()
+
+    memoryBenchmarkResults.append(MemoryBenchmarkResult(
+        category: "Memory-Leak",
+        operation: "Tensor reuse",
+        iterations: tensorLeakIterations,
+        totalMs: tensorLeakMs,
+        avgUs: tensorLeakMs * 1000 / Double(tensorLeakIterations),
+        memoryDeltaMB: tensorLeakDelta.processDeltaMB,
+        peakGPUMB: tensorLeakWatermarks.peakGPUMB,
+        peakProcessMB: tensorLeakWatermarks.peakProcessMB,
+        leakDetected: tensorLeakDetected,
+        warnings: tensorLeakWarnings
+    ))
+
+    if verboseOutput {
+        let status = tensorLeakDetected ? "[LEAK DETECTED]" : "[OK]"
+        print("  Tensor reuse: delta=\(String(format: "%.2f", tensorLeakDelta.processDeltaMB))MB \(status)")
+    }
+
+    // FFT reuse test: Create FFT ONCE, repeatedly transform data
+    // A real leak would show memory growing despite reusing the same FFT instance
+    tracker.reset()
+    let fftLeakIterations = adjustedIterations(50)
+
+    // Create FFT ONCE outside the measurement loop
+    let reusedFFT = try! FFT(device: device, config: FFT.Config(size: 2048))
+    let fftInput = (0..<2048).map { Float(sin(Double($0) * 0.1)) }
+    var fftOutputReal = [Float](repeating: 0, count: 2048)
+    var fftOutputImag = [Float](repeating: 0, count: 2048)
+
+    let (fftLeakDelta, _, fftLeakWarnings) = try! tracker.measureForLeaks(iterations: fftLeakIterations) {
+        // Reuse the same FFT - only transform operations
+        fftInput.withUnsafeBufferPointer { ptr in
+            reusedFFT.forward(input: ptr.baseAddress!, outputReal: &fftOutputReal, outputImag: &fftOutputImag)
+        }
+    }
+
+    let fftLeakDetected = fftLeakWarnings.contains { if case .potentialLeak = $0 { return true } else { return false } }
+    let fftLeakMs = Double(fftLeakDelta.elapsedNanoseconds) / 1_000_000
+    let fftLeakWatermarks = tracker.getWatermarks()
+
+    memoryBenchmarkResults.append(MemoryBenchmarkResult(
+        category: "Memory-Leak",
+        operation: "FFT reuse",
+        iterations: fftLeakIterations,
+        totalMs: fftLeakMs,
+        avgUs: fftLeakMs * 1000 / Double(fftLeakIterations),
+        memoryDeltaMB: fftLeakDelta.processDeltaMB,
+        peakGPUMB: fftLeakWatermarks.peakGPUMB,
+        peakProcessMB: fftLeakWatermarks.peakProcessMB,
+        leakDetected: fftLeakDetected,
+        warnings: fftLeakWarnings
+    ))
+
+    if verboseOutput {
+        let status = fftLeakDetected ? "[LEAK DETECTED]" : "[OK]"
+        print("  FFT reuse: delta=\(String(format: "%.2f", fftLeakDelta.processDeltaMB))MB \(status)")
+    }
+
+    // LSTM reuse test: Create LSTM ONCE, repeatedly call forward()
+    // A real leak would show memory growing despite reusing the same LSTM instance
+    //
+    // A11 LSTM Sequence Length Recommendations (2GB RAM, ~500MB safe budget):
+    //   hiddenSize=256:  max ~4,000 steps (~90ms @ 44.1kHz)
+    //   hiddenSize=512:  max ~2,000 steps (~45ms @ 44.1kHz)
+    //   hiddenSize=1024: max ~1,000 steps (~22ms @ 44.1kHz)
+    // Formula: seqLen ≤ 50MB / (hiddenSize * 4 * 3) for work buffers alone
+    tracker.reset()
+    let lstmLeakIterations = adjustedIterations(20)
+
+    // Create LSTM and resources ONCE outside the measurement loop
+    // Using conservative A11-safe parameters: seq=500, hidden=256 ≈ 2MB work buffers
+    let reusedLSTM = try! LSTM(
+        device: device,
+        inputSize: 128,
+        hiddenSize: 256,
+        numLayers: 1,
+        bidirectional: false,
+        sequenceLength: 500
+    )
+    // Prewarm to pre-allocate all work buffers before measurement
+    try! reusedLSTM.prewarm(sequenceLength: 500)
+
+    let lstmInputTensor = try! Tensor(device: device, shape: [500, 128])
+    let lstmOutputTensor = try! Tensor(device: device, shape: [500, 256])
+    let lstmInputData = (0..<(500 * 128)).map { _ in Float.random(in: -1...1) }
+    try! lstmInputTensor.copy(from: lstmInputData)
+    let lstmContext = try! ComputeContext(device: device)
+
+    // Warm-up run to ensure all GPU resources are allocated
+    try! lstmContext.executeSync { encoder in
+        try! reusedLSTM.forward(input: lstmInputTensor, output: lstmOutputTensor, encoder: encoder)
+    }
+    reusedLSTM.resetState()
+
+    let (lstmLeakDelta, _, lstmLeakWarnings) = try! tracker.measureForLeaks(iterations: lstmLeakIterations) {
+        // Reuse the same LSTM - forward pass should be zero-allocation after prewarm
+        try! lstmContext.executeSync { encoder in
+            try! reusedLSTM.forward(input: lstmInputTensor, output: lstmOutputTensor, encoder: encoder)
+        }
+        reusedLSTM.resetState()
+    }
+
+    let lstmLeakDetected = lstmLeakWarnings.contains { if case .potentialLeak = $0 { return true } else { return false } }
+    let lstmLeakMs = Double(lstmLeakDelta.elapsedNanoseconds) / 1_000_000
+    let lstmLeakWatermarks = tracker.getWatermarks()
+
+    memoryBenchmarkResults.append(MemoryBenchmarkResult(
+        category: "Memory-Leak",
+        operation: "LSTM reuse",
+        iterations: lstmLeakIterations,
+        totalMs: lstmLeakMs,
+        avgUs: lstmLeakMs * 1000 / Double(lstmLeakIterations),
+        memoryDeltaMB: lstmLeakDelta.processDeltaMB,
+        peakGPUMB: lstmLeakWatermarks.peakGPUMB,
+        peakProcessMB: lstmLeakWatermarks.peakProcessMB,
+        leakDetected: lstmLeakDetected,
+        warnings: lstmLeakWarnings
+    ))
+
+    if verboseOutput {
+        let status = lstmLeakDetected ? "[LEAK DETECTED]" : "[OK]"
+        print("  LSTM reuse: delta=\(String(format: "%.2f", lstmLeakDelta.processDeltaMB))MB \(status)")
+    }
+
+    // MARK: Memory-Pressure: Pressure Response Tests (optional)
+
+    if pressureTest {
+        if verboseOutput { print("\n--- Memory-Pressure: Pressure Response ---") }
+
+        // Test buffer pool shrinking under pressure
+        tracker.reset()
+        let pressurePool = try! AudioBufferPool(device: device, sampleCount: 4096, poolSize: 16)
+
+        let beforePressure = tracker.record()
+        let availableBefore = pressurePool.availableCount
+
+        // Simulate memory pressure
+        MemoryPressureObserver.shared.simulatePressure(level: .warning)
+
+        // Give time for response
+        Thread.sleep(forTimeInterval: 0.1)
+
+        let afterPressure = tracker.record()
+        let availableAfter = pressurePool.availableCount
+
+        // Reset pressure
+        MemoryPressureObserver.shared.simulatePressure(level: .normal)
+
+        let pressureDelta = afterPressure - beforePressure
+        let shrinkWorked = availableAfter < availableBefore
+
+        memoryBenchmarkResults.append(MemoryBenchmarkResult(
+            category: "Memory-Pressure",
+            operation: "Pool shrink on .warning",
+            iterations: 1,
+            totalMs: Double(pressureDelta.elapsedNanoseconds) / 1_000_000,
+            avgUs: Double(pressureDelta.elapsedNanoseconds) / 1000,
+            memoryDeltaMB: pressureDelta.gpuDeltaMB,
+            peakGPUMB: tracker.getWatermarks().peakGPUMB,
+            peakProcessMB: tracker.getWatermarks().peakProcessMB,
+            leakDetected: false,
+            warnings: shrinkWorked ? [] : [.poolExhaustion(poolSize: 16)]
+        ))
+
+        if verboseOutput {
+            let status = shrinkWorked ? "[OK: \(availableBefore) -> \(availableAfter)]" : "[FAILED]"
+            print("  Pool shrink on .warning: \(status)")
+        }
+    }
+
+    // Print memory summary
+    if verboseOutput {
+        let finalWatermarks = tracker.getWatermarks()
+        print("\n--- Memory Summary ---")
+        print("  Peak GPU: \(String(format: "%.2f", finalWatermarks.peakGPUMB)) MB")
+        print("  Peak Process: \(String(format: "%.2f", finalWatermarks.peakProcessMB)) MB")
+        print("  Min Available: \(String(format: "%.2f", finalWatermarks.minSystemAvailableMB)) MB")
+
+        let leakCount = memoryBenchmarkResults.filter { $0.leakDetected }.count
+        let warningCount = memoryBenchmarkResults.flatMap { $0.warnings }.count
+
+        if leakCount > 0 || warningCount > 0 {
+            print("\n  [!] Issues Found:")
+            if leakCount > 0 { print("      - \(leakCount) potential leak(s)") }
+            if warningCount > 0 { print("      - \(warningCount) memory warning(s)") }
+        } else {
+            print("\n  [OK] No memory issues detected")
+        }
     }
 }
 
@@ -1209,6 +2020,43 @@ func printJSON(_ results: [BenchmarkResult], _ analysis: AnalysisReport) {
         "crossoverRecommendation": analysis.crossoverRecommendation
     ]
 
+    // Memory results (if any)
+    if !memoryBenchmarkResults.isEmpty {
+        var memoryCategories: [String: [[String: Any]]] = [:]
+        for result in memoryBenchmarkResults {
+            var entry: [String: Any] = [
+                "operation": result.operation,
+                "iterations": result.iterations,
+                "totalMs": result.totalMs,
+                "avgUs": result.avgUs,
+                "memoryDeltaMB": result.memoryDeltaMB,
+                "peakGPUMB": result.peakGPUMB,
+                "peakProcessMB": result.peakProcessMB,
+                "leakDetected": result.leakDetected,
+                "warnings": result.warnings.map { $0.description }
+            ]
+
+            if memoryCategories[result.category] == nil {
+                memoryCategories[result.category] = []
+            }
+            memoryCategories[result.category]?.append(entry)
+        }
+        json["memoryResults"] = memoryCategories
+
+        let leakCount = memoryBenchmarkResults.filter { $0.leakDetected }.count
+        let warningCount = memoryBenchmarkResults.flatMap { $0.warnings }.count
+        let peakGPU = memoryBenchmarkResults.map { $0.peakGPUMB }.max() ?? 0
+        let peakProcess = memoryBenchmarkResults.map { $0.peakProcessMB }.max() ?? 0
+
+        json["memoryAnalysis"] = [
+            "totalMemoryBenchmarks": memoryBenchmarkResults.count,
+            "potentialLeaks": leakCount,
+            "memoryWarnings": warningCount,
+            "peakGPUMB": peakGPU,
+            "peakProcessMB": peakProcess
+        ]
+    }
+
     // Simple JSON serialization
     func jsonString(_ value: Any, indent: Int = 0) -> String {
         let spaces = String(repeating: "  ", count: indent)
@@ -1302,6 +2150,12 @@ case .markdown:
     let analysisReport = analyzeResults(benchmarkResults)
     printMarkdown(benchmarkResults, analysisReport)
 case .console:
+    // Run advanced memory benchmark if memory mode is enabled
+    if memoryMode || memoryOnlyMode {
+        runAdvancedMemoryBenchmark(device: device)
+        runNewFeaturesBenchmark(device: device)
+    }
+
     print("\n" + String(repeating: "=", count: 60))
     print("✓ Benchmarks complete")
     let analysisReport = analyzeResults(benchmarkResults)

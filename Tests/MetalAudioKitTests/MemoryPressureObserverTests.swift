@@ -492,6 +492,64 @@ final class ComputeContextDirectMemoryPressureTests: XCTestCase {
     }
 }
 
+// MARK: - AudioDevice Pipeline Cache Tests
+
+final class AudioDevicePipelineCacheTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testClearPipelineCacheOnPressure() throws {
+        // Compile a shader to populate the cache
+        _ = try device.makeComputePipeline(source: """
+            #include <metal_stdlib>
+            using namespace metal;
+            kernel void test_kernel(device float* data [[buffer(0)]]) {
+                data[0] = 1.0;
+            }
+            """, functionName: "test_kernel")
+
+        XCTAssertGreaterThan(device.cachedPipelineCount, 0, "Should have cached pipeline")
+
+        // Simulate memory pressure
+        device.didReceiveMemoryPressure(level: .warning)
+
+        XCTAssertEqual(device.cachedPipelineCount, 0, "Cache should be cleared after warning")
+    }
+
+    func testCriticalPressureClearsCache() throws {
+        _ = try device.makeComputePipeline(source: """
+            #include <metal_stdlib>
+            using namespace metal;
+            kernel void test_kernel2(device float* data [[buffer(0)]]) {
+                data[0] = 2.0;
+            }
+            """, functionName: "test_kernel2")
+
+        device.didReceiveMemoryPressure(level: .critical)
+
+        XCTAssertEqual(device.cachedPipelineCount, 0, "Cache should be cleared after critical")
+    }
+
+    func testNormalPressureDoesNotClearCache() throws {
+        _ = try device.makeComputePipeline(source: """
+            #include <metal_stdlib>
+            using namespace metal;
+            kernel void test_kernel3(device float* data [[buffer(0)]]) {
+                data[0] = 3.0;
+            }
+            """, functionName: "test_kernel3")
+
+        let countBefore = device.cachedPipelineCount
+        device.didReceiveMemoryPressure(level: .normal)
+
+        XCTAssertEqual(device.cachedPipelineCount, countBefore, "Normal should not clear cache")
+    }
+}
+
 // MARK: - Edge Case Tests
 
 final class MemoryPressureEdgeCaseTests: XCTestCase {

@@ -208,6 +208,9 @@ public final class Tensor {
     }
 
     /// Copy data to Swift array
+    ///
+    /// - Note: This allocates a new array each call. For zero-allocation reads,
+    ///   use `copy(to:)` with a pre-allocated buffer instead.
     public func toArray() -> [Float] {
         guard count > 0 else { return [] }
         var result = [Float](repeating: 0, count: count)
@@ -216,6 +219,49 @@ public final class Tensor {
             memcpy(baseAddress, buffer.contents(), byteSize)
         }
         return result
+    }
+
+    /// Copy tensor data to a pre-allocated buffer (zero-allocation)
+    ///
+    /// Use this for repeated reads in hot paths where `toArray()` would cause
+    /// heap fragmentation. The destination buffer must have at least `count` elements.
+    ///
+    /// - Parameter destination: Pre-allocated buffer to copy data into
+    /// - Throws: MetalAudioError.bufferSizeMismatch if buffer is too small
+    ///
+    /// ## Example
+    /// ```swift
+    /// // Pre-allocate once
+    /// var outputBuffer = [Float](repeating: 0, count: tensor.count)
+    ///
+    /// // Zero-allocation read in hot loop
+    /// outputBuffer.withUnsafeMutableBufferPointer { ptr in
+    ///     try tensor.copy(to: ptr)
+    /// }
+    /// ```
+    public func copy(to destination: UnsafeMutableBufferPointer<Float>) throws {
+        guard destination.count >= count else {
+            throw MetalAudioError.bufferSizeMismatch(
+                expected: count,
+                actual: destination.count
+            )
+        }
+        guard count > 0 else { return }
+        guard let baseAddress = destination.baseAddress else { return }
+        memcpy(baseAddress, buffer.contents(), byteSize)
+    }
+
+    /// Copy tensor data to a pre-allocated Swift array (zero-allocation)
+    ///
+    /// Convenience wrapper around `copy(to: UnsafeMutableBufferPointer)`.
+    /// The array must have at least `count` elements.
+    ///
+    /// - Parameter array: Pre-allocated array to copy data into
+    /// - Throws: MetalAudioError.bufferSizeMismatch if array is too small
+    public func copy(to array: inout [Float]) throws {
+        try array.withUnsafeMutableBufferPointer { ptr in
+            try copy(to: ptr)
+        }
     }
 
     /// Fill tensor with a constant value

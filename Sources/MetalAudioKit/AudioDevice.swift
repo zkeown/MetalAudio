@@ -760,3 +760,26 @@ extension AudioDevice {
         return dataSize >= tolerances.gpuCpuThreshold
     }
 }
+
+// MARK: - Memory Pressure Response
+
+extension AudioDevice: MemoryPressureResponder {
+    /// Responds to system memory pressure by clearing cached pipelines
+    ///
+    /// On `.warning` or `.critical`, clears the pipeline cache to free GPU memory.
+    /// Pipelines will be recompiled on next use, which adds latency but frees
+    /// memory immediately.
+    ///
+    /// - Note: For A11 devices (2GB RAM), clearing the cache can free 10-50MB
+    ///   depending on the number of cached shaders.
+    public func didReceiveMemoryPressure(level: MemoryPressureLevel) {
+        switch level {
+        case .warning, .critical:
+            // Clear pipeline cache to free GPU memory
+            clearPipelineCache()
+        case .normal:
+            // No action needed - pipelines will be lazily recompiled as needed
+            break
+        }
+    }
+}

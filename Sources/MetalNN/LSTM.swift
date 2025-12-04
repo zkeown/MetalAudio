@@ -1264,4 +1264,148 @@ extension LSTM {
         // Forward to the new signature, ignoring the unused encoder
         forwardAsync(input: input, output: output, completion: completion)
     }
+
+    // MARK: - Memory Management
+
+    /// Shrinks sequence-dependent work buffers to release memory
+    ///
+    /// Call this when processing shorter sequences after long ones, or in response
+    /// to memory pressure. The buffers will be re-allocated on the next forward
+    /// pass if needed.
+    ///
+    /// - Parameter targetSequenceLength: Optional target size. If nil, buffers are
+    ///   completely released. If specified, buffers are shrunk to fit this length.
+    ///
+    /// ## A11 Memory Considerations
+    /// On A11 devices (2GB RAM), shrinking buffers after processing long sequences
+    /// can free significant memory:
+    /// - hiddenSize=256, seq=4000 → seq=500: frees ~14MB
+    /// - hiddenSize=512, seq=2000 → seq=500: frees ~12MB
+    public func shrinkWorkBuffers(to targetSequenceLength: Int? = nil) {
+        os_unfair_lock_lock(&stateLock)
+        defer { os_unfair_lock_unlock(&stateLock) }
+
+        if let target = targetSequenceLength {
+            let numDirections = bidirectional ? 2 : 1
+            let gateSize = 4 * hiddenSize
+
+            let targetPreIHSize = target * gateSize
+            if workPreIHCapacity > targetPreIHSize {
+                workPreIH = [Float](repeating: 0, count: targetPreIHSize)
+                workPreIHCapacity = targetPreIHSize
+            }
+
+            let targetLayerOutputSize = target * hiddenSize * numDirections
+            if workLayerOutputCapacity > targetLayerOutputSize {
+                workLayerOutput = [Float](repeating: 0, count: targetLayerOutputSize)
+                workLayerOutputCapacity = targetLayerOutputSize
+            }
+
+            let targetLayerInputSize = max(inputSize, hiddenSize * numDirections) * target
+            if workLayerInputCapacity > targetLayerInputSize {
+                workLayerInput = [Float](repeating: 0, count: targetLayerInputSize)
+                workLayerInputCapacity = targetLayerInputSize
+            }
+        } else {
+            // Complete release
+            workPreIH = []
+            workPreIHCapacity = 0
+            workLayerOutput = []
+            workLayerOutputCapacity = 0
+            workLayerInput = []
+            workLayerInputCapacity = 0
+        }
+    }
+
+    /// Current memory usage of work buffers in bytes
+    public var workBufferMemoryUsage: Int {
+        return (workPreIHCapacity + workLayerOutputCapacity + workLayerInputCapacity) * MemoryLayout<Float>.stride
+    }
+}
+
+// MARK: - Memory Pressure Response
+
+extension LSTM: MemoryPressureResponder {
+    /// Responds to system memory pressure by shrinking work buffers
+    ///
+    /// - `.warning`: Shrinks buffers to a conservative size (500 samples)
+    /// - `.critical`: Releases all work buffers completely
+    /// - `.normal`: No action (buffers will grow again as needed)
+    public func didReceiveMemoryPressure(level: MemoryPressureLevel) {
+        switch level {
+        case .warning:
+            // Shrink to conservative size for A11
+            shrinkWorkBuffers(to: 500)
+        case .critical:
+            // Release everything
+            shrinkWorkBuffers(to: nil)
+        case .normal:
+            // No action needed
+            break
+        }
+    }
+}
+
+// MARK: - Memory Budget Support
+
+extension LSTM: MemoryBudgetable {
+
+    /// Current memory usage of work buffers
+    public var currentMemoryUsage: Int {
+        return workBufferMemoryUsage
+    }
+
+    /// Maximum sequence length based on memory budget
+    private static var budgetedMaxSequenceLengths: [ObjectIdentifier: Int] = [:]
+    private static var budgetedMaxSequenceLock = os_unfair_lock()
+
+    /// Set memory budget for this LSTM
+    ///
+    /// Constrains work buffer growth to stay within budget. When budget is exceeded,
+    /// work buffers are shrunk to fit.
+    /// - Parameter bytes: Maximum bytes for work buffers, or nil to remove constraint
+    public func setMemoryBudget(_ bytes: Int?) {
+        let id = ObjectIdentifier(self)
+
+        os_unfair_lock_lock(&Self.budgetedMaxSequenceLock)
+        defer { os_unfair_lock_unlock(&Self.budgetedMaxSequenceLock) }
+
+        if let bytes = bytes {
+            // Calculate max sequence length that fits in budget
+            // Work buffers: preIH + layerOutput + layerInput
+            // ~= seqLen * (4*hidden + hidden*dirs + max(input, hidden*dirs))
+            let numDirections = bidirectional ? 2 : 1
+            let bytesPerTimestep = (4 * hiddenSize + hiddenSize * numDirections +
+                                   max(inputSize, hiddenSize * numDirections)) * MemoryLayout<Float>.stride
+            let maxSeq = bytes / max(1, bytesPerTimestep)
+            Self.budgetedMaxSequenceLengths[id] = maxSeq
+
+            // Shrink if currently over budget
+            if workBufferMemoryUsage > bytes {
+                shrinkWorkBuffers(to: maxSeq)
+            }
+        } else {
+            Self.budgetedMaxSequenceLengths.removeValue(forKey: id)
+        }
+    }
+
+    /// Current memory budget, if set
+    public var memoryBudget: Int? {
+        let id = ObjectIdentifier(self)
+        os_unfair_lock_lock(&Self.budgetedMaxSequenceLock)
+        defer { os_unfair_lock_unlock(&Self.budgetedMaxSequenceLock) }
+        guard let maxSeq = Self.budgetedMaxSequenceLengths[id] else { return nil }
+        let numDirections = bidirectional ? 2 : 1
+        let bytesPerTimestep = (4 * hiddenSize + hiddenSize * numDirections +
+                               max(inputSize, hiddenSize * numDirections)) * MemoryLayout<Float>.stride
+        return maxSeq * bytesPerTimestep
+    }
+
+    /// Maximum sequence length allowed by budget (or Int.max if no budget)
+    public var budgetedMaxSequenceLength: Int {
+        let id = ObjectIdentifier(self)
+        os_unfair_lock_lock(&Self.budgetedMaxSequenceLock)
+        defer { os_unfair_lock_unlock(&Self.budgetedMaxSequenceLock) }
+        return Self.budgetedMaxSequenceLengths[id] ?? Int.max
+    }
 }

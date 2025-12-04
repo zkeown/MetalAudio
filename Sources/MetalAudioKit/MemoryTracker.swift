@@ -224,6 +224,7 @@ public enum MemoryWarning: CustomStringConvertible, Sendable {
     case potentialLeak(growthPercent: Double)
     case lowSystemMemory(availableMB: Double)
     case poolExhaustion(poolSize: Int)
+    case earlyAbort(completedIterations: Int, requestedIterations: Int, availableMB: Double)
 
     public var description: String {
         switch self {
@@ -237,6 +238,8 @@ public enum MemoryWarning: CustomStringConvertible, Sendable {
             return "Low system memory: \(String(format: "%.1f", available))MB available"
         case .poolExhaustion(let poolSize):
             return "Pool exhaustion (size: \(poolSize))"
+        case .earlyAbort(let completed, let requested, let available):
+            return "Early abort: \(completed)/\(requested) iterations (\(String(format: "%.0f", available))MB available)"
         }
     }
 }
@@ -356,31 +359,56 @@ public final class MemoryTracker: @unchecked Sendable {
     ///
     /// - Parameters:
     ///   - iterations: Number of iterations to run
+    ///   - abortThresholdMB: Stop early if available memory drops below this (default 200MB)
     ///   - operation: Closure to measure (called `iterations` times)
-    /// - Returns: Tuple of (total delta, per-iteration delta, leak warnings)
+    /// - Returns: Tuple of (total delta, per-iteration delta, leak warnings, actual iterations run)
     public func measureForLeaks(
         iterations: Int,
+        abortThresholdMB: Double = 200.0,
         operation: () throws -> Void
     ) rethrows -> (totalDelta: MemoryDelta, perIterationDelta: MemoryDelta, warnings: [MemoryWarning]) {
         let before = record()
+        let abortThresholdBytes = UInt64(abortThresholdMB * 1024 * 1024)
+        var actualIterations = 0
 
-        for _ in 0..<iterations {
+        for i in 0..<iterations {
+            // Safety check every 10 iterations to avoid overhead
+            if i % 10 == 0 && i > 0 {
+                let snapshot = MemorySnapshot.capture(device: nil)
+                if snapshot.systemAvailable < abortThresholdBytes {
+                    // Memory getting low - abort early to prevent crash
+                    break
+                }
+            }
             try operation()
+            actualIterations += 1
         }
 
         let after = record()
         let totalDelta = after - before
 
+        // Use actual iterations (may be less if aborted early)
+        let divisor = max(1, actualIterations)
+
         // Calculate per-iteration delta
         let perIterationDelta = MemoryDelta(
-            elapsedNanoseconds: totalDelta.elapsedNanoseconds / UInt64(iterations),
-            gpuDelta: totalDelta.gpuDelta / Int64(iterations),
-            processDelta: totalDelta.processDelta / Int64(iterations),
-            systemDelta: totalDelta.systemDelta / Int64(iterations)
+            elapsedNanoseconds: totalDelta.elapsedNanoseconds / UInt64(divisor),
+            gpuDelta: totalDelta.gpuDelta / Int64(divisor),
+            processDelta: totalDelta.processDelta / Int64(divisor),
+            systemDelta: totalDelta.systemDelta / Int64(divisor)
         )
 
         // Check for leaks
         var warnings: [MemoryWarning] = []
+
+        // Check if we aborted early due to low memory
+        if actualIterations < iterations {
+            warnings.append(.earlyAbort(
+                completedIterations: actualIterations,
+                requestedIterations: iterations,
+                availableMB: after.systemAvailableMB
+            ))
+        }
 
         // Check if memory grew significantly over iterations
         let gpuGrowthPercent = before.gpuAllocated > 0
@@ -401,7 +429,7 @@ public final class MemoryTracker: @unchecked Sendable {
         }
 
         // Check system memory
-        if after.systemAvailable < UInt64(A11MemoryThresholds.minAvailableWarning) {
+        if after.systemAvailable < UInt64(A11MemoryThresholds.minAvailableWarning) && actualIterations == iterations {
             warnings.append(.lowSystemMemory(availableMB: after.systemAvailableMB))
         }
 

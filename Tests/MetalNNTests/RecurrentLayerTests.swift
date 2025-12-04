@@ -619,3 +619,276 @@ final class GRUTests: XCTestCase {
         }
     }
 }
+
+// MARK: - LSTM Memory Management Tests
+
+final class LSTMMemoryManagementTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testShrinkWorkBuffersComplete() throws {
+        let lstm = try LSTM(
+            device: device,
+            inputSize: 64,
+            hiddenSize: 128,
+            numLayers: 1,
+            bidirectional: false,
+            sequenceLength: 100
+        )
+
+        // Prewarm with large sequence
+        try lstm.prewarm(sequenceLength: 1000)
+        let memoryBefore = lstm.workBufferMemoryUsage
+        XCTAssertGreaterThan(memoryBefore, 0, "Should have allocated work buffers")
+
+        // Shrink completely
+        lstm.shrinkWorkBuffers(to: nil)
+        let memoryAfter = lstm.workBufferMemoryUsage
+        XCTAssertEqual(memoryAfter, 0, "Work buffers should be released")
+    }
+
+    func testShrinkWorkBuffersToTarget() throws {
+        let lstm = try LSTM(
+            device: device,
+            inputSize: 64,
+            hiddenSize: 128,
+            numLayers: 1,
+            bidirectional: false,
+            sequenceLength: 100
+        )
+
+        // Prewarm with large sequence
+        try lstm.prewarm(sequenceLength: 2000)
+        let memoryLarge = lstm.workBufferMemoryUsage
+
+        // Shrink to smaller target
+        lstm.shrinkWorkBuffers(to: 500)
+        let memorySmall = lstm.workBufferMemoryUsage
+
+        XCTAssertLessThan(memorySmall, memoryLarge, "Memory should decrease after shrink")
+        XCTAssertGreaterThan(memorySmall, 0, "Should still have buffers for target size")
+    }
+
+    func testMemoryPressureWarningResponse() throws {
+        let lstm = try LSTM(
+            device: device,
+            inputSize: 64,
+            hiddenSize: 128,
+            numLayers: 1,
+            bidirectional: false,
+            sequenceLength: 100
+        )
+
+        // Prewarm with large sequence
+        try lstm.prewarm(sequenceLength: 2000)
+        let memoryBefore = lstm.workBufferMemoryUsage
+
+        // Simulate warning pressure
+        lstm.didReceiveMemoryPressure(level: .warning)
+        let memoryAfter = lstm.workBufferMemoryUsage
+
+        // Warning should shrink to 500
+        XCTAssertLessThan(memoryAfter, memoryBefore, "Warning should reduce memory")
+    }
+
+    func testMemoryPressureCriticalResponse() throws {
+        let lstm = try LSTM(
+            device: device,
+            inputSize: 64,
+            hiddenSize: 128,
+            numLayers: 1,
+            bidirectional: false,
+            sequenceLength: 100
+        )
+
+        try lstm.prewarm(sequenceLength: 1000)
+
+        // Simulate critical pressure
+        lstm.didReceiveMemoryPressure(level: .critical)
+        let memoryAfter = lstm.workBufferMemoryUsage
+
+        // Critical should release all buffers
+        XCTAssertEqual(memoryAfter, 0, "Critical should release all work buffers")
+    }
+
+    func testMemoryPressureNormalNoChange() throws {
+        let lstm = try LSTM(
+            device: device,
+            inputSize: 64,
+            hiddenSize: 128,
+            numLayers: 1,
+            bidirectional: false,
+            sequenceLength: 100
+        )
+
+        try lstm.prewarm(sequenceLength: 1000)
+        let memoryBefore = lstm.workBufferMemoryUsage
+
+        // Normal should not change memory
+        lstm.didReceiveMemoryPressure(level: .normal)
+        let memoryAfter = lstm.workBufferMemoryUsage
+
+        XCTAssertEqual(memoryAfter, memoryBefore, "Normal should not change memory")
+    }
+
+    func testEstimateMemoryUsage() throws {
+        let lstm = try LSTM(
+            device: device,
+            inputSize: 64,
+            hiddenSize: 128,
+            numLayers: 1,
+            bidirectional: false,
+            sequenceLength: 100
+        )
+
+        let estimated = lstm.estimateMemoryUsage(sequenceLength: 1000)
+        XCTAssertGreaterThan(estimated, 0, "Should estimate positive memory")
+
+        // Larger sequence should estimate more memory
+        let estimatedLarger = lstm.estimateMemoryUsage(sequenceLength: 2000)
+        XCTAssertGreaterThan(estimatedLarger, estimated, "Larger sequence should use more memory")
+    }
+
+    func testWorkBufferMemoryUsageProperty() throws {
+        let lstm = try LSTM(
+            device: device,
+            inputSize: 64,
+            hiddenSize: 128,
+            numLayers: 1,
+            bidirectional: false,
+            sequenceLength: 100
+        )
+
+        // Initially should be 0 or very small
+        let initialMemory = lstm.workBufferMemoryUsage
+
+        // After prewarm should have allocated
+        try lstm.prewarm(sequenceLength: 1000)
+        let afterPrewarm = lstm.workBufferMemoryUsage
+
+        XCTAssertGreaterThan(afterPrewarm, initialMemory, "Prewarm should allocate buffers")
+    }
+}
+
+// MARK: - LSTM Memory Budget Tests
+
+final class LSTMMemoryBudgetTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testSetMemoryBudget() throws {
+        let lstm = try LSTM(
+            device: device,
+            inputSize: 32,
+            hiddenSize: 64,
+            numLayers: 1,
+            bidirectional: false,
+            sequenceLength: 100
+        )
+
+        XCTAssertNil(lstm.memoryBudget)
+
+        // Set a budget
+        lstm.setMemoryBudget(1024 * 1024)  // 1MB
+
+        XCTAssertNotNil(lstm.memoryBudget)
+        XCTAssertGreaterThan(lstm.budgetedMaxSequenceLength, 0)
+    }
+
+    func testBudgetShrinkWorkBuffers() throws {
+        let lstm = try LSTM(
+            device: device,
+            inputSize: 32,
+            hiddenSize: 64,
+            numLayers: 1,
+            bidirectional: false,
+            sequenceLength: 100
+        )
+
+        // Prewarm to allocate large buffers
+        try lstm.prewarm(sequenceLength: 2000)
+        let memoryBefore = lstm.workBufferMemoryUsage
+        XCTAssertGreaterThan(memoryBefore, 0)
+
+        // Set small budget - should shrink
+        lstm.setMemoryBudget(memoryBefore / 4)
+
+        let memoryAfter = lstm.workBufferMemoryUsage
+        XCTAssertLessThan(memoryAfter, memoryBefore, "Budget should shrink buffers")
+    }
+
+    func testRemoveMemoryBudget() throws {
+        let lstm = try LSTM(
+            device: device,
+            inputSize: 32,
+            hiddenSize: 64,
+            numLayers: 1,
+            bidirectional: false,
+            sequenceLength: 100
+        )
+
+        lstm.setMemoryBudget(1024 * 1024)
+        XCTAssertNotNil(lstm.memoryBudget)
+
+        lstm.setMemoryBudget(nil)
+        XCTAssertNil(lstm.memoryBudget)
+        XCTAssertEqual(lstm.budgetedMaxSequenceLength, Int.max)
+    }
+
+    func testCurrentMemoryUsageConformance() throws {
+        let lstm = try LSTM(
+            device: device,
+            inputSize: 32,
+            hiddenSize: 64,
+            numLayers: 1,
+            bidirectional: false,
+            sequenceLength: 100
+        )
+
+        // MemoryBudgetable conformance
+        let budgetable: MemoryBudgetable = lstm
+
+        // Should match workBufferMemoryUsage
+        XCTAssertEqual(budgetable.currentMemoryUsage, lstm.workBufferMemoryUsage)
+    }
+
+    func testBidirectionalBudgetCalculation() throws {
+        let unidirectional = try LSTM(
+            device: device,
+            inputSize: 32,
+            hiddenSize: 64,
+            numLayers: 1,
+            bidirectional: false,
+            sequenceLength: 100
+        )
+
+        let bidirectional = try LSTM(
+            device: device,
+            inputSize: 32,
+            hiddenSize: 64,
+            numLayers: 1,
+            bidirectional: true,
+            sequenceLength: 100
+        )
+
+        // Set same budget
+        let budget = 1024 * 1024
+        unidirectional.setMemoryBudget(budget)
+        bidirectional.setMemoryBudget(budget)
+
+        // Bidirectional should have lower max sequence (uses more memory per step)
+        XCTAssertLessThan(
+            bidirectional.budgetedMaxSequenceLength,
+            unidirectional.budgetedMaxSequenceLength,
+            "Bidirectional uses more memory per timestep"
+        )
+    }
+}
