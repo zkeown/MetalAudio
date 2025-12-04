@@ -750,6 +750,42 @@ public final class FusedLinear: NNLayer {
     """
 }
 
+// MARK: - Half-Precision Pipeline Cache
+
+/// Thread-safe cache for half-precision shader pipelines
+/// Prevents recompiling the same shader for every layer instance
+internal final class HalfPrecisionPipelineCache {
+    static let shared = HalfPrecisionPipelineCache()
+
+    private var cache: [String: MTLComputePipelineState] = [:]
+    private let lock = NSLock()
+
+    private init() {}
+
+    /// Get or create a pipeline for the given shader source and function name
+    func getPipeline(device: AudioDevice, source: String, functionName: String) throws -> MTLComputePipelineState {
+        let key = "\(ObjectIdentifier(device.device).hashValue)-\(functionName)"
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        if let cached = cache[key] {
+            return cached
+        }
+
+        let pipeline = try device.makeComputePipeline(source: source, functionName: functionName)
+        cache[key] = pipeline
+        return pipeline
+    }
+
+    /// Clear the cache (useful for testing or when changing Metal libraries)
+    func clearCache() {
+        lock.lock()
+        defer { lock.unlock() }
+        cache.removeAll()
+    }
+}
+
 // MARK: - Half Precision Linear
 
 /// Half-precision Linear layer for 2x throughput on A12+ devices
@@ -757,6 +793,9 @@ public final class FusedLinear: NNLayer {
 ///
 /// ## Thread Safety
 /// `HalfLinear` is thread-safe after initialization. Uses GPU compute for inference.
+///
+/// ## Pipeline Caching
+/// Shader pipelines are cached globally to avoid recompilation when creating multiple instances.
 ///
 /// ## Usage
 /// ```swift
@@ -809,7 +848,9 @@ public final class HalfLinear: NNLayer {
             self.bias = nil
         }
 
-        self.pipeline = try device.makeComputePipeline(
+        // Use cached pipeline to avoid recompilation
+        self.pipeline = try HalfPrecisionPipelineCache.shared.getPipeline(
+            device: device,
             source: Self.shaderSource,
             functionName: "linear_half_forward"
         )
@@ -1082,23 +1123,52 @@ public final class GELU: NNLayer {
         encoder.dispatchThreadgroups(gridSize, threadsPerThreadgroup: threadgroupSize)
     }
 
-    /// CPU fallback for GELU using Accelerate
+    /// Vectorized CPU fallback for GELU using Accelerate
     /// GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
+    /// ~4-8x faster than scalar loop for large inputs
     private func forwardCPU(input: Tensor, output: Tensor) throws {
         let count = input.count
+        var n = Int32(count)
         let inputPtr = input.floatPointer
         let outputPtr = output.floatPointer
 
+        // Constants
         let sqrt2OverPi: Float = 0.7978845608
         let coeff: Float = 0.044715
+        var half: Float = 0.5
+        var one: Float = 1.0
 
-        // Element-wise GELU computation
-        for i in 0..<count {
-            let x = inputPtr[i]
-            let x3 = x * x * x
-            let inner = sqrt2OverPi * (x + coeff * x3)
-            outputPtr[i] = 0.5 * x * (1.0 + tanhf(inner))
-        }
+        // Work buffers (could be pre-allocated for real-time, but CPU fallback is rare)
+        var x2 = [Float](repeating: 0, count: count)
+        var x3 = [Float](repeating: 0, count: count)
+        var inner = [Float](repeating: 0, count: count)
+        var tanhResult = [Float](repeating: 0, count: count)
+
+        // Step 1: x² = x * x
+        vDSP_vmul(inputPtr, 1, inputPtr, 1, &x2, 1, vDSP_Length(count))
+
+        // Step 2: x³ = x² * x
+        vDSP_vmul(x2, 1, inputPtr, 1, &x3, 1, vDSP_Length(count))
+
+        // Step 3: inner = x + coeff * x³
+        var coeffCopy = coeff
+        vDSP_vsma(x3, 1, &coeffCopy, inputPtr, 1, &inner, 1, vDSP_Length(count))
+
+        // Step 4: inner = sqrt2OverPi * inner
+        var sqrt2OverPiCopy = sqrt2OverPi
+        vDSP_vsmul(inner, 1, &sqrt2OverPiCopy, &inner, 1, vDSP_Length(count))
+
+        // Step 5: tanhResult = tanh(inner)
+        vvtanhf(&tanhResult, inner, &n)
+
+        // Step 6: tanhResult = 1 + tanhResult
+        vDSP_vsadd(tanhResult, 1, &one, &tanhResult, 1, vDSP_Length(count))
+
+        // Step 7: output = x * tanhResult
+        vDSP_vmul(inputPtr, 1, tanhResult, 1, outputPtr, 1, vDSP_Length(count))
+
+        // Step 8: output = 0.5 * output
+        vDSP_vsmul(outputPtr, 1, &half, outputPtr, 1, vDSP_Length(count))
     }
 }
 
@@ -1638,12 +1708,17 @@ public final class LayerNorm: NNLayer {
 ///
 /// Reduces [channels, length] to [channels] by averaging over the time dimension.
 /// Commonly used before classification heads in audio models.
+///
+/// ## Execution Strategy
+/// - **Length < 64**: Serial kernel (one thread per channel)
+/// - **Length >= 64**: Parallel kernel with SIMD reduction (one threadgroup per channel)
 public final class GlobalAvgPool1D: NNLayer {
     public let inputShape: [Int]  // [channels, length]
     public var outputShape: [Int] { [inputShape[0]] }
 
     private let device: AudioDevice
     private let pipeline: MTLComputePipelineState?
+    private let parallelPipeline: MTLComputePipelineState?
 
     /// Indicates whether GPU acceleration is available for this layer
     public var isGPUAccelerated: Bool { pipeline != nil }
@@ -1655,23 +1730,29 @@ public final class GlobalAvgPool1D: NNLayer {
         self.device = device
         self.inputShape = [channels, length]
 
+        var loadedPipeline: MTLComputePipelineState?
+        var loadedParallelPipeline: MTLComputePipelineState?
+        var creationError: Error?
         do {
-            self.pipeline = try device.makeComputePipeline(source: Self.shaderSource, functionName: "global_avg_pool_1d_forward")
-            self.pipelineCreationError = nil
+            loadedPipeline = try device.makeComputePipeline(source: Self.shaderSource, functionName: "global_avg_pool_1d_forward")
+            loadedParallelPipeline = try device.makeComputePipeline(source: Self.shaderSource, functionName: "global_avg_pool_1d_parallel")
         } catch {
             if MetalNNConfig.strictGPUMode {
                 throw error
             }
             MetalNNConfig.logWarning("GlobalAvgPool1D GPU pipeline creation failed: \(error). Falling back to CPU.")
-            self.pipeline = nil
-            self.pipelineCreationError = error
+            creationError = error
         }
+        self.pipeline = loadedPipeline
+        self.parallelPipeline = loadedParallelPipeline
+        self.pipelineCreationError = creationError
     }
 
     private static let shaderSource = """
     #include <metal_stdlib>
     using namespace metal;
 
+    // Serial kernel - one thread per channel
     kernel void global_avg_pool_1d_forward(
         device const float* input [[buffer(0)]],
         device float* output [[buffer(1)]],
@@ -1690,13 +1771,61 @@ public final class GlobalAvgPool1D: NNLayer {
 
         output[id] = sum / float(length);
     }
+
+    // Parallel kernel with SIMD reduction - one threadgroup per channel
+    constant uint POOL_THREADGROUP_SIZE = 256;
+
+    kernel void global_avg_pool_1d_parallel(
+        device const float* input [[buffer(0)]],
+        device float* output [[buffer(1)]],
+        constant uint& channels [[buffer(2)]],
+        constant uint& length [[buffer(3)]],
+        uint groupId [[threadgroup_position_in_grid]],
+        uint localId [[thread_index_in_threadgroup]],
+        uint threadsPerGroup [[threads_per_threadgroup]],
+        uint simdLaneId [[thread_index_in_simdgroup]],
+        uint simdGroupId [[simdgroup_index_in_threadgroup]]
+    ) {
+        threadgroup float sharedSum[POOL_THREADGROUP_SIZE / 32];  // One slot per SIMD group
+
+        uint channelIdx = groupId;
+        if (channelIdx >= channels) return;
+
+        uint offset = channelIdx * length;
+
+        // Phase 1: Each thread accumulates its portion using grid-stride loop
+        float localSum = 0.0f;
+        for (uint i = localId; i < length; i += threadsPerGroup) {
+            localSum += input[offset + i];
+        }
+
+        // Phase 2: SIMD-level reduction
+        localSum = simd_sum(localSum);
+
+        // Phase 3: Store SIMD group results to shared memory
+        if (simdLaneId == 0) {
+            sharedSum[simdGroupId] = localSum;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Phase 4: Final reduction across SIMD groups (only first SIMD group)
+        if (simdGroupId == 0) {
+            uint numSimdGroups = (threadsPerGroup + 31) / 32;
+            localSum = (simdLaneId < numSimdGroups) ? sharedSum[simdLaneId] : 0.0f;
+            localSum = simd_sum(localSum);
+
+            if (localId == 0) {
+                output[channelIdx] = localSum / float(length);
+            }
+        }
+    }
     """
 
     public func forward(input: Tensor, output: Tensor, encoder: MTLComputeCommandEncoder) throws {
         let channels = inputShape[0]
         let length = inputShape[1]
 
-        guard let pipeline = pipeline else {
+        guard pipeline != nil || parallelPipeline != nil else {
             // CPU fallback
             let inputPtr = input.floatPointer
             let outputPtr = output.floatPointer
@@ -1711,17 +1840,34 @@ public final class GlobalAvgPool1D: NNLayer {
         var channelsU = UInt32(channels)
         var lengthU = UInt32(length)
 
-        encoder.setComputePipelineState(pipeline)
-        encoder.setBuffer(input.buffer, offset: 0, index: 0)
-        encoder.setBuffer(output.buffer, offset: 0, index: 1)
-        encoder.setBytes(&channelsU, length: MemoryLayout<UInt32>.stride, index: 2)
-        encoder.setBytes(&lengthU, length: MemoryLayout<UInt32>.stride, index: 3)
+        // Use parallel kernel for large lengths (better SIMD utilization)
+        let useParallel = length >= 64 && parallelPipeline != nil
 
-        let (threadgroupSize, gridSize) = ComputeContext.calculate1DDispatch(
-            pipeline: pipeline,
-            dataLength: channels
-        )
-        encoder.dispatchThreadgroups(gridSize, threadsPerThreadgroup: threadgroupSize)
+        if useParallel, let parallelPipeline = parallelPipeline {
+            encoder.setComputePipelineState(parallelPipeline)
+            encoder.setBuffer(input.buffer, offset: 0, index: 0)
+            encoder.setBuffer(output.buffer, offset: 0, index: 1)
+            encoder.setBytes(&channelsU, length: MemoryLayout<UInt32>.stride, index: 2)
+            encoder.setBytes(&lengthU, length: MemoryLayout<UInt32>.stride, index: 3)
+
+            // One threadgroup per channel
+            let threadsPerGroup = min(256, length)
+            let threadgroupSize = MTLSize(width: threadsPerGroup, height: 1, depth: 1)
+            let gridSize = MTLSize(width: channels, height: 1, depth: 1)
+            encoder.dispatchThreadgroups(gridSize, threadsPerThreadgroup: threadgroupSize)
+        } else if let pipeline = pipeline {
+            encoder.setComputePipelineState(pipeline)
+            encoder.setBuffer(input.buffer, offset: 0, index: 0)
+            encoder.setBuffer(output.buffer, offset: 0, index: 1)
+            encoder.setBytes(&channelsU, length: MemoryLayout<UInt32>.stride, index: 2)
+            encoder.setBytes(&lengthU, length: MemoryLayout<UInt32>.stride, index: 3)
+
+            let (threadgroupSize, gridSize) = ComputeContext.calculate1DDispatch(
+                pipeline: pipeline,
+                dataLength: channels
+            )
+            encoder.dispatchThreadgroups(gridSize, threadsPerThreadgroup: threadgroupSize)
+        }
     }
 }
 
@@ -1875,8 +2021,8 @@ public final class Softmax: NNLayer, @unchecked Sendable {
     /// The error that occurred during pipeline creation, if any
     public let pipelineCreationError: Error?
 
-    /// GPU copy kernel - ensures proper synchronization when copying input to output
-    private static let copyShaderSource = """
+    /// Embedded shader source for Softmax kernels
+    private static let shaderSource = """
     #include <metal_stdlib>
     using namespace metal;
 
@@ -1888,6 +2034,109 @@ public final class Softmax: NNLayer, @unchecked Sendable {
     ) {
         if (id >= count) return;
         output[id] = input[id];
+    }
+
+    // Serial softmax - one thread per row
+    kernel void softmax_1d(
+        device float* data [[buffer(0)]],
+        constant uint& length [[buffer(1)]],
+        uint id [[thread_position_in_grid]]
+    ) {
+        if (length == 0) return;
+        uint offset = id * length;
+
+        if (length == 1) {
+            data[offset] = 1.0f;
+            return;
+        }
+
+        // Find max for numerical stability
+        float maxVal = data[offset];
+        for (uint i = 1; i < length; i++) {
+            maxVal = max(maxVal, data[offset + i]);
+        }
+
+        // Compute exp and sum
+        float sum = 0.0f;
+        for (uint i = 0; i < length; i++) {
+            data[offset + i] = exp(data[offset + i] - maxVal);
+            sum += data[offset + i];
+        }
+
+        // Normalize
+        float invSum = (sum > 1e-38f) ? (1.0f / sum) : 0.0f;
+        for (uint i = 0; i < length; i++) {
+            data[offset + i] *= invSum;
+        }
+    }
+
+    // Parallel softmax using threadgroup reduction
+    constant uint SOFTMAX_THREADGROUP_SIZE = 256;
+
+    kernel void softmax_1d_parallel(
+        device float* data [[buffer(0)]],
+        constant uint& length [[buffer(1)]],
+        uint groupId [[threadgroup_position_in_grid]],
+        uint localId [[thread_index_in_threadgroup]],
+        uint threadsPerGroup [[threads_per_threadgroup]]
+    ) {
+        threadgroup float sharedMax[SOFTMAX_THREADGROUP_SIZE];
+        threadgroup float sharedSum[SOFTMAX_THREADGROUP_SIZE];
+        threadgroup float sharedGlobalMax;
+        threadgroup float sharedGlobalSum;
+
+        uint rowOffset = groupId * length;
+
+        // Phase 1: Find local max
+        float localMax = -INFINITY;
+        for (uint i = localId; i < length; i += threadsPerGroup) {
+            localMax = max(localMax, data[rowOffset + i]);
+        }
+        sharedMax[localId] = localMax;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Tree reduction for max
+        for (uint stride = threadsPerGroup / 2; stride > 0; stride >>= 1) {
+            if (localId < stride) {
+                sharedMax[localId] = max(sharedMax[localId], sharedMax[localId + stride]);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        if (localId == 0) {
+            sharedGlobalMax = sharedMax[0];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float globalMax = sharedGlobalMax;
+
+        // Phase 2: Compute exp and sum
+        float localSum = 0.0f;
+        for (uint i = localId; i < length; i += threadsPerGroup) {
+            float expVal = exp(data[rowOffset + i] - globalMax);
+            data[rowOffset + i] = expVal;
+            localSum += expVal;
+        }
+        sharedSum[localId] = localSum;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Tree reduction for sum
+        for (uint stride = threadsPerGroup / 2; stride > 0; stride >>= 1) {
+            if (localId < stride) {
+                sharedSum[localId] += sharedSum[localId + stride];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        if (localId == 0) {
+            sharedGlobalSum = sharedSum[0];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float invSum = 1.0f / sharedGlobalSum;
+
+        // Phase 3: Normalize
+        for (uint i = localId; i < length; i += threadsPerGroup) {
+            data[rowOffset + i] *= invSum;
+        }
     }
     """
 
@@ -1906,15 +2155,15 @@ public final class Softmax: NNLayer, @unchecked Sendable {
         self.length = inputShape.last!
         self.numRows = inputShape.count == 1 ? 1 : inputShape.dropLast().reduce(1, *)
 
-        // Load kernels from NN.metal
+        // Load kernels from embedded shader source
         var loadedPipeline: MTLComputePipelineState?
         var loadedParallelPipeline: MTLComputePipelineState?
         var loadedCopyPipeline: MTLComputePipelineState?
         var creationError: Error?
         do {
-            loadedPipeline = try device.makeComputePipeline(functionName: "softmax_1d")
-            loadedParallelPipeline = try device.makeComputePipeline(functionName: "softmax_1d_parallel")
-            loadedCopyPipeline = try device.makeComputePipeline(source: Self.copyShaderSource, functionName: "buffer_copy")
+            loadedPipeline = try device.makeComputePipeline(source: Self.shaderSource, functionName: "softmax_1d")
+            loadedParallelPipeline = try device.makeComputePipeline(source: Self.shaderSource, functionName: "softmax_1d_parallel")
+            loadedCopyPipeline = try device.makeComputePipeline(source: Self.shaderSource, functionName: "buffer_copy")
         } catch {
             if MetalNNConfig.strictGPUMode {
                 throw error
@@ -2037,6 +2286,39 @@ public final class BatchNorm1D: NNLayer, @unchecked Sendable {
     /// The error that occurred during pipeline creation, if any
     public let pipelineCreationError: Error?
 
+    /// Embedded shader source for BatchNorm kernel
+    private static let shaderSource = """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct BatchNormParams {
+        uint channels;
+        uint spatialSize;
+        float epsilon;
+    };
+
+    kernel void batch_norm_inference(
+        device const float* input [[buffer(0)]],
+        device float* output [[buffer(1)]],
+        device const float* gamma [[buffer(2)]],
+        device const float* beta [[buffer(3)]],
+        device const float* runningMean [[buffer(4)]],
+        device const float* runningVar [[buffer(5)]],
+        constant BatchNormParams& params [[buffer(6)]],
+        uint id [[thread_position_in_grid]]
+    ) {
+        uint channelIdx = (id / params.spatialSize) % params.channels;
+
+        float x = input[id];
+        float mean = runningMean[channelIdx];
+        float var_val = runningVar[channelIdx];
+        float g = gamma[channelIdx];
+        float b = beta[channelIdx];
+
+        output[id] = g * (x - mean) / sqrt(var_val + params.epsilon) + b;
+    }
+    """
+
     /// Initialize BatchNorm1D layer
     /// - Parameters:
     ///   - device: Metal audio device
@@ -2073,9 +2355,9 @@ public final class BatchNorm1D: NNLayer, @unchecked Sendable {
         try runningMeanTensor.copy(from: [Float](repeating: 0.0, count: channels))
         try runningVarTensor.copy(from: [Float](repeating: 1.0, count: channels))
 
-        // Load kernel from NN.metal
+        // Load kernel from embedded shader source
         do {
-            self.pipeline = try device.makeComputePipeline(functionName: "batch_norm_inference")
+            self.pipeline = try device.makeComputePipeline(source: Self.shaderSource, functionName: "batch_norm_inference")
             self.pipelineCreationError = nil
         } catch {
             if MetalNNConfig.strictGPUMode {
@@ -2183,6 +2465,12 @@ public final class BatchNorm1D: NNLayer, @unchecked Sendable {
 /// - **Training**: Not supported (this is inference-only)
 /// - **Inference**: Identity function (output = input)
 ///
+/// ## GPU vs CPU Synchronization
+/// When initialized with `AudioDevice`, uses GPU compute kernel which properly synchronizes
+/// with prior GPU work in the command buffer. The convenience init without device creates
+/// a **CPU-only** layer that uses `memcpy` - this may not sync with prior GPU work if the
+/// previous layer was GPU-computed. Prefer the device-based init for pipeline safety.
+///
 /// ## Thread Safety
 /// `Dropout` is thread-safe after initialization. Uses GPU compute for proper synchronization.
 public final class Dropout: NNLayer, @unchecked Sendable {
@@ -2239,7 +2527,14 @@ public final class Dropout: NNLayer, @unchecked Sendable {
         }
     }
 
-    /// Convenience initializer without device (CPU-only, for backward compatibility)
+    /// Convenience initializer without device - **CPU-only mode**
+    ///
+    /// Creates a Dropout layer that uses CPU memcpy instead of GPU compute.
+    ///
+    /// - Warning: This CPU-only mode may not properly synchronize with prior GPU work.
+    ///   If the previous layer in your pipeline runs on GPU, use `init(device:inputShape:rate:)`
+    ///   instead to ensure proper synchronization.
+    ///
     /// - Parameters:
     ///   - inputShape: Shape of input/output tensor
     ///   - rate: Dropout rate (0.0 to 1.0). Only stored for documentation.

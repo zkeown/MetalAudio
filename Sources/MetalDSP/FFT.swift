@@ -321,7 +321,8 @@ public final class FFT {
     private static func isPowerOf4(_ n: Int) -> Bool {
         guard n > 0 && (n & (n - 1)) == 0 else { return false }
         // A power of 4 has log2 that is even (log2(4^k) = 2k)
-        let log2N = Int(log2(Double(n)))
+        // Use integer math: trailingZeroBitCount gives log2 for power of 2
+        let log2N = n.trailingZeroBitCount
         return log2N % 2 == 0
     }
 
@@ -561,7 +562,8 @@ public final class FFT {
             // Create bit reversal LUT (5-15% faster than computing per-thread)
             gpuBitReversalLUTPipeline = try? device.makeComputePipeline(functionName: "fft_bit_reversal_lut")
             if gpuBitReversalLUTPipeline != nil {
-                let logN = Int(log2(Double(config.size)))
+                // Use integer math for log2 (trailingZeroBitCount = log2 for power of 2)
+                let logN = config.size.trailingZeroBitCount
                 var bitReversalIndices = [UInt32](repeating: 0, count: config.size)
                 for i in 0..<config.size {
                     var rev: UInt32 = 0
@@ -745,15 +747,29 @@ public final class FFT {
     /// it falls back to CPU (Accelerate) and returns `.vdsp` to indicate the actual backend used.
     /// Check the return value if you need to confirm GPU execution occurred.
     ///
+    /// ## Input Requirements
+    /// Input must be interleaved [real, imag] pairs with length `config.size * 2`.
+    /// Undersized inputs cause an error; oversized inputs are truncated to config.size elements.
+    ///
     /// - Parameters:
-    ///   - input: Complex input as interleaved [real, imag] pairs (float2 array)
-    ///   - output: Complex output as interleaved [real, imag] pairs (must be pre-sized)
+    ///   - input: Complex input as interleaved [real, imag] pairs (float2 array, length = config.size * 2)
+    ///   - output: Complex output as interleaved [real, imag] pairs (will be resized if needed)
     /// - Returns: The backend that was actually used (`.gpu` if GPU succeeded, `.vdsp` if fallback occurred)
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if input is smaller than required
     @discardableResult
     public func forwardGPU(
         input: [Float],
         output: inout [Float]
     ) throws -> Backend {
+        // Validate input size: must be at least config.size * 2 (interleaved format)
+        let expectedInputSize = config.size * 2
+        guard input.count >= expectedInputSize else {
+            throw MetalAudioError.bufferSizeMismatch(
+                expected: expectedInputSize,
+                actual: input.count
+            )
+        }
+
         // Acquire lock to prevent concurrent release of GPU resources
         os_unfair_lock_lock(&gpuResourceLock)
 
@@ -786,7 +802,8 @@ public final class FFT {
         #endif
 
         var n = UInt32(config.size)
-        var logN = UInt32(log2(Double(config.size)))
+        // Use integer math for log2 (trailingZeroBitCount = log2 for power of 2)
+        var logN = UInt32(config.size.trailingZeroBitCount)
 
         // Determine which bit reversal pipeline to use (LUT is 5-15% faster)
         let useLUTBitReversal = gpuBitReversalLUTPipeline != nil && gpuBitReversalLUT != nil
@@ -952,15 +969,29 @@ public final class FFT {
     /// This method explicitly requests GPU execution. If GPU resources are unavailable,
     /// it falls back to CPU (Accelerate) and returns `.vdsp` to indicate the actual backend used.
     ///
+    /// ## Input Requirements
+    /// Input must be interleaved [real, imag] pairs with length `config.size * 2`.
+    /// Undersized inputs cause an error; oversized inputs are truncated to config.size elements.
+    ///
     /// - Parameters:
-    ///   - input: Complex input as interleaved [real, imag] pairs (float2 array)
-    ///   - output: Complex output as interleaved [real, imag] pairs (must be pre-sized)
+    ///   - input: Complex input as interleaved [real, imag] pairs (float2 array, length = config.size * 2)
+    ///   - output: Complex output as interleaved [real, imag] pairs (will be resized if needed)
     /// - Returns: The backend that was actually used (`.gpu` if GPU succeeded, `.vdsp` if fallback occurred)
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if input is smaller than required
     @discardableResult
     public func inverseGPU(
         input: [Float],
         output: inout [Float]
     ) throws -> Backend {
+        // Validate input size: must be at least config.size * 2 (interleaved format)
+        let expectedInputSize = config.size * 2
+        guard input.count >= expectedInputSize else {
+            throw MetalAudioError.bufferSizeMismatch(
+                expected: expectedInputSize,
+                actual: input.count
+            )
+        }
+
         // Acquire lock to prevent concurrent release of GPU resources
         os_unfair_lock_lock(&gpuResourceLock)
 
@@ -995,7 +1026,8 @@ public final class FFT {
         #endif
 
         var n = UInt32(config.size)
-        var logN = UInt32(log2(Double(config.size)))
+        // Use integer math for log2 (trailingZeroBitCount = log2 for power of 2)
+        var logN = UInt32(config.size.trailingZeroBitCount)
 
         // Determine which bit reversal pipeline to use (LUT is 5-15% faster)
         let useLUTBitReversal = gpuBitReversalLUTPipeline != nil && gpuBitReversalLUT != nil
@@ -1765,8 +1797,13 @@ extension FFT {
         let batchSize = inputs.count
         let fftSize = config.size
         let elementSize = MemoryLayout<Float>.stride * 2  // float2 per element
-        let perFFTBufferSize = fftSize * elementSize
-        let totalBufferSize = batchSize * perFFTBufferSize
+
+        // Check for overflow in buffer size calculations to prevent memory corruption
+        let (perFFTBufferSize, overflow1) = fftSize.multipliedReportingOverflow(by: elementSize)
+        let (totalBufferSize, overflow2) = batchSize.multipliedReportingOverflow(by: perFFTBufferSize)
+        guard !overflow1 && !overflow2 else {
+            throw FFTError.batchSizeOverflow(batchSize: batchSize, fftSize: fftSize)
+        }
 
         // Use pre-allocated batch buffer when capacity is sufficient (avoids 1-5ms allocation overhead)
         // For larger batches, allocate a new buffer (rare case)
@@ -1819,7 +1856,8 @@ extension FFT {
         #endif
 
         var n = UInt32(fftSize)
-        var logN = UInt32(log2(Double(fftSize)))
+        // Use integer math for log2 instead of floating-point to avoid precision issues
+        var logN = UInt32(fftSize.trailingZeroBitCount)
         let numStages = Int(logN)
 
         let useOptimized = gpuButterflyOptimizedPipeline != nil && gpuTwiddleBuffer != nil
@@ -1945,10 +1983,19 @@ extension FFT {
     /// GPU resources will be lazily recreated on the next forward/inverse call.
     ///
     /// Thread-safe: Uses internal locking to prevent release during active GPU operations.
+    /// Acquires both gpuResourceLock and batchBufferLock to prevent race conditions
+    /// with concurrent forwardBatchGPU calls.
     public func releaseGPUResources() {
-        // Acquire lock to prevent release during GPU execution
+        // Acquire BOTH locks to prevent race conditions:
+        // - gpuResourceLock protects gpuDataBuffer and MPS buffers (used by forwardGPU/inverseGPU)
+        // - batchBufferLock protects gpuBatchBuffer (used by forwardBatchGPU)
+        // Lock order: gpuResourceLock first, then batchBufferLock (consistent with other code paths)
         os_unfair_lock_lock(&gpuResourceLock)
-        defer { os_unfair_lock_unlock(&gpuResourceLock) }
+        os_unfair_lock_lock(&batchBufferLock)
+        defer {
+            os_unfair_lock_unlock(&batchBufferLock)
+            os_unfair_lock_unlock(&gpuResourceLock)
+        }
 
         gpuDataBuffer = nil
         gpuBatchBuffer = nil

@@ -703,6 +703,10 @@ public final class GRU: NNLayer {
     private var workOutputData: [Float] = []
     private var workOutputCapacity: Int = 0
 
+    // Batched GEMM work buffers (for forwardOptimized)
+    private var workPreIH: [Float] = []
+    private var workPreIHCapacity: Int = 0
+
     public init(
         device: AudioDevice,
         inputSize: Int,
@@ -804,7 +808,7 @@ public final class GRU: NNLayer {
     }
 
     public func forward(input: Tensor, output: Tensor, encoder: MTLComputeCommandEncoder) throws {
-        // Similar to LSTM but with GRU equations
+        // GRU equations:
         // r = sigmoid(W_ir @ x + b_ir + W_hr @ h + b_hr)
         // z = sigmoid(W_iz @ x + b_iz + W_hz @ h + b_hz)
         // n = tanh(W_in @ x + b_in + r * (W_hn @ h + b_hn))
@@ -814,10 +818,134 @@ public final class GRU: NNLayer {
         os_unfair_lock_lock(&stateLock)
         defer { os_unfair_lock_unlock(&stateLock) }
 
-        // CPU implementation for now
-        try forwardCPU(input: input, output: output)
+        // Use optimized path that batches input matrix multiplications
+        try forwardOptimized(input: input, output: output)
     }
 
+    /// Optimized forward pass that batches input matrix multiplications
+    /// Phase 1: Compute pre_ih[t] = W_ih @ x[t] + b_ih for all t in one batched GEMM
+    /// Phase 2: Sequential scan with only W_hh @ h computations (50% fewer GEMVs)
+    private func forwardOptimized(input: Tensor, output: Tensor) throws {
+        let sequenceLength = input.shape[0]
+        let gateSize = 3 * hiddenSize
+        let outputSize = sequenceLength * hiddenSize * numDirections
+
+        // Ensure sequence-dependent work buffers are large enough
+        let preIHSize = sequenceLength * gateSize
+        if workPreIHCapacity < preIHSize {
+            workPreIH = [Float](repeating: 0, count: preIHSize)
+            workPreIHCapacity = preIHSize
+        }
+
+        // Ensure output work buffer is large enough
+        if workOutputCapacity < outputSize {
+            workOutputData = [Float](repeating: 0, count: outputSize)
+            workOutputCapacity = outputSize
+        } else {
+            workOutputData.withUnsafeMutableBufferPointer { ptr in
+                guard let base = ptr.baseAddress else { return }
+                memset(base, 0, outputSize * MemoryLayout<Float>.stride)
+            }
+        }
+
+        // Copy input to work buffer
+        let inputArray = input.toArray()
+
+        for direction in 0..<numDirections {
+            let reverse = direction == 1
+
+            let wih = weightsIH[direction].floatPointer
+            let whh = weightsHH[direction].floatPointer
+            let bih = biasIH[direction].floatPointer
+            let bhh = biasHH[direction].floatPointer
+            let h = hiddenState[direction].floatPointer
+
+            // Phase 1: Batch compute all input contributions
+            // pre_ih = X @ W_ih^T where X is [T, in], W_ih is [3h, in]
+            // Result is [T, 3h]
+            workPreIH.withUnsafeMutableBufferPointer { preIHPtr in
+                guard let preIHBase = preIHPtr.baseAddress else { return }
+
+                inputArray.withUnsafeBufferPointer { inputPtr in
+                    guard let inputBase = inputPtr.baseAddress else { return }
+
+                    cblas_sgemm(
+                        CblasRowMajor,
+                        CblasNoTrans,      // X not transposed: [T, in]
+                        CblasTrans,        // W_ih transposed: [3h, in]^T = [in, 3h]
+                        Int32(sequenceLength),
+                        Int32(gateSize),
+                        Int32(inputSize),
+                        1.0,
+                        inputBase, Int32(inputSize),
+                        wih, Int32(inputSize),
+                        0.0,
+                        preIHBase, Int32(gateSize)
+                    )
+
+                    // Add bias to each row
+                    for t in 0..<sequenceLength {
+                        let rowStart = t * gateSize
+                        vDSP_vadd(preIHBase + rowStart, 1, bih, 1, preIHBase + rowStart, 1, vDSP_Length(gateSize))
+                    }
+                }
+            }
+
+            // Phase 2: Sequential scan with only W_hh computations
+            let start = reverse ? sequenceLength - 1 : 0
+            let end = reverse ? -1 : sequenceLength
+            let step = reverse ? -1 : 1
+
+            for t in stride(from: start, to: end, by: step) {
+                let preIHOffset = t * gateSize
+
+                // Compute hidden contribution: hhGates = W_hh @ h + b_hh
+                workHHGates[direction].withUnsafeMutableBufferPointer { hhPtr in
+                    guard let hhBase = hhPtr.baseAddress else { return }
+                    cblas_sgemv(
+                        CblasRowMajor, CblasNoTrans,
+                        Int32(gateSize), Int32(hiddenSize),
+                        1.0, whh, Int32(hiddenSize),
+                        h, 1,
+                        0.0, hhBase, 1
+                    )
+                    vDSP_vadd(hhBase, 1, bhh, 1, hhBase, 1, vDSP_Length(gateSize))
+                }
+
+                // Apply GRU equations
+                workPreIH.withUnsafeBufferPointer { preIHPtr in
+                    guard let preIHBase = preIHPtr.baseAddress else { return }
+                    workHHGates[direction].withUnsafeBufferPointer { hhPtr in
+                        guard let hhBase = hhPtr.baseAddress else { return }
+
+                        for j in 0..<hiddenSize {
+                            // GRU equations:
+                            // r = sigmoid(W_ir @ x + b_ir + W_hr @ h + b_hr)
+                            // z = sigmoid(W_iz @ x + b_iz + W_hz @ h + b_hz)
+                            // n = tanh(W_in @ x + b_in + r * (W_hn @ h + b_hn))
+                            // h' = (1 - z) * n + z * h
+                            let r = sigmoid(preIHBase[preIHOffset + j] + hhBase[j])  // Reset gate
+                            let z = sigmoid(preIHBase[preIHOffset + hiddenSize + j] + hhBase[hiddenSize + j])  // Update gate
+                            let n = Darwin.tanh(preIHBase[preIHOffset + 2 * hiddenSize + j] +
+                                              r * hhBase[2 * hiddenSize + j])  // New gate
+
+                            h[j] = (1 - z) * n + z * h[j]
+                        }
+                    }
+                }
+
+                // Store output
+                let outputOffset = t * hiddenSize * numDirections + direction * hiddenSize
+                memcpy(workOutputData.withUnsafeMutableBufferPointer { $0 }.baseAddress! + outputOffset,
+                       h, hiddenSize * MemoryLayout<Float>.stride)
+            }
+        }
+
+        let finalOutput = Array(workOutputData.prefix(outputSize))
+        try output.copy(from: finalOutput)
+    }
+
+    /// Original CPU forward (kept for reference/debugging)
     private func forwardCPU(input: Tensor, output: Tensor) throws {
         let sequenceLength = input.shape[0]
         let inputData = input.toArray()

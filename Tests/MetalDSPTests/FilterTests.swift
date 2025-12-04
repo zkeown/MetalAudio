@@ -1033,18 +1033,23 @@ final class FilterBankExtendedTests: XCTestCase {
             sampleRate: 44100
         )
 
-        // Setting band outside range should be handled gracefully
-        try bank.setBandGain(
+        // Setting band outside range should throw (fail-fast is better than silent ignore)
+        XCTAssertThrowsError(try bank.setBandGain(
             band: 100,  // Way out of range
             gainDB: 6.0,
             frequency: 1000,
             sampleRate: 44100
-        )
-
-        // Should not crash - just silently ignore
-        let input = [Float](repeating: 1.0, count: 256)
-        let output = bank.processSeries(input: input)
-        XCTAssertEqual(output.count, input.count)
+        )) { error in
+            guard let filterError = error as? FilterError else {
+                XCTFail("Expected FilterError, got \(type(of: error))")
+                return
+            }
+            if case .invalidParameter(let name, _, _) = filterError {
+                XCTAssertEqual(name, "band")
+            } else {
+                XCTFail("Expected invalidParameter error for band")
+            }
+        }
     }
 
     func testFilterBankNegativeBand() throws {
@@ -1055,17 +1060,23 @@ final class FilterBankExtendedTests: XCTestCase {
             sampleRate: 44100
         )
 
-        // Negative band index should be handled gracefully
-        try bank.setBandGain(
+        // Negative band index should throw (fail-fast is better than silent ignore)
+        XCTAssertThrowsError(try bank.setBandGain(
             band: -1,  // Negative
             gainDB: 6.0,
             frequency: 1000,
             sampleRate: 44100
-        )
-
-        let input = [Float](repeating: 1.0, count: 256)
-        let output = bank.processSeries(input: input)
-        XCTAssertEqual(output.count, input.count)
+        )) { error in
+            guard let filterError = error as? FilterError else {
+                XCTFail("Expected FilterError, got \(type(of: error))")
+                return
+            }
+            if case .invalidParameter(let name, _, _) = filterError {
+                XCTAssertEqual(name, "band")
+            } else {
+                XCTFail("Expected invalidParameter error for band")
+            }
+        }
     }
 
     func testFilterBankSeriesVsParallelDifference() throws {

@@ -273,6 +273,22 @@ public final class BiquadFilter {
             a2: Float(a2 / a0)
         )
 
+        // Check for NaN/Inf after normalization (can occur with extreme parameters)
+        // This catches cases where Float32 overflow or underflow occurred during conversion
+        guard !coefficients.b0.isNaN && !coefficients.b0.isInfinite &&
+              !coefficients.b1.isNaN && !coefficients.b1.isInfinite &&
+              !coefficients.b2.isNaN && !coefficients.b2.isInfinite &&
+              !coefficients.a1.isNaN && !coefficients.a1.isInfinite &&
+              !coefficients.a2.isNaN && !coefficients.a2.isInfinite else {
+            throw FilterError.invalidParameter(
+                name: "coefficients",
+                value: 0,
+                requirement: "normalized coefficients must not be NaN or Infinite. " +
+                    "This typically indicates extreme parameter combinations " +
+                    "(very high Q, frequency near 0 or Nyquist)"
+            )
+        }
+
         // Update Accelerate setup
         updateBiquadSetup()
     }
@@ -348,10 +364,9 @@ public final class BiquadFilter {
         // Sync delays array with vDSP state for consistency on mode switch
         // Note: We can't read vDSP's internal state, so we approximate by
         // running a zero through to capture state effect
-        if let lastOutput = output.last, input.count > 0 {
+        if let lastOutput = output.last, let lastInput = input.last {
             // Update our delay estimate based on the filter equation
             // This helps if user switches to per-sample processing
-            let lastInput = input.last!
             delays[0] = Double(coefficients.b1 * lastInput - coefficients.a1 * lastOutput + Float(delays[1]))
             delays[1] = Double(coefficients.b2 * lastInput - coefficients.a2 * lastOutput)
         }
@@ -378,12 +393,21 @@ public final class BiquadFilter {
     /// Validate that the filter is stable (poles inside unit circle)
     ///
     /// For a biquad filter with denominator 1 + a1*z^-1 + a2*z^-2,
-    /// the stability conditions are:
+    /// the stability conditions (Jury criterion) are:
+    /// - Coefficients must not be NaN or Infinite
     /// - |a2| < 1 (both poles have magnitude < 1)
     /// - |a1| < 1 + a2 (poles are inside unit circle)
     ///
     /// - Throws: `FilterError.unstable` if the filter would produce unbounded output
     public func validateStability() throws {
+        // Check for NaN/Inf coefficients first (invalid state)
+        guard !coefficients.a1.isNaN && !coefficients.a1.isInfinite &&
+              !coefficients.a2.isNaN && !coefficients.a2.isInfinite else {
+            throw FilterError.unstable(
+                reason: "coefficients contain NaN or Infinite values, filter is in invalid state"
+            )
+        }
+
         // Check |a2| < 1
         guard abs(coefficients.a2) < 1.0 else {
             throw FilterError.unstable(
@@ -392,16 +416,23 @@ public final class BiquadFilter {
         }
 
         // Check |a1| < 1 + a2
+        // This condition ensures poles are inside the unit circle for both positive and negative a2.
+        // When a2 < 0, the bound becomes tighter: e.g., a2=-0.5 requires |a1| < 0.5
         guard abs(coefficients.a1) < 1.0 + coefficients.a2 else {
             throw FilterError.unstable(
-                reason: "a1 coefficient (\(coefficients.a1)) violates stability condition |a1| < 1 + a2"
+                reason: "a1 coefficient (\(coefficients.a1)) violates stability condition |a1| < 1 + a2 = \(1.0 + coefficients.a2)"
             )
         }
     }
 
     /// Check if the filter is stable without throwing
     public var isStable: Bool {
-        abs(coefficients.a2) < 1.0 && abs(coefficients.a1) < 1.0 + coefficients.a2
+        // Check for NaN/Inf first (always unstable)
+        guard !coefficients.a1.isNaN && !coefficients.a1.isInfinite &&
+              !coefficients.a2.isNaN && !coefficients.a2.isInfinite else {
+            return false
+        }
+        return abs(coefficients.a2) < 1.0 && abs(coefficients.a1) < 1.0 + coefficients.a2
     }
 }
 
@@ -450,6 +481,22 @@ public final class FilterBank {
                 name: "bandCount",
                 value: Float(bandCount),
                 requirement: "must be >= 2 for logarithmic band spacing"
+            )
+        }
+
+        // Validate frequencies are positive (required for log10)
+        guard lowFreq > 0 else {
+            throw FilterError.invalidParameter(
+                name: "lowFreq",
+                value: lowFreq,
+                requirement: "must be > 0 (got \(lowFreq), log10 requires positive values)"
+            )
+        }
+        guard highFreq > 0 && highFreq > lowFreq else {
+            throw FilterError.invalidParameter(
+                name: "highFreq",
+                value: highFreq,
+                requirement: "must be > 0 and > lowFreq (\(lowFreq))"
             )
         }
 

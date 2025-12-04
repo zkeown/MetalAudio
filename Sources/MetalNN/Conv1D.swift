@@ -1055,7 +1055,9 @@ public final class HalfConv1D: NNLayer {
             self.bias = nil
         }
 
-        self.pipeline = try device.makeComputePipeline(
+        // Use cached pipeline to avoid recompilation
+        self.pipeline = try HalfPrecisionPipelineCache.shared.getPipeline(
+            device: device,
             source: Self.shaderSource,
             functionName: "conv1d_half_forward"
         )

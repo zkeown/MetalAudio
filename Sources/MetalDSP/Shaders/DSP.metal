@@ -350,6 +350,10 @@ kernel void fft_butterfly_tiled(
             data[globalIdx] = shared[localIdx];
         }
     }
+
+    // Ensure all device writes are visible before kernel completion
+    // This guarantees consistency when multiple stages are dispatched in sequence
+    threadgroup_barrier(mem_flags::mem_device);
 }
 
 /// Radix-4 FFT butterfly for 2x fewer kernel launches and better memory locality
@@ -441,6 +445,12 @@ kernel void apply_window(
 ) {
     if (id >= length) return;
 
+    // Guard against division by zero when length <= 1
+    // Single-sample "window" is just the sample itself (window = 1.0)
+    if (length <= 1) {
+        return;  // data[id] *= 1.0f is a no-op
+    }
+
     float n = float(id);
     float N = float(length);
     float window = 1.0f;
@@ -481,6 +491,11 @@ kernel void apply_window_precomputed(
 /// Output length is computed with overflow checking. For very large inputs
 /// (inputLength + kernelLength > UINT_MAX), the kernel returns without processing.
 /// In practice, this limit (4B elements) far exceeds GPU memory capacity.
+///
+/// ## Index Safety
+/// Uses explicit bounds computation to avoid signed/unsigned arithmetic issues.
+/// All index calculations are done in uint to prevent undefined behavior from
+/// mixed signed/unsigned operations.
 kernel void convolve_direct(
     device const float* input [[buffer(0)]],
     device const float* kernel [[buffer(1)]],
@@ -498,11 +513,17 @@ kernel void convolve_direct(
 
     float sum = 0.0f;
 
-    int kStart = max(0, int(id) - int(inputLength) + 1);
-    int kEnd = min(int(kernelLength), int(id) + 1);
+    // Compute bounds using uint arithmetic to avoid signed/unsigned issues
+    // kStart = max(0, id - inputLength + 1)
+    // kEnd = min(kernelLength, id + 1)
+    uint kStart = (id + 1 > inputLength) ? (id + 1 - inputLength) : 0;
+    uint kEnd = (kernelLength < id + 1) ? kernelLength : (id + 1);
 
-    for (int k = kStart; k < kEnd; k++) {
-        sum += kernel[k] * input[id - k];
+    // Iterate using uint indices to avoid signed/unsigned conversion issues
+    for (uint k = kStart; k < kEnd; k++) {
+        // inputIdx = id - k is always valid since k <= id (because k < kEnd <= id + 1)
+        uint inputIdx = id - k;
+        sum += kernel[k] * input[inputIdx];
     }
 
     output[id] = sum;
@@ -517,6 +538,11 @@ kernel void convolve_direct(
 /// - Kernels longer than 64 samples where precision matters
 /// - Reverb impulse responses
 /// - High-quality audio processing requiring maximum precision
+///
+/// ## Index Safety
+/// Uses explicit bounds computation to avoid signed/unsigned arithmetic issues.
+/// All index calculations are done in uint to prevent undefined behavior from
+/// mixed signed/unsigned operations.
 kernel void convolve_direct_kahan(
     device const float* input [[buffer(0)]],
     device const float* kernel [[buffer(1)]],
@@ -535,11 +561,17 @@ kernel void convolve_direct_kahan(
     float sum = 0.0f;
     float c = 0.0f;  // Compensation for lost low-order bits
 
-    int kStart = max(0, int(id) - int(inputLength) + 1);
-    int kEnd = min(int(kernelLength), int(id) + 1);
+    // Compute bounds using uint arithmetic to avoid signed/unsigned issues
+    // kStart = max(0, id - inputLength + 1)
+    // kEnd = min(kernelLength, id + 1)
+    uint kStart = (id + 1 > inputLength) ? (id + 1 - inputLength) : 0;
+    uint kEnd = (kernelLength < id + 1) ? kernelLength : (id + 1);
 
-    for (int k = kStart; k < kEnd; k++) {
-        float product = kernel[k] * input[id - k];
+    // Iterate using uint indices to avoid signed/unsigned conversion issues
+    for (uint k = kStart; k < kEnd; k++) {
+        // inputIdx = id - k is always valid since k <= id (because k < kEnd <= id + 1)
+        uint inputIdx = id - k;
+        float product = kernel[k] * input[inputIdx];
         float y = product - c;    // Compensate for previous error
         float t = sum + y;        // Accumulate
         c = (t - sum) - y;        // New error term (algebraically 0, but captures rounding)
@@ -550,6 +582,11 @@ kernel void convolve_direct_kahan(
 }
 
 /// Frequency domain multiplication for FFT convolution
+///
+/// ## Denormal Handling
+/// Results are flushed to zero when below DENORMAL_THRESHOLD to prevent
+/// 10-100x performance degradation on older GPUs (A9-A11) when processing
+/// quiet audio or filter decay tails.
 kernel void complex_multiply(
     device const float2* a [[buffer(0)]],
     device const float2* b [[buffer(1)]],
@@ -562,13 +599,21 @@ kernel void complex_multiply(
     float2 va = a[id];
     float2 vb = b[id];
 
+    // Complex multiplication with denormal flushing for real-time performance
+    float realPart = va.x * vb.x - va.y * vb.y;
+    float imagPart = va.x * vb.y + va.y * vb.x;
+
     result[id] = float2(
-        va.x * vb.x - va.y * vb.y,
-        va.x * vb.y + va.y * vb.x
+        flush_denormal(realPart),
+        flush_denormal(imagPart)
     );
 }
 
 /// Complex multiply-accumulate for partitioned convolution
+///
+/// ## Denormal Handling
+/// Results are flushed to zero when below DENORMAL_THRESHOLD to prevent
+/// performance degradation when accumulating many partitions with quiet audio.
 kernel void complex_multiply_accumulate(
     device const float2* input [[buffer(0)]],
     device const float2* kernel [[buffer(1)]],
@@ -582,10 +627,13 @@ kernel void complex_multiply_accumulate(
     float2 kern_val = kernel[id];
     float2 acc_val = accumulator[id];
 
-    // acc += input * kernel
+    // acc += input * kernel with denormal flushing
+    float realPart = acc_val.x + (in_val.x * kern_val.x - in_val.y * kern_val.y);
+    float imagPart = acc_val.y + (in_val.x * kern_val.y + in_val.y * kern_val.x);
+
     accumulator[id] = float2(
-        acc_val.x + (in_val.x * kern_val.x - in_val.y * kern_val.y),
-        acc_val.y + (in_val.x * kern_val.y + in_val.y * kern_val.x)
+        flush_denormal(realPart),
+        flush_denormal(imagPart)
     );
 }
 
@@ -598,6 +646,10 @@ kernel void complex_multiply_accumulate(
 /// - Partitioned convolution with >16 partitions
 /// - Long impulse responses (reverb, room simulation)
 /// - Applications requiring maximum precision
+///
+/// ## Denormal Handling
+/// Final accumulator values are flushed to zero to prevent performance
+/// degradation in subsequent operations when processing quiet audio.
 kernel void complex_multiply_accumulate_kahan(
     device const float2* input [[buffer(0)]],
     device const float2* kernel [[buffer(1)]],
@@ -623,7 +675,12 @@ kernel void complex_multiply_accumulate_kahan(
     float2 y = product - c;
     float2 t = acc_val + y;
     compensation[id] = (t - acc_val) - y;
-    accumulator[id] = t;
+
+    // Flush denormals from final accumulator to maintain real-time performance
+    accumulator[id] = float2(
+        flush_denormal(t.x),
+        flush_denormal(t.y)
+    );
 }
 
 // MARK: - Filter Kernels
@@ -715,56 +772,102 @@ kernel void biquad_compute_block_contributions(
 // MARK: - Spectral Processing
 
 /// Compute magnitude from complex spectrum
+///
+/// Buffer requirements:
+/// - spectrum: at least `length` float2 elements
+/// - magnitude: at least `length` float elements
 kernel void compute_magnitude(
     device const float2* spectrum [[buffer(0)]],
     device float* magnitude [[buffer(1)]],
+    constant uint& length [[buffer(2)]],
     uint id [[thread_position_in_grid]]
 ) {
+    if (id >= length) return;
     float2 c = spectrum[id];
     magnitude[id] = sqrt(c.x * c.x + c.y * c.y);
 }
 
 /// Compute phase from complex spectrum
+///
+/// Buffer requirements:
+/// - spectrum: at least `length` float2 elements
+/// - phase: at least `length` float elements
 kernel void compute_phase(
     device const float2* spectrum [[buffer(0)]],
     device float* phase [[buffer(1)]],
+    constant uint& length [[buffer(2)]],
     uint id [[thread_position_in_grid]]
 ) {
+    if (id >= length) return;
     float2 c = spectrum[id];
     phase[id] = atan2(c.y, c.x);
 }
 
 /// Reconstruct complex from magnitude and phase
+///
+/// Buffer requirements:
+/// - magnitude: at least `length` float elements
+/// - phase: at least `length` float elements
+/// - spectrum: at least `length` float2 elements
 kernel void polar_to_complex(
     device const float* magnitude [[buffer(0)]],
     device const float* phase [[buffer(1)]],
     device float2* spectrum [[buffer(2)]],
+    constant uint& length [[buffer(3)]],
     uint id [[thread_position_in_grid]]
 ) {
+    if (id >= length) return;
     float mag = magnitude[id];
     float ph = phase[id];
     spectrum[id] = float2(mag * cos(ph), mag * sin(ph));
 }
 
 /// Compute power spectrum (magnitude squared)
+///
+/// Buffer requirements:
+/// - spectrum: at least `length` float2 elements
+/// - power: at least `length` float elements
 kernel void compute_power(
     device const float2* spectrum [[buffer(0)]],
     device float* power [[buffer(1)]],
+    constant uint& length [[buffer(2)]],
     uint id [[thread_position_in_grid]]
 ) {
+    if (id >= length) return;
     float2 c = spectrum[id];
     power[id] = c.x * c.x + c.y * c.y;
 }
 
 /// Convert to decibels
+///
+/// Computes 20 * log10(data[i] / reference) with floor clamping.
+///
+/// Buffer requirements:
+/// - data: at least `length` float elements (modified in-place)
+///
+/// ## Division by Zero Protection
+/// If reference <= 0, outputs minDB for all values (safe fallback).
+/// Values below 1e-10 * reference are clamped to prevent -inf.
 kernel void to_decibels(
     device float* data [[buffer(0)]],
     constant float& reference [[buffer(1)]],
     constant float& minDB [[buffer(2)]],
+    constant uint& length [[buffer(3)]],
     uint id [[thread_position_in_grid]]
 ) {
+    if (id >= length) return;
+
+    // Guard against division by zero or negative reference
+    // If reference is invalid, output minDB (safe fallback)
+    if (reference <= 0.0f) {
+        data[id] = minDB;
+        return;
+    }
+
     float val = data[id];
-    float db = 20.0f * log10(max(val / reference, 1e-10f));
+    // Clamp to 1e-10 * reference to prevent log10(0) = -inf
+    float ratio = max(val / reference, 1e-10f);
+    float db = 20.0f * log10(ratio);
     data[id] = max(db, minDB);
 }
 

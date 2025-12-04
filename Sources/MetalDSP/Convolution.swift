@@ -340,7 +340,12 @@ public final class Convolution {
             throw ConvolutionError.kernelNotConfigured
         }
 
-        let outputSize = input.count + kernel.count - 1
+        // Check for overflow in output size calculation
+        let (outputSize, overflow) = input.count.addingReportingOverflow(kernel.count - 1)
+        guard !overflow else {
+            throw ConvolutionError.outputSizeOverflow(inputSize: input.count, kernelSize: kernel.count)
+        }
+
         if output.count < outputSize {
             output = [Float](repeating: 0, count: outputSize)
         }
@@ -504,13 +509,19 @@ public final class Convolution {
 
             // Overlap-add to output using vectorized vDSP_vadd (3-5x faster than scalar loop)
             let outputOffset = block * blockSize
+
+            // Guard against offset exceeding output size (prevents unsigned wrap-around in vDSP_Length)
+            guard outputOffset < fullOutputSize else { break }
+
             let samplesToWrite = min(fftSize, fullOutputSize - outputOffset)
             workOutputBlock.withUnsafeBufferPointer { workPtr in
                 output.withUnsafeMutableBufferPointer { outPtr in
+                    guard let outBase = outPtr.baseAddress,
+                          let workBase = workPtr.baseAddress else { return }
                     vDSP_vadd(
-                        outPtr.baseAddress! + outputOffset, 1,
-                        workPtr.baseAddress!, 1,
-                        outPtr.baseAddress! + outputOffset, 1,
+                        outBase + outputOffset, 1,
+                        workBase, 1,
+                        outBase + outputOffset, 1,
                         vDSP_Length(samplesToWrite)
                     )
                 }
@@ -568,15 +579,13 @@ extension Convolution: MemoryPressureResponder {
     public func didReceiveMemoryPressure(level: MemoryPressureLevel) {
         switch level {
         case .critical:
-            // Release FFT GPU resources
+            // Release FFT GPU resources (the main memory hogs)
             releaseFFTResources()
-            // Clear input buffer ring buffer to save memory (will be reallocated on next process)
-            // Lock protects against concurrent access from process() method
-            os_unfair_lock_lock(&stateLock)
-            if !partitions.isEmpty {
-                inputBuffer = [[Float]](repeating: [], count: partitionCount)
-            }
-            os_unfair_lock_unlock(&stateLock)
+            // Note: We do NOT clear inputBuffer because:
+            // 1. It's needed for correct partitioned convolution operation
+            // 2. Clearing it to empty arrays causes crashes in processPartitionedConvolution
+            // 3. The memory savings are minimal compared to FFT resources
+            // 4. If truly critical, the caller should deallocate the entire Convolution instance
         case .warning:
             // Release just FFT GPU resources
             releaseFFTResources()
