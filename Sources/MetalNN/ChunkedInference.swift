@@ -137,6 +137,14 @@ public final class ChunkedInference {
     /// Whether we've processed at least one full chunk (warmup complete)
     private var isWarmedUp: Bool = false
 
+    /// Count of input samples dropped due to buffer overflow
+    /// Reset this manually after reading to track overflow events
+    public private(set) var droppedInputSamples: Int = 0
+
+    /// Count of output samples dropped due to buffer overflow
+    /// Reset this manually after reading to track overflow events
+    public private(set) var droppedOutputSamples: Int = 0
+
     /// Total latency in samples
     public var latencySamples: Int {
         // Latency = chunk size (must accumulate full chunk) + overlap (for OLA)
@@ -210,8 +218,11 @@ public final class ChunkedInference {
         output: UnsafeMutablePointer<Float>,
         frameCount: Int
     ) -> Int {
-        // Write input to ring buffer
-        inputRing.write(input, count: frameCount)
+        // Write input to ring buffer, tracking any overflow
+        let written = inputRing.write(input, count: frameCount)
+        if written < frameCount {
+            droppedInputSamples += (frameCount - written)
+        }
 
         // Process complete chunks
         while inputRing.availableToRead >= config.chunkSize {
@@ -297,8 +308,11 @@ public final class ChunkedInference {
             }
 
             // Write completed samples (hop size worth)
-            _ = overlapBuffer.withUnsafeBufferPointer { ptr in
+            let outputWritten = overlapBuffer.withUnsafeBufferPointer { ptr in
                 outputRing.write(ptr.baseAddress!, count: config.hopSize)
+            }
+            if outputWritten < config.hopSize {
+                droppedOutputSamples += (config.hopSize - outputWritten)
             }
 
             // Store new overlap for next iteration
@@ -320,13 +334,19 @@ public final class ChunkedInference {
                     }
                 }
 
-                _ = outputChunk.withUnsafeBufferPointer { ptr in
+                let hopWritten = outputChunk.withUnsafeBufferPointer { ptr in
                     outputRing.write(ptr.baseAddress!, count: config.hopSize)
+                }
+                if hopWritten < config.hopSize {
+                    droppedOutputSamples += (config.hopSize - hopWritten)
                 }
             } else {
                 // No overlap: write full chunk
-                _ = outputChunk.withUnsafeBufferPointer { ptr in
+                let chunkWritten = outputChunk.withUnsafeBufferPointer { ptr in
                     outputRing.write(ptr.baseAddress!, count: config.chunkSize)
+                }
+                if chunkWritten < config.chunkSize {
+                    droppedOutputSamples += (config.chunkSize - chunkWritten)
                 }
             }
 
@@ -354,6 +374,17 @@ public final class ChunkedInference {
 
         samplesAccumulated = 0
         isWarmedUp = false
+        droppedInputSamples = 0
+        droppedOutputSamples = 0
+    }
+
+    /// Reset overflow counters without affecting processing state
+    ///
+    /// Call this after checking `droppedInputSamples`/`droppedOutputSamples`
+    /// to start fresh overflow tracking.
+    public func resetOverflowCounters() {
+        droppedInputSamples = 0
+        droppedOutputSamples = 0
     }
 
     // MARK: - Window Computation
@@ -453,5 +484,18 @@ public extension ChunkedInference {
     /// Latency in seconds at a given sample rate
     func latencySeconds(sampleRate: Double) -> Double {
         Double(latencySamples) / sampleRate
+    }
+
+    /// Whether any samples have been dropped due to buffer overflow
+    ///
+    /// Check this periodically to detect backpressure issues where
+    /// inference cannot keep up with audio input rate.
+    var hasOverflowed: Bool {
+        droppedInputSamples > 0 || droppedOutputSamples > 0
+    }
+
+    /// Total samples dropped (input + output) since last reset
+    var totalDroppedSamples: Int {
+        droppedInputSamples + droppedOutputSamples
     }
 }

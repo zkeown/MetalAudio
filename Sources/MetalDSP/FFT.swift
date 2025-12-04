@@ -40,8 +40,15 @@ public enum FFTError: Error, LocalizedError {
 
 // MARK: - Debug Validation
 
-/// Validates FFT output for NaN/Inf values in DEBUG builds only.
-/// This check is disabled in release builds for real-time performance.
+/// Global flag to enable NaN/Inf validation in release builds
+/// Set to `true` to enable validation for debugging production issues
+/// WARNING: Enabling this adds overhead to every FFT operation
+/// Note: Not thread-safe - set once at startup before processing begins
+public nonisolated(unsafe) var fftValidationEnabled: Bool = false
+
+/// Validates FFT output for NaN/Inf values.
+/// In DEBUG builds: Always runs (via sample-based checking)
+/// In RELEASE builds: Only runs if `fftValidationEnabled` is true
 ///
 /// Uses sampling to check a subset of values (first, last, and ~50 evenly-spaced samples)
 /// to catch common issues without O(n) overhead. Logs warnings but does NOT assert/crash,
@@ -51,10 +58,17 @@ public enum FFTError: Error, LocalizedError {
 ///   - buffer: Pointer to the buffer to validate
 ///   - count: Number of elements to check
 ///   - context: Description of the buffer for error messages (e.g., "outputReal")
+/// - Returns: `true` if NaN or Inf was detected, `false` otherwise
 @inline(__always)
-internal func debugValidateFFTOutput(_ buffer: UnsafePointer<Float>, count: Int, context: String) {
+@discardableResult
+internal func validateFFTOutput(_ buffer: UnsafePointer<Float>, count: Int, context: String) -> Bool {
     #if DEBUG
-    guard count > 0 else { return }
+    let shouldValidate = true
+    #else
+    let shouldValidate = fftValidationEnabled
+    #endif
+
+    guard shouldValidate && count > 0 else { return false }
 
     // Sample-based validation to avoid O(n) overhead
     let sampleCount = min(50, count)
@@ -99,7 +113,14 @@ internal func debugValidateFFTOutput(_ buffer: UnsafePointer<Float>, count: Int,
     if foundInf {
         print("[FFT] Warning: Inf detected in \(context) near index \(infIndex)")
     }
-    #endif
+
+    return foundNaN || foundInf
+}
+
+/// Legacy DEBUG-only validation (calls validateFFTOutput internally)
+@inline(__always)
+internal func debugValidateFFTOutput(_ buffer: UnsafePointer<Float>, count: Int, context: String) {
+    validateFFTOutput(buffer, count: count, context: context)
 }
 
 /// GPU-accelerated Fast Fourier Transform for audio processing

@@ -63,7 +63,7 @@ final class AudioUnitHelperTests: XCTestCase {
 
         XCTAssertTrue(helper.config.interleaved)
         // Interleaved buffer should be allocated
-        XCTAssertNotNil(helper.interleavedBufferPointer())
+        XCTAssertNotNil(helper.interleavedBuffer())
     }
 
     // MARK: - Buffer Pointer Tests
@@ -72,48 +72,48 @@ final class AudioUnitHelperTests: XCTestCase {
         let config = AudioUnitHelper.Config(channelCount: 2)
         let helper = AudioUnitHelper(config: config)
 
-        XCTAssertNotNil(helper.inputBufferPointer(channel: 0))
-        XCTAssertNotNil(helper.inputBufferPointer(channel: 1))
+        XCTAssertNotNil(helper.inputBuffer(channel: 0))
+        XCTAssertNotNil(helper.inputBuffer(channel: 1))
     }
 
     func testInputBufferPointerInvalidChannel() {
         let config = AudioUnitHelper.Config(channelCount: 2)
         let helper = AudioUnitHelper(config: config)
 
-        XCTAssertNil(helper.inputBufferPointer(channel: -1))
-        XCTAssertNil(helper.inputBufferPointer(channel: 2))
-        XCTAssertNil(helper.inputBufferPointer(channel: 100))
+        XCTAssertNil(helper.inputBuffer(channel: -1))
+        XCTAssertNil(helper.inputBuffer(channel: 2))
+        XCTAssertNil(helper.inputBuffer(channel: 100))
     }
 
     func testOutputBufferPointerValidChannel() {
         let config = AudioUnitHelper.Config(channelCount: 3)
         let helper = AudioUnitHelper(config: config)
 
-        XCTAssertNotNil(helper.outputBufferPointer(channel: 0))
-        XCTAssertNotNil(helper.outputBufferPointer(channel: 1))
-        XCTAssertNotNil(helper.outputBufferPointer(channel: 2))
+        XCTAssertNotNil(helper.outputBuffer(channel: 0))
+        XCTAssertNotNil(helper.outputBuffer(channel: 1))
+        XCTAssertNotNil(helper.outputBuffer(channel: 2))
     }
 
     func testOutputBufferPointerInvalidChannel() {
         let config = AudioUnitHelper.Config(channelCount: 2)
         let helper = AudioUnitHelper(config: config)
 
-        XCTAssertNil(helper.outputBufferPointer(channel: -1))
-        XCTAssertNil(helper.outputBufferPointer(channel: 2))
+        XCTAssertNil(helper.outputBuffer(channel: -1))
+        XCTAssertNil(helper.outputBuffer(channel: 2))
     }
 
     func testInterleavedBufferPointerWhenNotInterleaved() {
         let config = AudioUnitHelper.Config(interleaved: false)
         let helper = AudioUnitHelper(config: config)
 
-        XCTAssertNil(helper.interleavedBufferPointer())
+        XCTAssertNil(helper.interleavedBuffer())
     }
 
     func testInterleavedBufferPointerWhenInterleaved() {
         let config = AudioUnitHelper.Config(interleaved: true)
         let helper = AudioUnitHelper(config: config)
 
-        XCTAssertNotNil(helper.interleavedBufferPointer())
+        XCTAssertNotNil(helper.interleavedBuffer())
     }
 
     // MARK: - Closure-based Buffer Access Tests
@@ -180,7 +180,7 @@ final class AudioUnitHelperTests: XCTestCase {
         helper.interleaveToBuffer(frameCount: 4)
 
         // Expected interleaved: [1,5,2,6,3,7,4,8]
-        if let ptr = helper.interleavedBufferPointer() {
+        if let ptr = helper.interleavedBuffer() {
             XCTAssertEqual(ptr[0], 1.0)
             XCTAssertEqual(ptr[1], 5.0)
             XCTAssertEqual(ptr[2], 2.0)
@@ -200,7 +200,7 @@ final class AudioUnitHelperTests: XCTestCase {
 
         // Should not crash - just a no-op
         helper.interleaveToBuffer(frameCount: 4)
-        XCTAssertNil(helper.interleavedBufferPointer())
+        XCTAssertNil(helper.interleavedBuffer())
     }
 
     func testDeinterleaveFromBuffer() {
@@ -212,7 +212,7 @@ final class AudioUnitHelperTests: XCTestCase {
         let helper = AudioUnitHelper(config: config)
 
         // Set up interleaved data: [1,5,2,6,3,7,4,8]
-        if let ptr = helper.interleavedBufferPointer() {
+        if let ptr = helper.interleavedBuffer() {
             ptr[0] = 1.0; ptr[1] = 5.0
             ptr[2] = 2.0; ptr[3] = 6.0
             ptr[4] = 3.0; ptr[5] = 7.0
@@ -262,7 +262,7 @@ final class AudioUnitHelperTests: XCTestCase {
         // Only interleave first 3 frames
         helper.interleaveToBuffer(frameCount: 3)
 
-        if let ptr = helper.interleavedBufferPointer() {
+        if let ptr = helper.interleavedBuffer() {
             XCTAssertEqual(ptr[0], 0.0)
             XCTAssertEqual(ptr[1], 100.0)
             XCTAssertEqual(ptr[2], 1.0)
@@ -444,18 +444,18 @@ final class AudioUnitHelperTests: XCTestCase {
 
         // Verify all channels are accessible
         for channel in 0..<6 {
-            XCTAssertNotNil(helper.inputBufferPointer(channel: channel))
-            XCTAssertNotNil(helper.outputBufferPointer(channel: channel))
+            XCTAssertNotNil(helper.inputBuffer(channel: channel))
+            XCTAssertNotNil(helper.outputBuffer(channel: channel))
         }
-        XCTAssertNil(helper.inputBufferPointer(channel: 6))
+        XCTAssertNil(helper.inputBuffer(channel: 6))
     }
 
     func testMonoConfiguration() {
         let config = AudioUnitHelper.Config(channelCount: 1)
         let helper = AudioUnitHelper(config: config)
 
-        XCTAssertNotNil(helper.inputBufferPointer(channel: 0))
-        XCTAssertNil(helper.inputBufferPointer(channel: 1))
+        XCTAssertNotNil(helper.inputBuffer(channel: 0))
+        XCTAssertNil(helper.inputBuffer(channel: 1))
 
         let (inputs, outputs) = helper.createCapturedPointers()
         XCTAssertEqual(inputs.count, 1)

@@ -314,13 +314,14 @@ kernel void fft_butterfly_tiled(
 
             // Compute twiddle factor index
             // For tiled FFT, we need to account for tile position in global FFT
+            // Use uint64 for intermediate calculation to prevent overflow for large FFTs (N >= 2^24)
             uint twiddleStride = n >> (actualStage + 1);
-            uint localPos = posInButterfly + (groupId % (1 << actualStage)) * halfSize;
-            uint twiddleIdx = localPos * twiddleStride;
+            uint64_t localPos = (uint64_t)posInButterfly + ((uint64_t)(groupId % (1 << actualStage)) * halfSize);
+            uint64_t twiddleIdx64 = localPos * (uint64_t)twiddleStride;
             // Use bitwise AND instead of modulo (~30 cycles faster on Apple Silicon)
             // Valid because n is always a power of 2, so (n/2 - 1) is a valid bitmask
             uint twiddleMask = (n >> 1) - 1;
-            twiddleIdx = twiddleIdx & twiddleMask;
+            uint twiddleIdx = (uint)(twiddleIdx64 & (uint64_t)twiddleMask);
 
             float2 twiddle = twiddles[twiddleIdx];
 

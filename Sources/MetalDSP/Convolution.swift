@@ -87,7 +87,8 @@ public enum ConvolutionError: Error, LocalizedError {
 ///   (`inputWriteIndex`) modified on every `process()` call
 /// - **All modes**: Share working buffers (`workInputReal`, `workAccumReal`, etc.)
 ///   that are mutated during processing
-/// - **reset()**: Clears internal state without synchronization
+/// - **reset()**: Uses `stateLock` for internal state, but concurrent process()/reset()
+///   calls from different threads are still unsafe due to shared working buffers
 ///
 /// **Recommended patterns:**
 /// ```swift

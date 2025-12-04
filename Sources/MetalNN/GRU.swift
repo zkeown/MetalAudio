@@ -253,7 +253,11 @@ public final class GRU: NNLayer {
             let step = reverse ? -1 : 1
 
             for t in stride(from: start, to: end, by: step) {
-                let preIHOffset = t * gateSize
+                // SAFETY: Check for overflow before array access
+                let (preIHOffset, preIHOverflow) = t.multipliedReportingOverflow(by: gateSize)
+                guard !preIHOverflow && preIHOffset >= 0 && preIHOffset + gateSize <= workPreIH.count else {
+                    throw MetalAudioError.bufferOverflow("GRU: preIHOffset overflow at t=\(t)")
+                }
 
                 // Compute hidden contribution: hhGates = W_hh @ h + b_hh
                 workHHGates[direction].withUnsafeMutableBufferPointer { hhPtr in

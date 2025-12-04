@@ -46,14 +46,17 @@ public final class AudioUnitHelper {
     /// Configuration
     public let config: Config
 
-    /// Pre-allocated input buffer (per-channel for non-interleaved)
-    private var inputBuffers: [[Float]]
+    /// Pre-allocated input buffer pointers (per-channel for non-interleaved)
+    /// Using explicit allocation for stable pointer addresses (real-time safe)
+    private var inputBufferPointers: [UnsafeMutablePointer<Float>]
 
-    /// Pre-allocated output buffer (per-channel for non-interleaved)
-    private var outputBuffers: [[Float]]
+    /// Pre-allocated output buffer pointers (per-channel for non-interleaved)
+    /// Using explicit allocation for stable pointer addresses (real-time safe)
+    private var outputBufferPointers: [UnsafeMutablePointer<Float>]
 
     /// Pre-allocated interleaved buffer (if needed)
-    private var interleavedBuffer: [Float]
+    private var interleavedBufferPointer: UnsafeMutablePointer<Float>?
+    private var interleavedBufferCount: Int = 0
 
     /// Processing state - can be read atomically from render thread
     private var _bypassed: Bool = false
@@ -72,46 +75,77 @@ public final class AudioUnitHelper {
     public init(config: Config = Config()) {
         self.config = config
 
-        // Pre-allocate buffers
-        inputBuffers = (0..<config.channelCount).map { _ in
-            [Float](repeating: 0, count: config.maxFrames)
+        // Pre-allocate buffers using explicit allocation for stable addresses
+        // This ensures pointers captured in render blocks remain valid
+        inputBufferPointers = (0..<config.channelCount).map { _ in
+            let ptr = UnsafeMutablePointer<Float>.allocate(capacity: config.maxFrames)
+            ptr.initialize(repeating: 0, count: config.maxFrames)
+            return ptr
         }
 
-        outputBuffers = (0..<config.channelCount).map { _ in
-            [Float](repeating: 0, count: config.maxFrames)
+        outputBufferPointers = (0..<config.channelCount).map { _ in
+            let ptr = UnsafeMutablePointer<Float>.allocate(capacity: config.maxFrames)
+            ptr.initialize(repeating: 0, count: config.maxFrames)
+            return ptr
         }
 
-        interleavedBuffer = config.interleaved
-            ? [Float](repeating: 0, count: config.maxFrames * config.channelCount)
-            : []
+        if config.interleaved {
+            interleavedBufferCount = config.maxFrames * config.channelCount
+            interleavedBufferPointer = UnsafeMutablePointer<Float>.allocate(capacity: interleavedBufferCount)
+            interleavedBufferPointer?.initialize(repeating: 0, count: interleavedBufferCount)
+        }
+    }
+
+    deinit {
+        // Deallocate explicitly allocated buffers
+        for ptr in inputBufferPointers {
+            ptr.deinitialize(count: config.maxFrames)
+            ptr.deallocate()
+        }
+        for ptr in outputBufferPointers {
+            ptr.deinitialize(count: config.maxFrames)
+            ptr.deallocate()
+        }
+        if let interleavedPtr = interleavedBufferPointer {
+            interleavedPtr.deinitialize(count: interleavedBufferCount)
+            interleavedPtr.deallocate()
+        }
     }
 
     // MARK: - Buffer Access (Zero-Allocation)
 
     /// Get pointer to input buffer for channel
     ///
+    /// The returned pointer is valid for the lifetime of this AudioUnitHelper instance.
+    /// Safe to capture in render blocks.
+    ///
     /// - Parameter channel: Channel index
     /// - Returns: Mutable pointer to buffer, or nil if invalid channel
-    public func inputBufferPointer(channel: Int) -> UnsafeMutablePointer<Float>? {
+    public func inputBuffer(channel: Int) -> UnsafeMutablePointer<Float>? {
         guard channel >= 0 && channel < config.channelCount else { return nil }
-        return inputBuffers[channel].withUnsafeMutableBufferPointer { $0.baseAddress }
+        return inputBufferPointers[channel]
     }
 
     /// Get pointer to output buffer for channel
     ///
+    /// The returned pointer is valid for the lifetime of this AudioUnitHelper instance.
+    /// Safe to capture in render blocks.
+    ///
     /// - Parameter channel: Channel index
     /// - Returns: Mutable pointer to buffer, or nil if invalid channel
-    public func outputBufferPointer(channel: Int) -> UnsafeMutablePointer<Float>? {
+    public func outputBuffer(channel: Int) -> UnsafeMutablePointer<Float>? {
         guard channel >= 0 && channel < config.channelCount else { return nil }
-        return outputBuffers[channel].withUnsafeMutableBufferPointer { $0.baseAddress }
+        return outputBufferPointers[channel]
     }
 
     /// Get pointer to interleaved buffer
     ///
+    /// The returned pointer is valid for the lifetime of this AudioUnitHelper instance.
+    /// Safe to capture in render blocks.
+    ///
     /// - Returns: Mutable pointer to interleaved buffer
-    public func interleavedBufferPointer() -> UnsafeMutablePointer<Float>? {
-        guard config.interleaved else { return nil }
-        return interleavedBuffer.withUnsafeMutableBufferPointer { $0.baseAddress }
+    public func interleavedBuffer() -> UnsafeMutablePointer<Float>? {
+        return interleavedBufferPointer
     }
 
     /// Access input buffer directly (zero-allocation if captured)
@@ -121,10 +155,11 @@ public final class AudioUnitHelper {
     ///   - body: Closure receiving buffer pointer
     public func withInputBuffer<T>(
         channel: Int,
-        _ body: (inout UnsafeMutableBufferPointer<Float>) -> T
+        _ body: (UnsafeMutableBufferPointer<Float>) -> T
     ) -> T? {
         guard channel >= 0 && channel < config.channelCount else { return nil }
-        return inputBuffers[channel].withUnsafeMutableBufferPointer(body)
+        let ptr = UnsafeMutableBufferPointer(start: inputBufferPointers[channel], count: config.maxFrames)
+        return body(ptr)
     }
 
     /// Access output buffer directly (zero-allocation if captured)
@@ -134,10 +169,11 @@ public final class AudioUnitHelper {
     ///   - body: Closure receiving buffer pointer
     public func withOutputBuffer<T>(
         channel: Int,
-        _ body: (inout UnsafeMutableBufferPointer<Float>) -> T
+        _ body: (UnsafeMutableBufferPointer<Float>) -> T
     ) -> T? {
         guard channel >= 0 && channel < config.channelCount else { return nil }
-        return outputBuffers[channel].withUnsafeMutableBufferPointer(body)
+        let ptr = UnsafeMutableBufferPointer(start: outputBufferPointers[channel], count: config.maxFrames)
+        return body(ptr)
     }
 
     // MARK: - Format Conversion (Zero-Allocation)
@@ -160,11 +196,10 @@ public final class AudioUnitHelper {
 
             let source = data.assumingMemoryBound(to: Float.self)
             let frameCountToCopy = min(frameCount, config.maxFrames, Int(buffer.mDataByteSize) / MemoryLayout<Float>.size)
+            let dest = inputBufferPointers[channel]
 
-            inputBuffers[channel].withUnsafeMutableBufferPointer { dest in
-                for i in 0..<frameCountToCopy {
-                    dest[i] = source[i]
-                }
+            for i in 0..<frameCountToCopy {
+                dest[i] = source[i]
             }
         }
     }
@@ -187,11 +222,10 @@ public final class AudioUnitHelper {
 
             let dest = data.assumingMemoryBound(to: Float.self)
             let frameCountToCopy = min(frameCount, config.maxFrames)
+            let source = outputBufferPointers[channel]
 
-            outputBuffers[channel].withUnsafeBufferPointer { source in
-                for i in 0..<frameCountToCopy {
-                    dest[i] = source[i]
-                }
+            for i in 0..<frameCountToCopy {
+                dest[i] = source[i]
             }
         }
     }
@@ -201,17 +235,13 @@ public final class AudioUnitHelper {
     /// - Parameter frameCount: Number of frames to interleave
     /// - Note: Uses pre-allocated interleaved buffer, zero allocations
     public func interleaveToBuffer(frameCount: Int) {
-        guard config.interleaved else { return }
+        guard config.interleaved, let interleaved = interleavedBufferPointer else { return }
 
         let framesToProcess = min(frameCount, config.maxFrames)
 
-        interleavedBuffer.withUnsafeMutableBufferPointer { interleaved in
-            for frame in 0..<framesToProcess {
-                for channel in 0..<config.channelCount {
-                    inputBuffers[channel].withUnsafeBufferPointer { source in
-                        interleaved[frame * config.channelCount + channel] = source[frame]
-                    }
-                }
+        for frame in 0..<framesToProcess {
+            for channel in 0..<config.channelCount {
+                interleaved[frame * config.channelCount + channel] = inputBufferPointers[channel][frame]
             }
         }
     }
@@ -221,17 +251,13 @@ public final class AudioUnitHelper {
     /// - Parameter frameCount: Number of frames to de-interleave
     /// - Note: Uses pre-allocated output buffers, zero allocations
     public func deinterleaveFromBuffer(frameCount: Int) {
-        guard config.interleaved else { return }
+        guard config.interleaved, let interleaved = interleavedBufferPointer else { return }
 
         let framesToProcess = min(frameCount, config.maxFrames)
 
-        interleavedBuffer.withUnsafeBufferPointer { interleaved in
-            for frame in 0..<framesToProcess {
-                for channel in 0..<config.channelCount {
-                    outputBuffers[channel].withUnsafeMutableBufferPointer { dest in
-                        dest[frame] = interleaved[frame * config.channelCount + channel]
-                    }
-                }
+        for frame in 0..<framesToProcess {
+            for channel in 0..<config.channelCount {
+                outputBufferPointers[channel][frame] = interleaved[frame * config.channelCount + channel]
             }
         }
     }
@@ -245,12 +271,10 @@ public final class AudioUnitHelper {
         let framesToCopy = min(frameCount, config.maxFrames)
 
         for channel in 0..<config.channelCount {
-            inputBuffers[channel].withUnsafeBufferPointer { source in
-                outputBuffers[channel].withUnsafeMutableBufferPointer { dest in
-                    for i in 0..<framesToCopy {
-                        dest[i] = source[i]
-                    }
-                }
+            let source = inputBufferPointers[channel]
+            let dest = outputBufferPointers[channel]
+            for i in 0..<framesToCopy {
+                dest[i] = source[i]
             }
         }
     }
@@ -292,27 +316,14 @@ extension AudioUnitHelper {
     /// closure without allocating on each render call.
     ///
     /// - Returns: Tuple of (inputPointers, outputPointers)
-    /// - Warning: The returned pointers are only valid while self is alive
+    /// - Note: The returned pointers are valid for the lifetime of this AudioUnitHelper instance.
+    ///         They use explicit memory allocation, so they're safe to capture in closures.
     public func createCapturedPointers() -> (
         inputs: [UnsafeMutablePointer<Float>],
         outputs: [UnsafeMutablePointer<Float>]
     ) {
-        var inputs: [UnsafeMutablePointer<Float>] = []
-        var outputs: [UnsafeMutablePointer<Float>] = []
-
-        for channel in 0..<config.channelCount {
-            // These pointers remain valid because they point to self's pre-allocated arrays.
-            // baseAddress is non-nil for non-empty arrays (guaranteed by config.maxFrames > 0).
-            let inputPtr = inputBuffers[channel].withUnsafeMutableBufferPointer { $0.baseAddress }
-            let outputPtr = outputBuffers[channel].withUnsafeMutableBufferPointer { $0.baseAddress }
-            guard let inputPtr, let outputPtr else {
-                preconditionFailure("AudioUnitHelper: buffer[\(channel)] is empty (maxFrames=\(config.maxFrames))")
-            }
-            inputs.append(inputPtr)
-            outputs.append(outputPtr)
-        }
-
-        return (inputs, outputs)
+        // Pointers are from explicit allocation - no UB from escaping withUnsafeMutableBufferPointer
+        return (inputBufferPointers, outputBufferPointers)
     }
 }
 

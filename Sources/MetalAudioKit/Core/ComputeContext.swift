@@ -288,7 +288,56 @@ public final class ComputeContext: @unchecked Sendable {
     /// - Parameters:
     ///   - encode: Closure to encode compute commands
     ///   - completion: Called on GPU completion
+    @available(*, deprecated, message: "This method blocks up to 2 seconds. Use tryExecuteAsync(_:completion:) for real-time code, or executeAsyncBlocking(_:completion:) to acknowledge blocking behavior.")
     public func executeAsync(
+        _ encode: @escaping (MTLComputeCommandEncoder) throws -> Void,
+        completion: @escaping @Sendable (Error?) -> Void
+    ) {
+        // Wait for a slot with timeout to prevent indefinite blocking
+        let waitResult = inFlightSemaphore.wait(timeout: .now() + Self.defaultGPUTimeout)
+        guard waitResult == .success else {
+            completion(MetalAudioError.gpuTimeout(Self.defaultGPUTimeout))
+            return
+        }
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            inFlightSemaphore.signal()
+            completion(MetalAudioError.commandBufferCreationFailed)
+            return
+        }
+
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            inFlightSemaphore.signal()
+            completion(MetalAudioError.commandEncoderCreationFailed)
+            return
+        }
+
+        do {
+            try encode(encoder)
+            encoder.endEncoding()
+
+            commandBuffer.addCompletedHandler { [inFlightSemaphore] _ in
+                inFlightSemaphore.signal()
+                completion(nil)
+            }
+
+            commandBuffer.commit()
+        } catch {
+            encoder.endEncoding()
+            inFlightSemaphore.signal()
+            completion(error)
+        }
+    }
+
+    /// Execute a compute operation asynchronously, blocking if necessary
+    ///
+    /// This method waits up to `defaultGPUTimeout` (2 seconds) for a command buffer slot.
+    /// Use `tryExecuteAsync(_:completion:)` for real-time audio callbacks where blocking is unacceptable.
+    ///
+    /// - Parameters:
+    ///   - encode: Closure to encode compute commands
+    ///   - completion: Called on GPU completion
+    public func executeAsyncBlocking(
         _ encode: @escaping (MTLComputeCommandEncoder) throws -> Void,
         completion: @escaping @Sendable (Error?) -> Void
     ) {
@@ -971,11 +1020,12 @@ extension ComputeContext {
     /// Execute a compute operation asynchronously and return when GPU completes
     /// - Parameter encode: Closure to encode compute commands
     /// - Throws: Any error from encoding or GPU execution
+    /// - Note: This method may block up to 2 seconds if GPU is busy. Not suitable for real-time audio.
     public func execute(
         _ encode: @escaping (MTLComputeCommandEncoder) throws -> Void
     ) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            executeAsync(encode) { error in
+            executeAsyncBlocking(encode) { error in
                 if let error = error {
                     continuation.resume(throwing: error)
                 } else {
