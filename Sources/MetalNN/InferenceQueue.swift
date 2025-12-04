@@ -51,6 +51,7 @@ public final class InferenceQueue {
     private struct PendingResult {
         let id: UInt64
         let output: [Float]
+        let completion: (UnsafePointer<Float>, Int) -> Void
     }
 
     /// Queue statistics
@@ -285,11 +286,26 @@ public final class InferenceQueue {
 
                 let outputCount = inference.outputElementCount
                 var output = [Float](repeating: 0, count: outputCount)
+
+                // Guard against empty arrays which would have nil baseAddress
+                guard !item.input.isEmpty && outputCount > 0 else {
+                    #if DEBUG
+                    print("InferenceQueue: Skipping inference for empty input or zero output count")
+                    #endif
+                    continue
+                }
+
                 item.input.withUnsafeBufferPointer { inputPtr in
                     output.withUnsafeMutableBufferPointer { outputPtr in
+                        guard let inputBase = inputPtr.baseAddress,
+                              let outputBase = outputPtr.baseAddress else {
+                            // This should not happen since we checked for empty arrays above,
+                            // but guard defensively to prevent crashes
+                            return
+                        }
                         inference.predict(
-                            input: inputPtr.baseAddress!,
-                            output: outputPtr.baseAddress!,
+                            input: inputBase,
+                            output: outputBase,
                             inputSize: item.input.count,
                             outputSize: outputCount
                         )
@@ -306,13 +322,13 @@ public final class InferenceQueue {
                 os_unfair_lock_unlock(&self.statsLock)
 
                 // Store result for FIFO delivery
-                let result = PendingResult(id: item.id, output: output)
-                self.deliverResult(result, item: item)
+                let result = PendingResult(id: item.id, output: output, completion: item.completion)
+                self.deliverResult(result)
             }
         }
     }
 
-    private func deliverResult(_ result: PendingResult, item: WorkItem) {
+    private func deliverResult(_ result: PendingResult) {
         os_unfair_lock_lock(&resultsLock)
 
         // Check if this is the next expected result
@@ -323,7 +339,7 @@ public final class InferenceQueue {
 
             callbackQueue.async {
                 result.output.withUnsafeBufferPointer { ptr in
-                    item.completion(ptr.baseAddress!, ptr.count)
+                    result.completion(ptr.baseAddress!, ptr.count)
                 }
             }
 
@@ -345,14 +361,14 @@ public final class InferenceQueue {
             nextExpectedId += 1
 
             let output = first.output
+            let completion = first.completion
             os_unfair_lock_unlock(&resultsLock)
 
-            // Find the matching work item's completion
-            // Note: In a full implementation, we'd store completions with results
-            // For simplicity, this delivers via the callback queue
+            // Deliver the completion callback
             callbackQueue.async {
-                // Completion was already called inline - this is a placeholder
-                // A production implementation would track completions
+                output.withUnsafeBufferPointer { ptr in
+                    completion(ptr.baseAddress!, ptr.count)
+                }
             }
 
             os_unfair_lock_lock(&resultsLock)

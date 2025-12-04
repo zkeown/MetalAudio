@@ -315,8 +315,8 @@ public final class ComputeContext: @unchecked Sendable {
             try encode(encoder)
             encoder.endEncoding()
 
-            commandBuffer.addCompletedHandler { [weak self] _ in
-                self?.inFlightSemaphore.signal()
+            commandBuffer.addCompletedHandler { [inFlightSemaphore] _ in
+                inFlightSemaphore.signal()
                 completion(nil)
             }
 
@@ -364,8 +364,8 @@ public final class ComputeContext: @unchecked Sendable {
             try encode(encoder)
             encoder.endEncoding()
 
-            commandBuffer.addCompletedHandler { [weak self] _ in
-                self?.inFlightSemaphore.signal()
+            commandBuffer.addCompletedHandler { [inFlightSemaphore] _ in
+                inFlightSemaphore.signal()
                 completion(nil)
             }
 
@@ -619,10 +619,16 @@ extension ComputeContext {
 
         // Lifetime notes:
         // - Metal retains `listener` internally until the notification fires or event deallocates
-        // - `holder` must stay alive until callback completes to prevent semaphore use-after-free
-        // - If we timeout and return, the callback may still fire later (with the retained holder)
-        // - withExtendedLifetime ensures both stay alive through this function's scope
-        return withExtendedLifetime((listener, holder)) {
+        // - `holder` is strongly captured by the callback closure, keeping semaphore alive
+        // - If we timeout and return, the callback may still fire later (with the captured holder)
+        // - withExtendedLifetime ensures listener stays alive through this function's scope
+        //   in case Metal's internal retention is insufficient (defensive programming)
+        //
+        // SAFETY: The SemaphoreHolder pattern ensures the semaphore outlives both:
+        // 1. This function's scope (via capture in closure)
+        // 2. The callback execution (via strong capture in closure)
+        // Even if we timeout and return, the callback can safely signal the semaphore.
+        return withExtendedLifetime(listener) {
             result == .success
         }
     }
@@ -679,8 +685,8 @@ extension ComputeContext {
 
             let fenceValue = signalFenceFromGPU(commandBuffer: commandBuffer)
 
-            commandBuffer.addCompletedHandler { [weak self] _ in
-                self?.inFlightSemaphore.signal()
+            commandBuffer.addCompletedHandler { [inFlightSemaphore] _ in
+                inFlightSemaphore.signal()
                 completion(.success(fenceValue))
             }
 
@@ -779,8 +785,17 @@ extension ComputeContext {
     /// For full GPU lifetime protection, ensure `setupTripleBuffering()` is only called
     /// when no GPU command buffers are in flight (e.g., after waiting for completion).
     ///
-    /// - Warning: **CRITICAL**: The buffer reference is ONLY valid within the closure scope.
-    ///   Do NOT capture, store, or pass the buffer reference to async operations.
+    /// - Warning: **CRITICAL - TOCTOU HAZARD**: The buffer reference is ONLY valid within
+    ///   the closure scope. If you pass the buffer to a GPU command encoder, the GPU command
+    ///   may still be executing after this closure returns. Calling `setupTripleBuffering()`
+    ///   or `clearTripleBuffering()` while GPU commands are in-flight WILL cause use-after-free.
+    ///
+    /// - Warning: **GPU COMMAND BUFFER LIFETIME**: This API does NOT track GPU command buffer
+    ///   lifetime. If your closure encodes GPU work, you MUST ensure all GPU commands complete
+    ///   before calling `setupTripleBuffering()` or `clearTripleBuffering()`. Use fence-based
+    ///   synchronization or `waitUntilCompleted()` on command buffers.
+    ///
+    /// - Warning: **DO NOT** capture, store, or pass the buffer reference to async operations.
     ///   Doing so will cause data races and undefined behavior when `setupTripleBuffering()`
     ///   or `advanceTripleBuffer()` is called.
     ///

@@ -42,8 +42,11 @@ public final class ShaderDiskCache {
     /// Cache entry TTL in seconds (default 30 days)
     public var entryTTL: TimeInterval = 30 * 24 * 60 * 60
 
-    /// Lock for thread-safe access
+    /// Lock for thread-safe access to in-memory index
     private var lock = os_unfair_lock()
+
+    /// Lock for serializing file I/O operations (prevents concurrent writes)
+    private let fileLock = NSLock()
 
     /// In-memory index of cached entries
     private var cacheIndex: [String: CacheEntry] = [:]
@@ -115,14 +118,36 @@ public final class ShaderDiskCache {
     }
 
     /// Save cache index to disk
+    ///
+    /// Thread-safe: Acquires fileLock first, then copies index under memory lock.
+    /// This ensures no lost updates: if thread A starts saving, thread B's additions
+    /// will either be included in A's save (if added before A copies) or will trigger
+    /// another save that will complete after A releases fileLock.
+    ///
+    /// RACE CONDITION FIX:
+    /// Previously, the code copied the index under `lock`, then acquired `fileLock`.
+    /// This caused lost updates when:
+    ///   1. Thread A copies index (with entry X)
+    ///   2. Thread B adds entry Y and copies index (with X and Y)
+    ///   3. Thread B acquires fileLock, writes (X and Y)
+    ///   4. Thread A acquires fileLock, writes (only X) - Y is lost!
+    ///
+    /// By acquiring fileLock first, we ensure writes are strictly ordered.
     private func saveIndex() {
+        // Acquire file lock FIRST to serialize the entire operation
+        // This may block briefly if another save is in progress
+        fileLock.lock()
+        defer { fileLock.unlock() }
+
+        // Copy index under memory lock - this is now safe because file lock
+        // ensures no other thread can write between our copy and our write
+        let indexCopy: [String: CacheEntry]
         os_unfair_lock_lock(&lock)
-        let index = cacheIndex
+        indexCopy = cacheIndex
         os_unfair_lock_unlock(&lock)
 
         let indexPath = cacheDirectory.appendingPathComponent("index.json")
-
-        if let data = try? JSONEncoder().encode(index) {
+        if let data = try? JSONEncoder().encode(indexCopy) {
             try? data.write(to: indexPath, options: .atomic)
         }
     }

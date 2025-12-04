@@ -312,6 +312,11 @@ final class AudioUnitScaffoldTests: XCTestCase {
 
     // MARK: - Subclass Test
 
+    /// Tests normal subclass processing behavior.
+    /// Note: The render block includes graceful degradation for nil buffer addresses
+    /// (Issue 4.1 fix). When buffer baseAddress is nil, processing is skipped instead
+    /// of crashing the host DAW. This behavior cannot be easily unit tested but is
+    /// documented here for completeness.
     func testSubclassProcessing() throws {
         // Create a simple gain subclass
         class GainUnit: AudioUnitScaffold {

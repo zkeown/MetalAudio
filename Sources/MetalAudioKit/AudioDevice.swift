@@ -24,6 +24,7 @@ public enum MetalAudioError: Error, LocalizedError {
     case gpuTimeout(TimeInterval)
     case deviceLost
     case invalidPointer
+    case bufferOverflow(String)
 
     public var errorDescription: String? {
         switch self {
@@ -63,6 +64,8 @@ public enum MetalAudioError: Error, LocalizedError {
             return "GPU device was disconnected or lost"
         case .invalidPointer:
             return "Invalid or null pointer provided"
+        case .bufferOverflow(let description):
+            return "Buffer overflow: \(description)"
         }
     }
 }
@@ -427,6 +430,18 @@ public final class AudioDevice: @unchecked Sendable {
     }
 
     /// Internal thread-safe method to mark device unavailable and notify delegate
+    ///
+    /// ## Delegate Notification Guarantee
+    /// The delegate is captured as a strong reference while holding the lock, then
+    /// called outside the lock. This ensures:
+    /// 1. No deadlock if delegate tries to access AudioDevice
+    /// 2. Delegate won't be deallocated during the call
+    ///
+    /// ## Limitation
+    /// If the delegate is deallocated between capture and call (rare race), the
+    /// optional chaining (`delegate?`) will safely no-op. However, this means the
+    /// notification could be lost. For critical device loss handling, consider using
+    /// a strong reference pattern or NotificationCenter.
     private func setDeviceUnavailable() {
         var shouldNotify = false
         var delegate: DeviceLossDelegate?
@@ -436,15 +451,17 @@ public final class AudioDevice: @unchecked Sendable {
             _isDeviceAvailable = false
             shouldNotify = true
             // Capture delegate reference while holding lock to prevent TOCTOU race
-            // where delegate is deallocated between unlock and call
+            // where delegate is deallocated between unlock and call.
+            // The weak-to-strong promotion here ensures the delegate stays alive
+            // through the notification call.
             delegate = deviceLossDelegate
         }
         os_unfair_lock_unlock(&stateLock)
 
         // Notify outside of lock to avoid potential deadlock with delegate
         // Using captured strong reference ensures delegate won't be deallocated mid-call
-        if shouldNotify {
-            delegate?.audioDevice(self, didLoseDevice: false)
+        if shouldNotify, let delegate = delegate {
+            delegate.audioDevice(self, didLoseDevice: false)
         }
     }
 
@@ -488,6 +505,12 @@ public final class AudioDevice: @unchecked Sendable {
     ///
     /// - Note: Thread-safe. Concurrent requests for the same function will serialize
     ///   on compilation to avoid duplicate work. Different functions compile concurrently.
+    ///
+    /// - Warning: **Real-time safety**: The first call for a given function name triggers
+    ///   shader compilation which can take 100-500ms and uses `NSLock` internally. This can
+    ///   cause priority inversion if called from an audio thread. **Best practice**: Call
+    ///   this method during initialization (not in audio callbacks) to pre-warm the cache.
+    ///   Subsequent calls are O(1) and use `os_unfair_lock` which is real-time safe.
     public func makeComputePipeline(functionName: String) throws -> MTLComputePipelineState {
         // Fast path: check cache with lightweight lock
         os_unfair_lock_lock(&cacheLock)
@@ -499,16 +522,20 @@ public final class AudioDevice: @unchecked Sendable {
 
         // Slow path: serialize compilations to avoid duplicate work
         // NSLock provides fair scheduling for potentially long wait
+        // IMPORTANT: Acquire compilation lock FIRST, then re-check cache while holding it.
+        // This prevents a race where another thread completes compilation between our
+        // cache check above and acquiring this lock.
         compilationLock.lock()
         defer { compilationLock.unlock() }
 
         // Double-check after acquiring compilation lock - another thread may have compiled it
+        // Hold cacheLock through the check to prevent cache eviction race
         os_unfair_lock_lock(&cacheLock)
-        if let cached = libraryPipelineCache[functionName] {
-            os_unfair_lock_unlock(&cacheLock)
+        let cached = libraryPipelineCache[functionName]
+        os_unfair_lock_unlock(&cacheLock)
+        if let cached = cached {
             return cached
         }
-        os_unfair_lock_unlock(&cacheLock)
 
         // Actually compile the shader (now serialized)
         guard let function = library.makeFunction(name: functionName) else {

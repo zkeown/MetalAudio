@@ -404,8 +404,19 @@ public final class Convolution {
         // which implement true convolution via frequency-domain multiplication.
         //
         // Direct mode is optimized for short, symmetric kernels like smoothing filters.
+
+        // vDSP_conv requires: C[n] = sum_{p=0}^{P-1} A[n+p] * F[p] for n in [0, N-1]
+        // This means A must have at least N + P - 1 elements.
+        // With N = outputSize = input.count + kernel.count - 1, we need:
+        //   requiredSize = N + P - 1 = (input.count + kernel.count - 1) + kernel.count - 1
+        //                = input.count + 2*(kernel.count - 1)
+        // Zero-pad input to prevent reading garbage beyond the buffer.
+        let paddingNeeded = 2 * (kernel.count - 1)
+        var paddedInput = input
+        paddedInput.append(contentsOf: repeatElement(Float(0), count: paddingNeeded))
+
         vDSP_conv(
-            input, 1,
+            paddedInput, 1,
             kernel, 1,
             &output, 1,
             vDSP_Length(outputSize),
@@ -523,14 +534,17 @@ public final class Convolution {
             os_unfair_lock_lock(&stateLock)
             let currentWriteIndex = inputWriteIndex
             // Use memcpy for fast buffer copy (split format)
+            // SAFETY: Guard against nil baseAddress (defensive - should never happen for valid arrays)
             inputBufferReal[currentWriteIndex].withUnsafeMutableBufferPointer { dst in
                 workInputReal.withUnsafeBufferPointer { src in
-                    memcpy(dst.baseAddress!, src.baseAddress!, fftSize * MemoryLayout<Float>.stride)
+                    guard let dstBase = dst.baseAddress, let srcBase = src.baseAddress else { return }
+                    memcpy(dstBase, srcBase, fftSize * MemoryLayout<Float>.stride)
                 }
             }
             inputBufferImag[currentWriteIndex].withUnsafeMutableBufferPointer { dst in
                 workInputImag.withUnsafeBufferPointer { src in
-                    memcpy(dst.baseAddress!, src.baseAddress!, fftSize * MemoryLayout<Float>.stride)
+                    guard let dstBase = dst.baseAddress, let srcBase = src.baseAddress else { return }
+                    memcpy(dstBase, srcBase, fftSize * MemoryLayout<Float>.stride)
                 }
             }
             os_unfair_lock_unlock(&stateLock)
@@ -542,19 +556,32 @@ public final class Convolution {
             // OPTIMIZATION: Reduced lock scope with copy-out pattern
             // Copy input buffer data under lock (fast memcpy), then process without lock held.
             // This reduces lock contention from O(partitionCount * fftSize * 7 vDSP calls) to O(partitionCount * memcpy)
+            // NOTE: This lock pattern assumes single-threaded use (see CLAUDE.md thread safety matrix).
+            // The locks protect against basic races but don't make this class fully thread-safe.
+
+            // SAFETY: Early exit if partitionCount is 0 (would cause empty array access)
+            guard partitionCount > 0 && !partitions.isEmpty && !partitionOffsets.isEmpty else {
+                continue
+            }
+
             os_unfair_lock_lock(&stateLock)
             for p in 0..<partitionCount {
+                // SAFETY: partitionOffsets is sized to partitionCount, so p is always valid
                 var bufferIdx = currentWriteIndex + partitionOffsets[p]
                 if bufferIdx >= partitionCount { bufferIdx -= partitionCount }
-                // Fast memcpy to copy buffers
+                // Fast memcpy to copy buffers with bounds validation
                 copyBufferReal[p].withUnsafeMutableBufferPointer { dst in
                     inputBufferReal[bufferIdx].withUnsafeBufferPointer { src in
-                        memcpy(dst.baseAddress!, src.baseAddress!, fftSize * MemoryLayout<Float>.stride)
+                        guard let dstBase = dst.baseAddress, let srcBase = src.baseAddress,
+                              src.count >= fftSize, dst.count >= fftSize else { return }
+                        memcpy(dstBase, srcBase, fftSize * MemoryLayout<Float>.stride)
                     }
                 }
                 copyBufferImag[p].withUnsafeMutableBufferPointer { dst in
                     inputBufferImag[bufferIdx].withUnsafeBufferPointer { src in
-                        memcpy(dst.baseAddress!, src.baseAddress!, fftSize * MemoryLayout<Float>.stride)
+                        guard let dstBase = dst.baseAddress, let srcBase = src.baseAddress,
+                              src.count >= fftSize, dst.count >= fftSize else { return }
+                        memcpy(dstBase, srcBase, fftSize * MemoryLayout<Float>.stride)
                     }
                 }
             }
@@ -625,11 +652,15 @@ public final class Convolution {
             }
 
             // Overlap-add to output using vectorized vDSP_vadd (3-5x faster than scalar loop)
-            let outputOffset = block * blockSize
+            // SAFETY: Check for integer overflow in offset calculation
+            let (outputOffset, overflow) = block.multipliedReportingOverflow(by: blockSize)
+            guard !overflow else { break }
 
             // Guard against offset exceeding output size (prevents unsigned wrap-around in vDSP_Length)
-            guard outputOffset < fullOutputSize else { break }
+            guard outputOffset >= 0 && outputOffset < fullOutputSize else { break }
 
+            // SAFETY: samplesToWrite is guaranteed <= fullOutputSize - outputOffset,
+            // so outputOffset + samplesToWrite <= fullOutputSize (no overflow possible)
             let samplesToWrite = min(fftSize, fullOutputSize - outputOffset)
             workOutputBlock.withUnsafeBufferPointer { workPtr in
                 output.withUnsafeMutableBufferPointer { outPtr in

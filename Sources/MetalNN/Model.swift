@@ -25,6 +25,11 @@ public enum SequentialModelError: Error, LocalizedError {
 /// `Sequential` is safe for concurrent inference after `build()` is called.
 /// Layer addition and building should be done from a single thread before inference.
 ///
+/// - Warning: **Do NOT call `build()`, `add()`, or `addUnchecked()` while `forward()` or
+///   `forwardAsync()` are in progress.** The forward methods access layer and buffer
+///   arrays without locking (for performance), so concurrent modification could cause
+///   data races. Build your model completely before starting inference.
+///
 /// ## Memory Optimization
 /// Uses ping-pong buffer reuse when layers have compatible output shapes,
 /// reducing memory usage by up to 50% for deep networks.
@@ -204,6 +209,14 @@ public final class Sequential {
 
         var currentInput = input
 
+        // SAFETY: Verify intermediateBuffers matches layers count
+        // This invariant should always hold after build() completes, but check defensively
+        guard intermediateBuffers.count >= layers.count else {
+            throw MetalAudioError.invalidConfiguration(
+                "Buffer count (\(intermediateBuffers.count)) < layer count (\(layers.count)). Rebuild model."
+            )
+        }
+
         try context.executeSync { encoder in
             for (i, layer) in layers.enumerated() {
                 let output = intermediateBuffers[i]
@@ -224,6 +237,14 @@ public final class Sequential {
         }
         guard !intermediateBuffers.isEmpty else {
             completion(.failure(MetalAudioError.invalidConfiguration("Model not built. Call build() first.")))
+            return
+        }
+
+        // SAFETY: Verify intermediateBuffers matches layers count
+        guard intermediateBuffers.count >= layers.count else {
+            completion(.failure(MetalAudioError.invalidConfiguration(
+                "Buffer count (\(intermediateBuffers.count)) < layer count (\(layers.count)). Rebuild model."
+            )))
             return
         }
 
@@ -284,6 +305,7 @@ public enum ModelLoaderError: Error, LocalizedError {
     case invalidTensorName
     case dataSizeMismatch(tensorName: String, declared: Int, shapeSize: Int)
     case checksumMismatch(expected: UInt32, actual: UInt32)
+    case invalidTensorData(tensorName: String, reason: String)
 
     public var errorDescription: String? {
         switch self {
@@ -301,6 +323,8 @@ public enum ModelLoaderError: Error, LocalizedError {
             return "Tensor '\(name)' declares \(declared) bytes but shape requires \(shapeSize) bytes"
         case .checksumMismatch(let expected, let actual):
             return "Checksum mismatch: expected 0x\(String(expected, radix: 16)), got 0x\(String(actual, radix: 16))"
+        case .invalidTensorData(let name, let reason):
+            return "Tensor '\(name)' has invalid data: \(reason)"
         }
     }
 }
@@ -455,6 +479,12 @@ public final class BinaryModelLoader {
                 throw ModelLoaderError.invalidTensorName
             }
 
+            // Validate numDims is reasonable (prevents DoS via excessive loop iterations)
+            // Most tensors have 1-4 dimensions; 16 is generous for any real use case
+            guard numDims <= 16 else {
+                throw MetalAudioError.invalidConfiguration("tensor has \(numDims) dimensions, maximum 16 allowed")
+            }
+
             // Read name
             let nameOffset = try readBytes(count: Int(nameLength))
             let nameData = data.subdata(in: nameOffset..<(nameOffset + Int(nameLength)))
@@ -467,9 +497,13 @@ public final class BinaryModelLoader {
             var elementCount = 1
             for _ in 0..<numDims {
                 let dim = try readUInt32()
-                shape.append(Int(dim))
+                // Guard against UInt32 values that overflow Int (relevant on 32-bit systems)
+                guard let dimInt = Int(exactly: dim) else {
+                    throw MetalAudioError.integerOverflow(operation: "tensor dimension exceeds Int.max")
+                }
+                shape.append(dimInt)
                 // Check for overflow when multiplying dimensions
-                let (newCount, overflow) = elementCount.multipliedReportingOverflow(by: Int(dim))
+                let (newCount, overflow) = elementCount.multipliedReportingOverflow(by: dimInt)
                 guard !overflow else {
                     throw MetalAudioError.integerOverflow(operation: "tensor shape in model file")
                 }
@@ -498,12 +532,18 @@ public final class BinaryModelLoader {
             // Only copy if there's actual data to copy (dataSize > 0)
             // baseAddress is nil for empty Data, so we must check first
             if dataSize > 0 {
+                var copySucceeded = false
                 data.withUnsafeBytes { ptr in
                     guard let baseAddress = ptr.baseAddress else {
-                        // This shouldn't happen if dataSize > 0, but be defensive
+                        // baseAddress is nil despite dataSize > 0 - this indicates corrupted data
                         return
                     }
                     memcpy(tensor.buffer.contents(), baseAddress + dataOffset, Int(dataSize))
+                    copySucceeded = true
+                }
+                // Fail loudly if data copy failed - tensor would have uninitialized memory
+                guard copySucceeded else {
+                    throw ModelLoaderError.invalidTensorData(tensorName: name, reason: "failed to access model data at offset \(dataOffset)")
                 }
             }
 

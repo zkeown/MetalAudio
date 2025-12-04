@@ -358,7 +358,17 @@ open class AudioUnitScaffold: AUAudioUnit {
 
                 helper.withInputBuffer(channel: channel) { inputBuf in
                     helper.withOutputBuffer(channel: channel) { outputBuf in
-                        processFunc(inputBuf.baseAddress!, outputBuf.baseAddress!, Int(frameCount), channel)
+                        guard let inPtr = inputBuf.baseAddress, let outPtr = outputBuf.baseAddress else {
+                            // Graceful degradation: skip processing if buffer addresses are nil.
+                            // This can happen with empty buffers or unusual Audio Unit configurations.
+                            // The output will remain unchanged (passthrough from input pull).
+                            // NEVER crash the host DAW - that loses user work.
+                            #if DEBUG
+                            print("AudioUnitScaffold: buffer baseAddress is nil for channel \(channel) - skipping processing")
+                            #endif
+                            return
+                        }
+                        processFunc(inPtr, outPtr, Int(frameCount), channel)
                     }
                 }
 

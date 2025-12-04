@@ -301,9 +301,15 @@ extension AudioUnitHelper {
         var outputs: [UnsafeMutablePointer<Float>] = []
 
         for channel in 0..<config.channelCount {
-            // These pointers remain valid because they point to self's arrays
-            inputs.append(inputBuffers[channel].withUnsafeMutableBufferPointer { $0.baseAddress! })
-            outputs.append(outputBuffers[channel].withUnsafeMutableBufferPointer { $0.baseAddress! })
+            // These pointers remain valid because they point to self's pre-allocated arrays.
+            // baseAddress is non-nil for non-empty arrays (guaranteed by config.maxFrames > 0).
+            let inputPtr = inputBuffers[channel].withUnsafeMutableBufferPointer { $0.baseAddress }
+            let outputPtr = outputBuffers[channel].withUnsafeMutableBufferPointer { $0.baseAddress }
+            guard let inputPtr, let outputPtr else {
+                preconditionFailure("AudioUnitHelper: buffer[\(channel)] is empty (maxFrames=\(config.maxFrames))")
+            }
+            inputs.append(inputPtr)
+            outputs.append(outputPtr)
         }
 
         return (inputs, outputs)

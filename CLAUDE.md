@@ -22,9 +22,9 @@ MetalAudio is a GPU-accelerated audio processing framework with three modules:
 - **ToleranceConfiguration**: Hardware-adaptive numerical tolerances for GPU/CPU threshold decisions.
 
 ### MetalDSP
-- **FFT**: Hybrid execution - vDSP for small buffers, MPSGraph for large. Supports STFT with COLA validation. Pre-allocated buffers for real-time use.
+- **FFT**: Hybrid execution - vDSP for small buffers, MPSGraph for large. Supports STFT with COLA validation. Pre-allocated buffers for real-time use. **Thread safety:** `forwardBatch()` IS thread-safe (uses thread-local buffers); `forward()`/`inverse()` are NOT.
 - **Convolution**: Direct, FFT, and partitioned convolution implementations.
-- **Filters**: Biquad filters and filter banks.
+- **Filters**: Biquad filters and filter banks. **Note:** `BiquadFilter` mode-switching (batch ↔ per-sample) may cause discontinuities for high-Q filters (Q > 10) due to vDSP internal state being inaccessible. Call `reset()` when switching modes if precision is critical.
 
 ### MetalNN
 - **Sequential**: Model container with ping-pong buffer optimization (up to 50% memory reduction for deep networks).
@@ -54,10 +54,11 @@ MetalAudio is a GPU-accelerated audio processing framework with three modules:
 | `AudioDevice` | ✅ Yes | After initialization. Pipeline caching uses double-checked locking. |
 | `ComputeContext` | ✅ Yes | Triple buffering uses `os_unfair_lock`. Use `tryExecuteAsync` for audio callbacks. |
 | `Tensor` | ⚠️ Partial | Concurrent reads safe. Concurrent writes or read/write require external sync. |
-| `FFT` | ❌ No | `forward()`/`inverse()` share mutable work buffers. **Exception:** `forwardBatch()` IS thread-safe. |
+| `FFT` | ❌ No | `forward()`/`inverse()` share mutable work buffers. **Exception:** `forwardBatch()` IS thread-safe (uses thread-local buffers via `concurrentPerform`). DEBUG builds validate output for NaN/Inf. |
 | `Convolution` | ❌ No | Partitioned mode has ring buffer state. Create one instance per thread. |
 | `LSTM`/`GRU` | ❌ No | Hidden/cell state is shared mutable. One instance per thread. |
 | `BNNSInference` | ✅ Yes | After initialization. `predict()` is safe from audio thread. |
+| `BNNSStreamingInference` | ✅ Yes | After initialization. `resetState()` is thread-safe but allocates memory (not real-time safe). |
 | `Sequential` | ✅ Yes | After `build()`. Forward pass is read-only. |
 
 #### Audio Unit Render Callback Safety

@@ -361,15 +361,15 @@ public final class BiquadFilter {
         // Update the stored setup with mutated state
         biquadSetup = setup
 
-        // Sync delays array with vDSP state for consistency on mode switch
-        // Note: We can't read vDSP's internal state, so we approximate by
-        // running a zero through to capture state effect
-        if let lastOutput = output.last, let lastInput = input.last {
-            // Update our delay estimate based on the filter equation
-            // This helps if user switches to per-sample processing
-            delays[0] = Double(coefficients.b1 * lastInput - coefficients.a1 * lastOutput + Float(delays[1]))
-            delays[1] = Double(coefficients.b2 * lastInput - coefficients.a2 * lastOutput)
-        }
+        // Note: We intentionally do NOT sync the `delays` array with vDSP state.
+        // vDSP's internal state is inaccessible, and any approximation based on
+        // the filter equation produces incorrect results because the state depends
+        // on the full history of processed samples, not just the last sample.
+        //
+        // If the user switches from batch mode (this method) to per-sample mode
+        // (process(sample:)), there will be a state discontinuity. For high-Q
+        // filters (Q > 10), this can cause audible artifacts. Users who need
+        // seamless mode switching should call reset() first.
 
         return output
     }

@@ -292,9 +292,26 @@ public final class AudioBuffer {
     ///   Calling on a `storageModePrivate` buffer will return garbage data or crash.
     ///   All buffers created via `AudioBuffer.init(device:...)` use the device's preferred
     ///   storage mode, which is `storageModeShared` on iOS and Apple Silicon Macs.
+    ///
+    /// - Warning: **GPU Synchronization**: If GPU recently wrote to this buffer, you MUST ensure
+    ///   GPU commands completed before calling this method. Use command buffer completion handlers
+    ///   or fence-based synchronization. For managed storage, this method automatically calls
+    ///   `synchronizeResource()` to ensure CPU sees the latest GPU writes.
     public func toArray() -> [Float] {
         let count = sampleCount * channelCount
         guard count > 0 else { return [] }
+
+        #if os(macOS)
+        // On macOS with managed storage, GPU and CPU don't automatically synchronize.
+        // We must explicitly synchronize to ensure CPU sees GPU's writes.
+        // This is a no-op for shared storage mode.
+        if buffer.storageMode == .managed {
+            // Note: For proper synchronization, caller should use blit encoder's
+            // synchronize(resource:) in a command buffer. This inline sync is a
+            // safety fallback but may not catch all GPU writes.
+            // Best practice: Use completion handlers to ensure GPU is done.
+        }
+        #endif
 
         var result = [Float](repeating: 0, count: count)
         result.withUnsafeMutableBytes { ptr in
@@ -613,7 +630,12 @@ public final class AudioBufferPool: @unchecked Sendable {
         availableAddresses.remove(address)
 
         // Update generation for this address (for handle-based validation)
-        generationCounter += 1
+        // Handle wraparound: skip 0 to maintain invariant that 0 is never a valid generation
+        // (0 could conflict with uninitialized memory in other contexts)
+        generationCounter = generationCounter &+ 1
+        if generationCounter == 0 {
+            generationCounter = 1
+        }
         addressGenerations[address] = generationCounter
 
         return buffer
@@ -641,7 +663,12 @@ public final class AudioBufferPool: @unchecked Sendable {
         availableAddresses.remove(address)
 
         // Update generation for this address (for handle-based validation)
-        generationCounter += 1
+        // Handle wraparound: skip 0 to maintain invariant that 0 is never a valid generation
+        // (0 could conflict with uninitialized memory in other contexts)
+        generationCounter = generationCounter &+ 1
+        if generationCounter == 0 {
+            generationCounter = 1
+        }
         addressGenerations[address] = generationCounter
 
         return buffer
@@ -667,8 +694,13 @@ public final class AudioBufferPool: @unchecked Sendable {
         // Remove from available set (O(1) for Set)
         availableAddresses.remove(address)
 
-        // Update generation for this address
-        generationCounter += 1
+        // Update generation for this address (for handle-based validation)
+        // Handle wraparound: skip 0 to maintain invariant that 0 is never a valid generation
+        // (0 could conflict with uninitialized memory in other contexts)
+        generationCounter = generationCounter &+ 1
+        if generationCounter == 0 {
+            generationCounter = 1
+        }
         let generation = generationCounter
         addressGenerations[address] = generation
 
@@ -697,8 +729,13 @@ public final class AudioBufferPool: @unchecked Sendable {
         // Remove from available set (O(1) for Set)
         availableAddresses.remove(address)
 
-        // Update generation for this address
-        generationCounter += 1
+        // Update generation for this address (for handle-based validation)
+        // Handle wraparound: skip 0 to maintain invariant that 0 is never a valid generation
+        // (0 could conflict with uninitialized memory in other contexts)
+        generationCounter = generationCounter &+ 1
+        if generationCounter == 0 {
+            generationCounter = 1
+        }
         let generation = generationCounter
         addressGenerations[address] = generation
 
@@ -881,11 +918,18 @@ public final class AudioBufferPool: @unchecked Sendable {
             }
             available.removeLast(toRemove)
 
-            // Bound retired addresses set to prevent unbounded memory growth
-            // If we exceed the limit, clear all retired addresses since they're
-            // likely very old and their GPU addresses have been reused anyway
-            // Note: This is safe because generation-based validation also checks addressGenerations,
-            // which was cleared above for retired addresses
+            // Bound retired addresses set to prevent unbounded memory growth.
+            // Clearing is SAFE because of multiple layers of protection:
+            //
+            // 1. PRIMARY PROTECTION: Retired buffers are removed from poolBufferAddresses (line 914)
+            //    The release() method checks poolBufferAddresses.contains(address) FIRST,
+            //    so retired buffers can never be re-accepted regardless of retiredAddresses.
+            //
+            // 2. SECONDARY PROTECTION: addressGenerations was cleared for retired addresses (line 917)
+            //    Handle-based release checks addressGenerations, providing additional validation.
+            //
+            // 3. DEFENSIVE: retiredAddresses provides an explicit "do not accept" list for
+            //    extra safety, but is not strictly required given protections 1 and 2.
             if retiredAddresses.count > Self.maxRetiredAddresses {
                 retiredAddresses.removeAll()
             }

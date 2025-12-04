@@ -1691,3 +1691,322 @@ final class DropoutLayerTests: XCTestCase {
         XCTAssertEqual(result[3], 4.0, accuracy: 0.001)
     }
 }
+
+// MARK: - Weight Validation Tests
+
+final class WeightValidationTests: XCTestCase {
+
+    func testValidateWeightsNaN() {
+        let weights: [Float] = [1.0, 2.0, Float.nan, 4.0]
+
+        XCTAssertThrowsError(try validateWeights(weights, name: "testWeights")) { error in
+            guard let audioError = error as? MetalAudioError else {
+                XCTFail("Expected MetalAudioError")
+                return
+            }
+            if case .invalidConfiguration(let msg) = audioError {
+                XCTAssertTrue(msg.contains("NaN"), "Error should mention NaN")
+            } else {
+                XCTFail("Expected invalidConfiguration error")
+            }
+        }
+    }
+
+    func testValidateWeightsInfinity() {
+        let weights: [Float] = [1.0, Float.infinity, 3.0]
+
+        XCTAssertThrowsError(try validateWeights(weights)) { error in
+            guard let audioError = error as? MetalAudioError else {
+                XCTFail("Expected MetalAudioError")
+                return
+            }
+            if case .invalidConfiguration(let msg) = audioError {
+                XCTAssertTrue(msg.contains("Inf"), "Error should mention Inf")
+            } else {
+                XCTFail("Expected invalidConfiguration error")
+            }
+        }
+    }
+
+    func testValidateWeightsNegativeInfinity() {
+        let weights: [Float] = [1.0, -Float.infinity, 3.0]
+
+        XCTAssertThrowsError(try validateWeights(weights)) { error in
+            guard let audioError = error as? MetalAudioError else {
+                XCTFail("Expected MetalAudioError")
+                return
+            }
+            if case .invalidConfiguration(let msg) = audioError {
+                XCTAssertTrue(msg.contains("Inf"), "Error should mention Inf")
+            } else {
+                XCTFail("Expected invalidConfiguration error")
+            }
+        }
+    }
+
+    func testValidateWeightsLargeMagnitude() throws {
+        let weights: [Float] = [1.0, 2000.0, 3.0]
+
+        let warning = try validateWeights(weights)
+
+        XCTAssertNotNil(warning, "Should return warning for large values")
+        XCTAssertTrue(warning!.contains("large"), "Warning should mention large magnitude")
+    }
+
+    func testValidateWeightsSmallMagnitude() throws {
+        let weights: [Float] = [1.0, 1e-8, 0.5]
+
+        let warning = try validateWeights(weights)
+
+        XCTAssertNotNil(warning, "Should return warning for very small values")
+        XCTAssertTrue(warning!.contains("small"), "Warning should mention small values")
+    }
+
+    func testValidateWeightsNormalValues() throws {
+        let weights: [Float] = [0.1, 0.2, -0.3, 0.4]
+
+        let warning = try validateWeights(weights)
+
+        XCTAssertNil(warning, "Should return nil for normal weights")
+    }
+
+    func testValidateWeightsEmptyArray() throws {
+        let weights: [Float] = []
+
+        let warning = try validateWeights(weights)
+
+        XCTAssertNil(warning, "Should handle empty array without error")
+    }
+}
+
+// MARK: - Weight Initialization Extended Tests
+
+final class WeightInitializationExtendedTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testNormalInitializationOddCount() throws {
+        let tensor = try Tensor(device: device, shape: [7])
+
+        try WeightInitialization.normal(mean: 0.0, std: 1.0).apply(to: tensor, fanIn: 7, fanOut: 7)
+
+        let values = tensor.toArray()
+        XCTAssertEqual(values.count, 7)
+
+        // Check that values are finite
+        for val in values {
+            XCTAssertFalse(val.isNaN, "Normal init should not produce NaN")
+            XCTAssertFalse(val.isInfinite, "Normal init should not produce Inf")
+        }
+    }
+
+    func testNormalInitializationEvenCount() throws {
+        let tensor = try Tensor(device: device, shape: [8])
+
+        try WeightInitialization.normal(mean: 0.0, std: 1.0).apply(to: tensor, fanIn: 8, fanOut: 8)
+
+        let values = tensor.toArray()
+        XCTAssertEqual(values.count, 8)
+
+        for val in values {
+            XCTAssertFalse(val.isNaN, "Normal init should not produce NaN")
+            XCTAssertFalse(val.isInfinite, "Normal init should not produce Inf")
+        }
+    }
+
+    func testNormalInitializationWithCustomMeanStd() throws {
+        let tensor = try Tensor(device: device, shape: [100])
+
+        try WeightInitialization.normal(mean: 5.0, std: 0.5).apply(to: tensor, fanIn: 100, fanOut: 100)
+
+        let values = tensor.toArray()
+
+        // Calculate empirical mean
+        let mean = values.reduce(0, +) / Float(values.count)
+
+        // Mean should be close to 5.0 (with some variance due to random sampling)
+        XCTAssertEqual(mean, 5.0, accuracy: 0.5, "Mean should be close to specified value")
+    }
+
+    func testUniformInitialization() throws {
+        let tensor = try Tensor(device: device, shape: [100])
+
+        try WeightInitialization.uniform(low: -0.5, high: 0.5).apply(to: tensor, fanIn: 100, fanOut: 100)
+
+        let values = tensor.toArray()
+
+        for val in values {
+            XCTAssertGreaterThanOrEqual(val, -0.5)
+            XCTAssertLessThanOrEqual(val, 0.5)
+        }
+    }
+
+    func testOnesInitialization() throws {
+        let tensor = try Tensor(device: device, shape: [5])
+
+        try WeightInitialization.ones.apply(to: tensor, fanIn: 5, fanOut: 5)
+
+        let values = tensor.toArray()
+        XCTAssertEqual(values, [1.0, 1.0, 1.0, 1.0, 1.0])
+    }
+
+    func testZerosInitialization() throws {
+        let tensor = try Tensor(device: device, shape: [5])
+        try tensor.copy(from: [1.0, 2.0, 3.0, 4.0, 5.0])  // Pre-fill with non-zero
+
+        try WeightInitialization.zeros.apply(to: tensor, fanIn: 5, fanOut: 5)
+
+        let values = tensor.toArray()
+        XCTAssertEqual(values, [0.0, 0.0, 0.0, 0.0, 0.0])
+    }
+}
+
+// MARK: - HalfLinear Tests
+
+final class HalfLinearTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testHalfLinearCreation() throws {
+        let layer = try HalfLinear(device: device, inputFeatures: 32, outputFeatures: 16)
+
+        XCTAssertEqual(layer.inputShape, [32])
+        XCTAssertEqual(layer.outputShape, [16])
+    }
+
+    func testHalfLinearCreationWithBias() throws {
+        let layer = try HalfLinear(device: device, inputFeatures: 32, outputFeatures: 16, useBias: true)
+
+        XCTAssertEqual(layer.inputShape, [32])
+        XCTAssertEqual(layer.outputShape, [16])
+    }
+
+    func testHalfLinearCreationWithoutBias() throws {
+        let layer = try HalfLinear(device: device, inputFeatures: 32, outputFeatures: 16, useBias: false)
+
+        XCTAssertEqual(layer.inputShape, [32])
+        XCTAssertEqual(layer.outputShape, [16])
+    }
+
+    func testHalfLinearForward() throws {
+        let inputFeatures = 4
+        let outputFeatures = 2
+
+        let layer = try HalfLinear(device: device, inputFeatures: inputFeatures, outputFeatures: outputFeatures, useBias: false)
+
+        // Create half-precision tensors
+        let input = try Tensor(device: device, shape: [inputFeatures], dataType: .float16)
+        try input.copyFromFloat([1.0, 0.0, 0.0, 0.0])
+
+        let output = try Tensor(device: device, shape: [outputFeatures], dataType: .float16)
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try layer.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toFloatArray()
+        XCTAssertEqual(result.count, outputFeatures)
+    }
+
+    func testHalfLinearForwardBatched() throws {
+        let inputFeatures = 4
+        let outputFeatures = 2
+        let batchSize = 2
+
+        let layer = try HalfLinear(device: device, inputFeatures: inputFeatures, outputFeatures: outputFeatures)
+
+        let input = try Tensor(device: device, shape: [batchSize, inputFeatures], dataType: .float16)
+        try input.copyFromFloat([1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+
+        let output = try Tensor(device: device, shape: [batchSize, outputFeatures], dataType: .float16)
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try layer.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toFloatArray()
+        XCTAssertEqual(result.count, batchSize * outputFeatures)
+    }
+}
+
+// MARK: - Linear CPU Threshold Tests
+
+final class LinearCPUThresholdTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testLinearMPSBatchThresholdProperty() {
+        let originalValue = Linear.mpsBatchThreshold
+        defer { Linear.mpsBatchThreshold = originalValue }
+
+        Linear.mpsBatchThreshold = 8
+        XCTAssertEqual(Linear.mpsBatchThreshold, 8)
+
+        Linear.mpsBatchThreshold = 16
+        XCTAssertEqual(Linear.mpsBatchThreshold, 16)
+    }
+
+    func testLinearMPSGPUThresholdProperty() {
+        let originalValue = Linear.mpsGPUThreshold
+        defer { Linear.mpsGPUThreshold = originalValue }
+
+        Linear.mpsGPUThreshold = 64
+        XCTAssertEqual(Linear.mpsGPUThreshold, 64)
+    }
+
+    func testLinearSingleVectorPath() throws {
+        // Batch size 1 should use single vector path (cblas_sgemv)
+        let linear = try Linear(device: device, inputFeatures: 4, outputFeatures: 2)
+
+        let input = try Tensor(device: device, shape: [4])
+        try input.copy(from: [1.0, 0.0, 0.0, 0.0])
+
+        let output = try Tensor(device: device, shape: [2])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try linear.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        XCTAssertEqual(result.count, 2)
+    }
+
+    func testLinearSmallBatchPath() throws {
+        // Batch size < mpsBatchThreshold should use CPU path
+        let originalThreshold = Linear.mpsBatchThreshold
+        defer { Linear.mpsBatchThreshold = originalThreshold }
+
+        Linear.mpsBatchThreshold = 8  // Ensure batch size 2 uses CPU
+
+        let linear = try Linear(device: device, inputFeatures: 4, outputFeatures: 2)
+
+        let input = try Tensor(device: device, shape: [2, 4])
+        try input.copy(from: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+
+        let output = try Tensor(device: device, shape: [2, 2])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try linear.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        XCTAssertEqual(result.count, 4)
+    }
+}
+

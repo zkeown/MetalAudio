@@ -264,3 +264,227 @@ final class TensorCoverageTests: XCTestCase {
         XCTAssertEqual(result.count, 0)
     }
 }
+
+// MARK: - Tensor Float16 Tests
+
+final class TensorFloat16Tests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testFloat16Creation() throws {
+        let tensor = try Tensor(device: device, shape: [10], dataType: .float16)
+
+        XCTAssertEqual(tensor.dataType, .float16)
+        XCTAssertEqual(tensor.byteSize, 20)  // 10 * 2 bytes
+    }
+
+    func testFloat16ByteSizeCalculation() throws {
+        let tensor = try Tensor(device: device, shape: [4, 5], dataType: .float16)
+
+        XCTAssertEqual(tensor.count, 20)
+        XCTAssertEqual(tensor.byteSize, 40)  // 20 * 2 bytes
+    }
+
+    func testFloat16ZeroAndFill() throws {
+        let tensor = try Tensor(device: device, shape: [5], dataType: .float16)
+
+        tensor.zero()
+        // Can't easily verify float16 zeros, but shouldn't crash
+
+        tensor.fill(2.0)
+        // Also shouldn't crash
+    }
+}
+
+// MARK: - Tensor High Dimension Tests
+
+final class TensorHighDimensionTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testTensor4D() throws {
+        let tensor = try Tensor(device: device, shape: [2, 3, 4, 5])
+
+        XCTAssertEqual(tensor.rank, 4)
+        XCTAssertEqual(tensor.count, 120)
+        XCTAssertEqual(tensor.strides, [60, 20, 5, 1])
+    }
+
+    func testTensor5D() throws {
+        let tensor = try Tensor(device: device, shape: [1, 2, 3, 4, 5])
+
+        XCTAssertEqual(tensor.rank, 5)
+        XCTAssertEqual(tensor.count, 120)
+        XCTAssertEqual(tensor.strides, [120, 60, 20, 5, 1])
+    }
+
+    func testLinearIndex4D() throws {
+        let tensor = try Tensor(device: device, shape: [2, 3, 4, 5])
+
+        // Linear index = i0*60 + i1*20 + i2*5 + i3
+        XCTAssertEqual(try tensor.linearIndex([0, 0, 0, 0]), 0)
+        XCTAssertEqual(try tensor.linearIndex([1, 0, 0, 0]), 60)
+        XCTAssertEqual(try tensor.linearIndex([0, 1, 0, 0]), 20)
+        XCTAssertEqual(try tensor.linearIndex([0, 0, 1, 0]), 5)
+        XCTAssertEqual(try tensor.linearIndex([0, 0, 0, 1]), 1)
+        XCTAssertEqual(try tensor.linearIndex([1, 2, 3, 4]), 119)
+    }
+
+    func testUnsqueezedEnd() throws {
+        let tensor = try Tensor(device: device, shape: [3, 4])
+        let unsqueezed = try tensor.unsqueezed(at: 2)
+
+        XCTAssertEqual(unsqueezed.shape, [3, 4, 1])
+    }
+
+    func testSqueezedKeepsNonOnes() throws {
+        let tensor = try Tensor(device: device, shape: [1, 3, 1, 4])
+        let squeezed = try tensor.squeezed()
+
+        XCTAssertEqual(squeezed.shape, [3, 4])
+    }
+
+    func testReshapedToHigherDimension() throws {
+        let tensor = try Tensor(device: device, shape: [24])
+        let reshaped = try tensor.reshaped([2, 3, 4])
+
+        XCTAssertEqual(reshaped.shape, [2, 3, 4])
+        XCTAssertEqual(reshaped.rank, 3)
+    }
+
+    func testReshapedToLowerDimension() throws {
+        let tensor = try Tensor(device: device, shape: [2, 3, 4])
+        let reshaped = try tensor.reshaped([24])
+
+        XCTAssertEqual(reshaped.shape, [24])
+        XCTAssertEqual(reshaped.rank, 1)
+    }
+}
+
+// MARK: - Tensor Additional Edge Case Tests
+
+final class TensorAdditionalEdgeCaseTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testScalarTensor() throws {
+        let tensor = try Tensor(device: device, shape: [1])
+
+        XCTAssertEqual(tensor.rank, 1)
+        XCTAssertEqual(tensor.count, 1)
+
+        try tensor.copy(from: [42.0])
+        XCTAssertEqual(tensor.toArray(), [42.0])
+    }
+
+    func testLargeTensor() throws {
+        // 1 million elements
+        let tensor = try Tensor(device: device, shape: [1000, 1000])
+
+        XCTAssertEqual(tensor.count, 1_000_000)
+        XCTAssertEqual(tensor.byteSize, 4_000_000)
+
+        // Fill should work
+        tensor.fill(1.5)
+    }
+
+    func testMultipleZeros() throws {
+        let tensor = try Tensor(device: device, shape: [10])
+        try tensor.copy(from: Array(repeating: Float(1.0), count: 10))
+
+        tensor.zero()
+        tensor.zero()  // Second zero call
+
+        let result = tensor.toArray()
+        XCTAssertTrue(result.allSatisfy { $0 == 0 })
+    }
+
+    func testFillOverwrite() throws {
+        let tensor = try Tensor(device: device, shape: [5])
+
+        tensor.fill(1.0)
+        tensor.fill(2.0)
+        tensor.fill(3.0)
+
+        let result = tensor.toArray()
+        XCTAssertTrue(result.allSatisfy { $0 == 3.0 })
+    }
+
+    func testCopyOverwrite() throws {
+        let tensor = try Tensor(device: device, shape: [3])
+
+        try tensor.copy(from: [1, 2, 3])
+        try tensor.copy(from: [4, 5, 6])
+
+        XCTAssertEqual(tensor.toArray(), [4, 5, 6])
+    }
+
+    func testUnsqueezedAtValidIndex() throws {
+        let tensor = try Tensor(device: device, shape: [3, 4])
+
+        // Unsqueeze at valid indices
+        let unsqueezed0 = try tensor.unsqueezed(at: 0)
+        XCTAssertEqual(unsqueezed0.shape, [1, 3, 4])
+
+        let unsqueezed1 = try tensor.unsqueezed(at: 1)
+        XCTAssertEqual(unsqueezed1.shape, [3, 1, 4])
+
+        let unsqueezed2 = try tensor.unsqueezed(at: 2)
+        XCTAssertEqual(unsqueezed2.shape, [3, 4, 1])
+    }
+
+    func testSetAndGetVariousPositions() throws {
+        let tensor = try Tensor(device: device, shape: [3, 4])
+        tensor.zero()
+
+        // Set various valid positions
+        try tensor.set(1.0, at: 0, 0)
+        try tensor.set(2.0, at: 1, 2)
+        try tensor.set(3.0, at: 2, 3)
+
+        XCTAssertEqual(try tensor.get(0, 0), 1.0)
+        XCTAssertEqual(try tensor.get(1, 2), 2.0)
+        XCTAssertEqual(try tensor.get(2, 3), 3.0)
+    }
+
+    func testTensorShapeWithSingleDimZero() throws {
+        let tensor = try Tensor(device: device, shape: [0, 5])
+
+        XCTAssertEqual(tensor.count, 0)
+        XCTAssertEqual(tensor.byteSize, 0)
+    }
+
+    func testToArrayPreservesData() throws {
+        let tensor = try Tensor(device: device, shape: [4])
+        let input: [Float] = [3.14, 2.71, 1.41, 1.73]
+
+        try tensor.copy(from: input)
+        let output1 = tensor.toArray()
+        let output2 = tensor.toArray()
+
+        // Multiple toArray calls should return same data
+        XCTAssertEqual(output1, output2)
+        XCTAssertEqual(output1, input)
+    }
+
+    func testFloatPointer() throws {
+        let tensor = try Tensor(device: device, shape: [4])
+        try tensor.copy(from: [1, 2, 3, 4])
+
+        let ptr = tensor.floatPointer
+        XCTAssertEqual(ptr[0], 1)
+        XCTAssertEqual(ptr[3], 4)
+    }
+}

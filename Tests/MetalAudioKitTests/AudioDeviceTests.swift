@@ -2445,3 +2445,553 @@ final class MetalAudioErrorTests: XCTestCase {
         XCTAssertTrue(error.errorDescription?.contains("4096") ?? false)
     }
 }
+
+// MARK: - AudioBuffer Safe Copy Tests
+
+final class AudioBufferSafeCopyTests: XCTestCase {
+
+    var device: AudioDevice!
+    var context: ComputeContext!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+        context = try ComputeContext(device: device)
+    }
+
+    func testSafeCopyFromCPURawPointer() throws {
+        let buffer = try AudioBuffer(device: device, sampleCount: 4, channelCount: 1)
+        let testData: [Float] = [1.0, 2.0, 3.0, 4.0]
+
+        // Get a fence value by executing a simple operation
+        let fenceValue = try context.executeSync { encoder in
+            // Minimal encode - just get fence value
+            return UInt64(0)
+        }
+
+        // Use safeCopyFromCPU with fence synchronization
+        try testData.withUnsafeBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            try buffer.safeCopyFromCPU(baseAddress, size: 16, context: context, fenceValue: fenceValue)
+        }
+
+        let result = buffer.toArray()
+        XCTAssertEqual(result, testData, "safeCopyFromCPU raw pointer should work")
+    }
+
+    func testSafeCopyFromCPUArray() throws {
+        let buffer = try AudioBuffer(device: device, sampleCount: 4, channelCount: 1)
+        let testData: [Float] = [5.0, 6.0, 7.0, 8.0]
+
+        let fenceValue = try context.executeSync { _ in UInt64(0) }
+
+        try buffer.safeCopyFromCPU(testData, context: context, fenceValue: fenceValue)
+
+        let result = buffer.toArray()
+        XCTAssertEqual(result, testData, "safeCopyFromCPU array should work")
+    }
+
+    func testSafeCopyFromCPUEmptyArray() throws {
+        let buffer = try AudioBuffer(device: device, sampleCount: 1, channelCount: 1)
+        let emptyData: [Float] = [0.0]
+
+        let fenceValue = try context.executeSync { _ in UInt64(0) }
+
+        // This should work for minimal array
+        try buffer.safeCopyFromCPU(emptyData, context: context, fenceValue: fenceValue)
+        XCTAssertEqual(buffer.toArray(), emptyData)
+    }
+
+    func testSafeCopyFromCPUSizeMismatch() throws {
+        let buffer = try AudioBuffer(device: device, sampleCount: 2, channelCount: 1)
+        let testData: [Float] = [1.0, 2.0, 3.0, 4.0]  // 4 samples but buffer only holds 2
+
+        let fenceValue = try context.executeSync { _ in UInt64(0) }
+
+        XCTAssertThrowsError(try buffer.safeCopyFromCPU(testData, context: context, fenceValue: fenceValue)) { error in
+            XCTAssertTrue(error is MetalAudioError, "Should throw MetalAudioError")
+        }
+    }
+}
+
+// MARK: - AudioBuffer Typed Format Tests
+
+final class AudioBufferTypedFormatTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testInt16CopyRoundtrip() throws {
+        let buffer = try AudioBuffer(
+            device: device,
+            sampleCount: 4,
+            channelCount: 1,
+            format: .int16
+        )
+
+        let testData: [Int16] = [100, 200, -300, 400]
+        try buffer.copyFromCPU(testData)
+
+        let result = buffer.toInt16Array()
+        XCTAssertEqual(result, testData, "Int16 round-trip should preserve data")
+    }
+
+    func testFloat16CopyRoundtrip() throws {
+        let buffer = try AudioBuffer(
+            device: device,
+            sampleCount: 4,
+            channelCount: 1,
+            format: .float16
+        )
+
+        let testData: [Float16] = [1.0, 2.5, 3.75, 4.0]
+        try buffer.copyFromCPU(testData)
+
+        let result = buffer.toFloat16Array()
+        XCTAssertEqual(result, testData, "Float16 round-trip should preserve data")
+    }
+
+    func testInt16EmptyArray() throws {
+        let buffer = try AudioBuffer(
+            device: device,
+            sampleCount: 1,
+            channelCount: 1,
+            format: .int16
+        )
+
+        let testData: [Int16] = [0]
+        try buffer.copyFromCPU(testData)
+
+        let result = buffer.toInt16Array()
+        XCTAssertEqual(result.count, 1)
+    }
+
+    func testFloat16EmptyArray() throws {
+        let buffer = try AudioBuffer(
+            device: device,
+            sampleCount: 1,
+            channelCount: 1,
+            format: .float16
+        )
+
+        let testData: [Float16] = [0.0]
+        try buffer.copyFromCPU(testData)
+
+        let result = buffer.toFloat16Array()
+        XCTAssertEqual(result.count, 1)
+    }
+
+    func testInt16SizeMismatch() throws {
+        let buffer = try AudioBuffer(
+            device: device,
+            sampleCount: 2,
+            channelCount: 1,
+            format: .int16
+        )
+
+        let testData: [Int16] = [1, 2, 3, 4]  // 4 samples for 2-sample buffer
+
+        XCTAssertThrowsError(try buffer.copyFromCPU(testData)) { error in
+            XCTAssertTrue(error is MetalAudioError)
+        }
+    }
+
+    func testFloat16SizeMismatch() throws {
+        let buffer = try AudioBuffer(
+            device: device,
+            sampleCount: 2,
+            channelCount: 1,
+            format: .float16
+        )
+
+        let testData: [Float16] = [1.0, 2.0, 3.0, 4.0]
+
+        XCTAssertThrowsError(try buffer.copyFromCPU(testData)) { error in
+            XCTAssertTrue(error is MetalAudioError)
+        }
+    }
+
+    func testInt32Format() throws {
+        let buffer = try AudioBuffer(
+            device: device,
+            sampleCount: 4,
+            channelCount: 1,
+            format: .int32
+        )
+
+        XCTAssertEqual(buffer.format.bytesPerSample, 4)
+        XCTAssertEqual(buffer.format.metalType, "int")
+        XCTAssertEqual(buffer.byteSize, 16)
+    }
+
+    func testFloatContentsValidFormat() throws {
+        let buffer = try AudioBuffer(device: device, sampleCount: 4, channelCount: 1, format: .float32)
+
+        let floatContents = buffer.floatContents
+        XCTAssertNotNil(floatContents, "floatContents should return pointer for float32 format")
+    }
+
+    func testFloatContentsInvalidFormat() throws {
+        let buffer = try AudioBuffer(device: device, sampleCount: 4, channelCount: 1, format: .int16)
+
+        let floatContents = buffer.floatContents
+        XCTAssertNil(floatContents, "floatContents should return nil for non-float32 format")
+    }
+
+    func testContentsTypedValidation() throws {
+        let buffer = try AudioBuffer(device: device, sampleCount: 4, channelCount: 1)
+
+        let ptr: UnsafeMutablePointer<Float> = try buffer.contents()
+        XCTAssertNotNil(ptr)
+
+        // Write through typed pointer
+        ptr[0] = 10.0
+        ptr[1] = 20.0
+        ptr[2] = 30.0
+        ptr[3] = 40.0
+
+        let result = buffer.toArray()
+        XCTAssertEqual(result, [10.0, 20.0, 30.0, 40.0])
+    }
+}
+
+// MARK: - AudioBufferPool Handle Tests
+
+final class AudioBufferPoolHandleTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testAcquireWithHandle() throws {
+        let pool = try AudioBufferPool(
+            device: device,
+            sampleCount: 256,
+            channelCount: 1,
+            poolSize: 4
+        )
+
+        let (buffer, handle) = try pool.acquireWithHandle()
+        XCTAssertNotNil(buffer)
+        XCTAssertEqual(pool.availableCount, 3)
+
+        // Release with handle
+        try pool.release(buffer, handle: handle)
+        XCTAssertEqual(pool.availableCount, 4)
+    }
+
+    func testAcquireIfAvailable() throws {
+        let pool = try AudioBufferPool(
+            device: device,
+            sampleCount: 256,
+            channelCount: 1,
+            poolSize: 2
+        )
+
+        let buffer1 = pool.acquireIfAvailable()
+        XCTAssertNotNil(buffer1)
+
+        let buffer2 = pool.acquireIfAvailable()
+        XCTAssertNotNil(buffer2)
+
+        // Pool exhausted - should return nil
+        let buffer3 = pool.acquireIfAvailable()
+        XCTAssertNil(buffer3, "Should return nil when pool is exhausted")
+    }
+
+    func testAcquireWithHandleIfAvailable() throws {
+        let pool = try AudioBufferPool(
+            device: device,
+            sampleCount: 256,
+            channelCount: 1,
+            poolSize: 2
+        )
+
+        guard let (buffer1, handle1) = pool.acquireWithHandleIfAvailable() else {
+            XCTFail("Should acquire first buffer")
+            return
+        }
+
+        guard let (buffer2, handle2) = pool.acquireWithHandleIfAvailable() else {
+            XCTFail("Should acquire second buffer")
+            return
+        }
+
+        // Pool exhausted
+        let result = pool.acquireWithHandleIfAvailable()
+        XCTAssertNil(result, "Should return nil when exhausted")
+
+        // Release both
+        try pool.release(buffer1, handle: handle1)
+        try pool.release(buffer2, handle: handle2)
+        XCTAssertEqual(pool.availableCount, 2)
+    }
+
+    func testReleaseIfValid() throws {
+        let pool = try AudioBufferPool(
+            device: device,
+            sampleCount: 256,
+            channelCount: 1,
+            poolSize: 2
+        )
+
+        let buffer = try pool.acquire()
+        XCTAssertEqual(pool.availableCount, 1)
+
+        let released = pool.releaseIfValid(buffer)
+        XCTAssertTrue(released, "Should successfully release valid buffer")
+        XCTAssertEqual(pool.availableCount, 2)
+    }
+
+    func testReleaseIfValidWithHandle() throws {
+        let pool = try AudioBufferPool(
+            device: device,
+            sampleCount: 256,
+            channelCount: 1,
+            poolSize: 2
+        )
+
+        let (buffer, handle) = try pool.acquireWithHandle()
+
+        let released = pool.releaseIfValid(buffer, handle: handle)
+        XCTAssertTrue(released)
+        XCTAssertEqual(pool.availableCount, 2)
+    }
+
+    func testReleaseWithStaleHandle() throws {
+        let pool = try AudioBufferPool(
+            device: device,
+            sampleCount: 256,
+            channelCount: 1,
+            poolSize: 2
+        )
+
+        // Acquire and release a buffer
+        let (buffer1, handle1) = try pool.acquireWithHandle()
+        try pool.release(buffer1, handle: handle1)
+
+        // Acquire same buffer again (gets new generation)
+        let (buffer2, handle2) = try pool.acquireWithHandle()
+
+        // Try to release with old handle - should fail
+        XCTAssertThrowsError(try pool.release(buffer2, handle: handle1)) { error in
+            guard case BufferPoolError.foreignBuffer = error else {
+                XCTFail("Expected foreignBuffer error, got \(error)")
+                return
+            }
+        }
+
+        // Release with correct handle should work
+        try pool.release(buffer2, handle: handle2)
+    }
+
+    func testReleaseIfValidWithStaleHandle() throws {
+        let pool = try AudioBufferPool(
+            device: device,
+            sampleCount: 256,
+            channelCount: 1,
+            poolSize: 2
+        )
+
+        let (buffer1, handle1) = try pool.acquireWithHandle()
+        try pool.release(buffer1, handle: handle1)
+
+        let (buffer2, _) = try pool.acquireWithHandle()
+
+        // Try with stale handle
+        let released = pool.releaseIfValid(buffer2, handle: handle1)
+        XCTAssertFalse(released, "Should not release with stale handle")
+    }
+
+    func testDuplicateRelease() throws {
+        let pool = try AudioBufferPool(
+            device: device,
+            sampleCount: 256,
+            channelCount: 1,
+            poolSize: 2
+        )
+
+        let buffer = try pool.acquire()
+        try pool.release(buffer)
+
+        // Second release should throw
+        XCTAssertThrowsError(try pool.release(buffer)) { error in
+            guard case BufferPoolError.duplicateRelease = error else {
+                XCTFail("Expected duplicateRelease error")
+                return
+            }
+        }
+    }
+}
+
+// MARK: - AudioBufferPool Memory Tests
+
+final class AudioBufferPoolMemoryTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testShrinkAvailable() throws {
+        let pool = try AudioBufferPool(
+            device: device,
+            sampleCount: 256,
+            channelCount: 1,
+            poolSize: 8
+        )
+
+        XCTAssertEqual(pool.availableCount, 8)
+
+        let removed = pool.shrinkAvailable(to: 4)
+        XCTAssertEqual(removed, 4)
+        XCTAssertEqual(pool.availableCount, 4)
+    }
+
+    func testShrinkToZero() throws {
+        let pool = try AudioBufferPool(
+            device: device,
+            sampleCount: 256,
+            channelCount: 1,
+            poolSize: 4
+        )
+
+        let removed = pool.shrinkAvailable(to: 0)
+        XCTAssertEqual(removed, 4)
+        XCTAssertEqual(pool.availableCount, 0)
+    }
+
+    func testShrinkBeyondAvailable() throws {
+        let pool = try AudioBufferPool(
+            device: device,
+            sampleCount: 256,
+            channelCount: 1,
+            poolSize: 4
+        )
+
+        // Shrink to more than available - should be no-op
+        let removed = pool.shrinkAvailable(to: 10)
+        XCTAssertEqual(removed, 0)
+        XCTAssertEqual(pool.availableCount, 4)
+    }
+
+    func testMemoryBudget() throws {
+        let pool = try AudioBufferPool(
+            device: device,
+            sampleCount: 256,
+            channelCount: 1,
+            poolSize: 8
+        )
+
+        // Each buffer is 256 * 1 * 4 = 1024 bytes
+        XCTAssertEqual(pool.bytesPerBuffer, 1024)
+
+        // Set budget to allow only 2 buffers
+        pool.setMemoryBudget(2048)
+
+        // Should have shrunk
+        XCTAssertLessThanOrEqual(pool.availableCount, 2)
+
+        // Check budget is stored
+        XCTAssertEqual(pool.memoryBudget, 2048)
+    }
+
+    func testMemoryBudgetRemoval() throws {
+        let pool = try AudioBufferPool(
+            device: device,
+            sampleCount: 256,
+            channelCount: 1,
+            poolSize: 4
+        )
+
+        pool.setMemoryBudget(1024)
+        XCTAssertNotNil(pool.memoryBudget)
+
+        pool.setMemoryBudget(nil)
+        XCTAssertNil(pool.memoryBudget)
+    }
+
+    func testMemoryPressureResponseCritical() throws {
+        let pool = try AudioBufferPool(
+            device: device,
+            sampleCount: 256,
+            channelCount: 1,
+            poolSize: 8
+        )
+
+        pool.didReceiveMemoryPressure(level: .critical)
+
+        // Should reduce to 1
+        XCTAssertEqual(pool.availableCount, 1)
+    }
+
+    func testMemoryPressureResponseWarning() throws {
+        let pool = try AudioBufferPool(
+            device: device,
+            sampleCount: 256,
+            channelCount: 1,
+            poolSize: 8
+        )
+
+        pool.didReceiveMemoryPressure(level: .warning)
+
+        // Should reduce to 50% = 4
+        XCTAssertEqual(pool.availableCount, 4)
+    }
+
+    func testMemoryPressureResponseNormal() throws {
+        let pool = try AudioBufferPool(
+            device: device,
+            sampleCount: 256,
+            channelCount: 1,
+            poolSize: 8
+        )
+
+        pool.didReceiveMemoryPressure(level: .normal)
+
+        // Should remain unchanged
+        XCTAssertEqual(pool.availableCount, 8)
+    }
+
+    func testCurrentMemoryUsage() throws {
+        let pool = try AudioBufferPool(
+            device: device,
+            sampleCount: 256,
+            channelCount: 1,
+            poolSize: 4
+        )
+
+        // 4 buffers * 1024 bytes = 4096
+        XCTAssertEqual(pool.currentMemoryUsage, 4096)
+
+        _ = try pool.acquire()
+        // Now 3 available
+        XCTAssertEqual(pool.currentMemoryUsage, 3072)
+    }
+
+    func testRetiredBufferRejection() throws {
+        let pool = try AudioBufferPool(
+            device: device,
+            sampleCount: 256,
+            channelCount: 1,
+            poolSize: 4
+        )
+
+        // Acquire a buffer
+        let buffer = try pool.acquire()
+        XCTAssertEqual(pool.availableCount, 3)
+
+        // Shrink the pool while buffer is out
+        pool.shrinkAvailable(to: 0)
+        XCTAssertEqual(pool.availableCount, 0)
+
+        // Now try to release the buffer - should still work since it wasn't retired
+        let released = pool.releaseIfValid(buffer)
+        XCTAssertTrue(released, "Buffer in use during shrink should still be releasable")
+    }
+}

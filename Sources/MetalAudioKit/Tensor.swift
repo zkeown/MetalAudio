@@ -115,6 +115,20 @@ public final class Tensor {
         ) else {
             throw MetalAudioError.bufferAllocationFailed(byteSize)
         }
+
+        // Zero-initialize buffer contents to prevent undefined behavior from reading
+        // uninitialized memory. Metal buffers are NOT automatically zeroed.
+        // This is critical for security (prevents information leaks) and correctness
+        // (prevents NaN/garbage propagation in neural network computations).
+        if byteSize > 0 {
+            memset(buffer.contents(), 0, byteSize)
+            #if os(macOS)
+            // Notify Metal that CPU modified the buffer (required for managed storage)
+            if buffer.storageMode == .managed {
+                buffer.didModifyRange(0..<byteSize)
+            }
+            #endif
+        }
         self.buffer = buffer
     }
 
@@ -182,16 +196,55 @@ public final class Tensor {
     }
 
     /// Access data as Float pointer
+    ///
+    /// - Warning: **No Bounds Checking**: This returns a raw pointer with no size information.
+    ///   Writing beyond `count` elements causes heap corruption. For safer access, use
+    ///   `withUnsafeMutableBufferPointer(_:)` which includes bounds information.
+    ///
+    /// - Warning: **Storage Mode**: Accessing a `storageModePrivate` buffer's contents
+    ///   returns garbage or crashes. Only use for `storageModeShared` or `storageModeManaged` buffers.
     public var floatPointer: UnsafeMutablePointer<Float> {
         buffer.contents().assumingMemoryBound(to: Float.self)
+    }
+
+    /// Safely access tensor data with bounds information
+    ///
+    /// Use this method for safe access to tensor data. The buffer pointer includes
+    /// count information which enables bounds checking in DEBUG builds.
+    ///
+    /// - Parameter body: Closure that receives a mutable buffer pointer to the tensor data
+    /// - Returns: The result of the closure
+    /// - Warning: **Storage Mode**: Only use for `storageModeShared` or `storageModeManaged` buffers.
+    ///   Accessing `storageModePrivate` buffers returns garbage or crashes.
+    @inlinable
+    public func withUnsafeMutableBufferPointer<R>(_ body: (UnsafeMutableBufferPointer<Float>) throws -> R) rethrows -> R {
+        let ptr = buffer.contents().assumingMemoryBound(to: Float.self)
+        let bufferPtr = UnsafeMutableBufferPointer(start: ptr, count: count)
+        return try body(bufferPtr)
+    }
+
+    /// Safely access tensor data (read-only) with bounds information
+    ///
+    /// Use this method for safe read-only access to tensor data.
+    ///
+    /// - Parameter body: Closure that receives a buffer pointer to the tensor data
+    /// - Returns: The result of the closure
+    @inlinable
+    public func withUnsafeBufferPointer<R>(_ body: (UnsafeBufferPointer<Float>) throws -> R) rethrows -> R {
+        let ptr = buffer.contents().assumingMemoryBound(to: Float.self)
+        let bufferPtr = UnsafeBufferPointer(start: ptr, count: count)
+        return try body(bufferPtr)
     }
 
     /// Copy data from Swift array
     ///
     /// - Throws: `MetalAudioError.bufferSizeMismatch` if array size doesn't match tensor
     ///
-    /// - Note: In DEBUG builds, validates that input contains no NaN or Inf values.
-    ///   This helps catch numerical issues early during development.
+    /// - Note: **Statistical NaN/Inf Detection (DEBUG only)**: In DEBUG builds, this method
+    ///   samples ~100 evenly-spaced values plus the first and last elements to detect NaN/Inf.
+    ///   This is NOT comprehensive validation - NaN/Inf values in unsampled positions will
+    ///   propagate silently. For critical applications, use `validateNoNaNInf()` for full
+    ///   validation (expensive) or implement GPU-based parallel validation.
     public func copy(from array: [Float]) throws {
         guard array.count == count else {
             throw MetalAudioError.bufferSizeMismatch(
@@ -203,15 +256,29 @@ public final class Tensor {
         guard !array.isEmpty else { return }
 
         #if DEBUG
-        // Validate for NaN/Inf in debug builds to catch numerical issues early
-        for (index, value) in array.enumerated() {
+        // Sample-based validation for NaN/Inf in debug builds.
+        // Checks first, last, and ~100 evenly-spaced samples to catch issues
+        // without O(n) overhead that kills performance on large tensors.
+        let sampleCount = min(100, array.count)
+        let stride = max(1, array.count / sampleCount)
+        var sampleIndex = 0
+        while sampleIndex < array.count {
+            let value = array[sampleIndex]
             if value.isNaN {
-                print("[Tensor] Warning: NaN detected at index \(index) in copy(from:)")
+                Self.logger.warning("NaN detected near index \(sampleIndex) in copy(from:)")
                 break
             }
             if value.isInfinite {
-                print("[Tensor] Warning: Inf detected at index \(index) in copy(from:)")
+                Self.logger.warning("Inf detected near index \(sampleIndex) in copy(from:)")
                 break
+            }
+            sampleIndex += stride
+        }
+        // Always check last element (common location for accumulation errors)
+        if array.count > 1 {
+            let last = array[array.count - 1]
+            if last.isNaN || last.isInfinite {
+                Self.logger.warning("NaN/Inf detected at last index in copy(from:)")
             }
         }
         #endif
@@ -239,6 +306,43 @@ public final class Tensor {
             memcpy(baseAddress, buffer.contents(), byteSize)
         }
         return result
+    }
+
+    /// Validate that tensor contains no NaN or Inf values (comprehensive, expensive)
+    ///
+    /// Unlike the statistical sampling in `copy(from:)`, this method checks EVERY value.
+    /// Use for debugging numerical issues or validating critical model outputs.
+    ///
+    /// - Warning: **O(n) Complexity**: This scans all elements and is NOT suitable for
+    ///   real-time or performance-critical paths. For large tensors, consider GPU-based
+    ///   validation using a Metal compute shader.
+    ///
+    /// - Returns: Tuple of (hasNaN, hasInf, firstBadIndex) where firstBadIndex is the
+    ///   index of the first NaN or Inf found, or nil if all values are finite.
+    public func validateNoNaNInf() -> (hasNaN: Bool, hasInf: Bool, firstBadIndex: Int?) {
+        guard count > 0, buffer.storageMode != .private else {
+            return (false, false, nil)
+        }
+
+        let ptr = floatPointer
+        var hasNaN = false
+        var hasInf = false
+        var firstBadIndex: Int?
+
+        for i in 0..<count {
+            let value = ptr[i]
+            if value.isNaN {
+                hasNaN = true
+                if firstBadIndex == nil { firstBadIndex = i }
+                break  // Stop at first bad value for performance
+            } else if value.isInfinite {
+                hasInf = true
+                if firstBadIndex == nil { firstBadIndex = i }
+                break
+            }
+        }
+
+        return (hasNaN, hasInf, firstBadIndex)
     }
 
     /// Copy tensor data to a pre-allocated buffer (zero-allocation)
@@ -499,6 +603,11 @@ extension Tensor {
 
 extension Tensor {
     /// Access data as Float16 pointer (for half-precision tensors)
+    ///
+    /// - Warning: **No Bounds Checking**: This returns a raw pointer with no size information.
+    ///   Writing beyond `count` elements causes heap corruption.
+    ///
+    /// - Warning: **Storage Mode**: Only use for `storageModeShared` or `storageModeManaged` buffers.
     public var float16Pointer: UnsafeMutablePointer<Float16> {
         buffer.contents().assumingMemoryBound(to: Float16.self)
     }

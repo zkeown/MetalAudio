@@ -43,9 +43,25 @@ public final class RingBuffer {
     // MARK: - Computed Properties
 
     /// Number of samples available to read
+    ///
+    /// Thread-safe: Uses acquire semantics to ensure subsequent reads of buffer
+    /// data see writes that happened before the producer's release barrier.
+    ///
+    /// MEMORY ORDERING:
+    /// 1. Read writePosition (may be stale, but that's safe - we just undercount)
+    /// 2. Acquire barrier - ensures subsequent buffer data reads see producer's writes
+    /// 3. Caller reads buffer data
+    ///
+    /// This pairs with write()'s release barrier which is: write data → barrier → update position
     public var availableToRead: Int {
+        // Read positions first
         let write = writePosition
         let read = readPosition
+        // Acquire barrier AFTER reading position: ensures subsequent buffer data reads
+        // by the caller see the data that was written before the producer's release barrier.
+        // Without this barrier after the position read, the CPU could reorder buffer reads
+        // to occur before we read the position, potentially reading stale/uninitialized data.
+        OSMemoryBarrier()
         return Int(write &- read)
     }
 

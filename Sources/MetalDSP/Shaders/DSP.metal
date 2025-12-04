@@ -506,9 +506,11 @@ kernel void convolve_direct(
     constant uint& kernelLength [[buffer(4)]],
     uint id [[thread_position_in_grid]]
 ) {
-    // Check for overflow: inputLength + kernelLength must not exceed UINT_MAX
-    // (result would wrap around, causing incorrect bounds checking)
-    if (kernelLength > UINT_MAX - inputLength + 1) return;
+    // Check for overflow: inputLength + kernelLength - 1 must not exceed UINT_MAX
+    // The original check `kernelLength > UINT_MAX - inputLength + 1` wraps around
+    // when inputLength == UINT_MAX. Fixed by checking kernelLength - 1 separately.
+    if (kernelLength == 0) return;
+    if (kernelLength - 1 > UINT_MAX - inputLength) return;
 
     uint outputLength = inputLength + kernelLength - 1;
     if (id >= outputLength) return;
@@ -553,8 +555,10 @@ kernel void convolve_direct_kahan(
     constant uint& kernelLength [[buffer(4)]],
     uint id [[thread_position_in_grid]]
 ) {
-    // Check for overflow: inputLength + kernelLength must not exceed UINT_MAX
-    if (kernelLength > UINT_MAX - inputLength + 1) return;
+    // Check for overflow: inputLength + kernelLength - 1 must not exceed UINT_MAX
+    // The original check wraps around when inputLength == UINT_MAX.
+    if (kernelLength == 0) return;
+    if (kernelLength - 1 > UINT_MAX - inputLength) return;
 
     uint outputLength = inputLength + kernelLength - 1;
     if (id >= outputLength) return;

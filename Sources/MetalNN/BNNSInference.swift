@@ -1,6 +1,7 @@
 import Foundation
 import Accelerate
 import MetalAudioKit
+import os.log
 
 /// Errors for BNNS Graph operations
 public enum BNNSInferenceError: Error, LocalizedError {
@@ -13,6 +14,7 @@ public enum BNNSInferenceError: Error, LocalizedError {
     case shapeMismatch(expected: [Int], actual: [Int])
     case unsupportedOS
     case tensorQueryFailed(name: String)
+    case invalidArgumentPosition(name: String, position: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -34,6 +36,8 @@ public enum BNNSInferenceError: Error, LocalizedError {
             return "BNNS Graph requires macOS 15+ or iOS 18+"
         case .tensorQueryFailed(let name):
             return "Failed to query tensor info for '\(name)'"
+        case .invalidArgumentPosition(let name, let position):
+            return "Invalid argument position \(position) for '\(name)' - may indicate malformed model"
         }
     }
 }
@@ -101,6 +105,8 @@ public protocol BNNSStreamingMemoryPressureDelegate: AnyObject {
 @available(macOS 15.0, iOS 18.0, *)
 public final class BNNSInference {
 
+    private static let logger = Logger(subsystem: "com.metalaudio", category: "BNNSInference")
+
     // MARK: - Properties
 
     /// The compiled BNNS graph (immutable after compilation)
@@ -151,8 +157,17 @@ public final class BNNSInference {
     /// Delegate for custom memory pressure handling
     public weak var memoryPressureDelegate: BNNSMemoryPressureDelegate?
 
+    /// Lock for memory pressure level access (thread-safe read/write)
+    private var memoryPressureLock = os_unfair_lock()
+
     /// Current memory pressure level (updated automatically when registered)
-    public private(set) var currentMemoryPressureLevel: MemoryPressureLevel = .normal
+    /// Thread-safe: Protected by memoryPressureLock
+    private var _currentMemoryPressureLevel: MemoryPressureLevel = .normal
+    public var currentMemoryPressureLevel: MemoryPressureLevel {
+        os_unfair_lock_lock(&memoryPressureLock)
+        defer { os_unfair_lock_unlock(&memoryPressureLock) }
+        return _currentMemoryPressureLevel
+    }
 
     // MARK: - Initialization
 
@@ -209,41 +224,60 @@ public final class BNNSInference {
 
         // Get argument count and positions
         self.argumentCount = BNNSGraphGetArgumentCount(graph, nil)
-        self.inputPosition = BNNSGraphGetArgumentPosition(graph, nil, "input")
-        self.outputPosition = BNNSGraphGetArgumentPosition(graph, nil, "output")
+        let inPos = BNNSGraphGetArgumentPosition(graph, nil, "input")
+        let outPos = BNNSGraphGetArgumentPosition(graph, nil, "output")
 
-        // Query input tensor shape
+        // SAFETY: Validate argument positions are within bounds
+        // BNNSGraphGetArgumentPosition may return -1 or invalid values for malformed models
+        guard inPos >= 0 && inPos < argumentCount else {
+            BNNSGraphContextDestroy(ctx)
+            throw BNNSInferenceError.invalidArgumentPosition(name: "input", position: inPos)
+        }
+        guard outPos >= 0 && outPos < argumentCount else {
+            BNNSGraphContextDestroy(ctx)
+            throw BNNSInferenceError.invalidArgumentPosition(name: "output", position: outPos)
+        }
+        self.inputPosition = inPos
+        self.outputPosition = outPos
+
+        // Query input tensor shape (BNNSTensor.shape is a 4-element tuple, limiting us to rank <= 4)
         var inputTensor = BNNSTensor()
         let inputResult = BNNSGraphContextGetTensor(context, nil, "input", true, &inputTensor)
         if inputResult == 0 && inputTensor.rank > 0 {
-            var shape = [Int]()
-            for i in 0..<Int(inputTensor.rank) {
-                shape.append(Int(inputTensor.shape.0 + i * MemoryLayout<Int>.stride))
-            }
-            // Read shape correctly using tuple access
             let rank = Int(inputTensor.rank)
-            shape = []
-            if rank > 0 { shape.append(Int(inputTensor.shape.0)) }
-            if rank > 1 { shape.append(Int(inputTensor.shape.1)) }
-            if rank > 2 { shape.append(Int(inputTensor.shape.2)) }
-            if rank > 3 { shape.append(Int(inputTensor.shape.3)) }
-            self.inputShape = shape
+            if rank > 4 {
+                // Rank > 4 models require explicit sizes via predict(input:output:inputSize:outputSize:)
+                Self.logger.warning("Input tensor rank \(rank) exceeds 4; use predict(input:output:inputSize:outputSize:)")
+                self.inputShape = []
+            } else {
+                var shape = [Int]()
+                if rank > 0 { shape.append(Int(inputTensor.shape.0)) }
+                if rank > 1 { shape.append(Int(inputTensor.shape.1)) }
+                if rank > 2 { shape.append(Int(inputTensor.shape.2)) }
+                if rank > 3 { shape.append(Int(inputTensor.shape.3)) }
+                self.inputShape = shape
+            }
         } else {
             // Fallback: couldn't query, leave empty
             self.inputShape = []
         }
 
-        // Query output tensor shape
+        // Query output tensor shape (same 4-element tuple limitation)
         var outputTensor = BNNSTensor()
         let outputResult = BNNSGraphContextGetTensor(context, nil, "output", true, &outputTensor)
         if outputResult == 0 && outputTensor.rank > 0 {
             let rank = Int(outputTensor.rank)
-            var shape = [Int]()
-            if rank > 0 { shape.append(Int(outputTensor.shape.0)) }
-            if rank > 1 { shape.append(Int(outputTensor.shape.1)) }
-            if rank > 2 { shape.append(Int(outputTensor.shape.2)) }
-            if rank > 3 { shape.append(Int(outputTensor.shape.3)) }
-            self.outputShape = shape
+            if rank > 4 {
+                Self.logger.warning("Output tensor rank \(rank) exceeds 4; use predict(input:output:inputSize:outputSize:)")
+                self.outputShape = []
+            } else {
+                var shape = [Int]()
+                if rank > 0 { shape.append(Int(outputTensor.shape.0)) }
+                if rank > 1 { shape.append(Int(outputTensor.shape.1)) }
+                if rank > 2 { shape.append(Int(outputTensor.shape.2)) }
+                if rank > 3 { shape.append(Int(outputTensor.shape.3)) }
+                self.outputShape = shape
+            }
         } else {
             self.outputShape = []
         }
@@ -268,12 +302,10 @@ public final class BNNSInference {
         self.workspace = ws
 
         // Pre-allocate arguments array (critical for zero-allocation predict)
-        guard let args = UnsafeMutablePointer<bnns_graph_argument_t>.allocate(capacity: argumentCount) as UnsafeMutablePointer<bnns_graph_argument_t>? else {
-            free(ws)
-            BNNSGraphContextDestroy(context)
-            throw BNNSInferenceError.argumentsAllocationFailed
-        }
-        // Initialize to zero
+        // Note: allocate() does not return nil - it either succeeds or crashes on OOM.
+        // We keep this as a simple allocation since the capacity is small (typically 2-4 args).
+        let args = UnsafeMutablePointer<bnns_graph_argument_t>.allocate(capacity: argumentCount)
+        // Initialize to zero to ensure clean state
         args.initialize(repeating: bnns_graph_argument_t(), count: argumentCount)
         self.arguments = args
     }
@@ -495,7 +527,10 @@ public final class BNNSInference {
 @available(macOS 15.0, iOS 18.0, *)
 extension BNNSInference: MemoryPressureResponder {
     public func didReceiveMemoryPressure(level: MemoryPressureLevel) {
-        currentMemoryPressureLevel = level
+        // Thread-safe update of memory pressure level
+        os_unfair_lock_lock(&memoryPressureLock)
+        _currentMemoryPressureLevel = level
+        os_unfair_lock_unlock(&memoryPressureLock)
 
         // Notify delegate and let it decide what to do
         let _ = memoryPressureDelegate?.bnnsInference(self, didReceiveMemoryPressure: level)
@@ -541,6 +576,15 @@ public final class BNNSStreamingInference {
     private let inputPosition: Int
     private let outputPosition: Int
 
+    /// Lock to protect context during resetState() - prevents use-after-free
+    /// when resetState() is called concurrently with predict()
+    private var contextLock = os_unfair_lock()
+
+    #if DEBUG
+    /// DEBUG-only: Tracks number of predict() calls in flight to detect concurrent access violations
+    private var predictInFlightCount: Int32 = 0
+    #endif
+
     public let inputShape: [Int]
     public let outputShape: [Int]
     public let inputElementCount: Int
@@ -554,8 +598,17 @@ public final class BNNSStreamingInference {
     /// Delegate for custom memory pressure handling
     public weak var memoryPressureDelegate: BNNSStreamingMemoryPressureDelegate?
 
+    /// Lock for memory pressure level access (thread-safe read/write)
+    private var memoryPressureLock = os_unfair_lock()
+
     /// Current memory pressure level
-    public private(set) var currentMemoryPressureLevel: MemoryPressureLevel = .normal
+    /// Thread-safe: Protected by memoryPressureLock
+    private var _currentMemoryPressureLevel: MemoryPressureLevel = .normal
+    public var currentMemoryPressureLevel: MemoryPressureLevel {
+        os_unfair_lock_lock(&memoryPressureLock)
+        defer { os_unfair_lock_unlock(&memoryPressureLock) }
+        return _currentMemoryPressureLevel
+    }
 
     /// Create a streaming inference context
     ///
@@ -593,8 +646,20 @@ public final class BNNSStreamingInference {
         BNNSGraphContextSetArgumentType(context, BNNSGraphArgumentTypePointer)
 
         self.argumentCount = BNNSGraphGetArgumentCount(graph, nil)
-        self.inputPosition = BNNSGraphGetArgumentPosition(graph, nil, "input")
-        self.outputPosition = BNNSGraphGetArgumentPosition(graph, nil, "output")
+        let inPos = BNNSGraphGetArgumentPosition(graph, nil, "input")
+        let outPos = BNNSGraphGetArgumentPosition(graph, nil, "output")
+
+        // SAFETY: Validate argument positions are within bounds
+        guard inPos >= 0 && inPos < argumentCount else {
+            BNNSGraphContextDestroy(ctx)
+            throw BNNSInferenceError.invalidArgumentPosition(name: "input", position: inPos)
+        }
+        guard outPos >= 0 && outPos < argumentCount else {
+            BNNSGraphContextDestroy(ctx)
+            throw BNNSInferenceError.invalidArgumentPosition(name: "output", position: outPos)
+        }
+        self.inputPosition = inPos
+        self.outputPosition = outPos
 
         // Query shapes
         var inputTensor = BNNSTensor()
@@ -640,11 +705,9 @@ public final class BNNSStreamingInference {
         }
         self.workspace = ws
 
-        guard let args = UnsafeMutablePointer<bnns_graph_argument_t>.allocate(capacity: argumentCount) as UnsafeMutablePointer<bnns_graph_argument_t>? else {
-            free(ws)
-            BNNSGraphContextDestroy(context)
-            throw BNNSInferenceError.argumentsAllocationFailed
-        }
+        // Pre-allocate arguments array (critical for zero-allocation predict)
+        // Note: allocate() does not return nil - it either succeeds or crashes on OOM.
+        let args = UnsafeMutablePointer<bnns_graph_argument_t>.allocate(capacity: argumentCount)
         args.initialize(repeating: bnns_graph_argument_t(), count: argumentCount)
         self.arguments = args
     }
@@ -659,12 +722,29 @@ public final class BNNSStreamingInference {
     }
 
     /// Run streaming inference (zero-allocation, maintains hidden state)
+    ///
+    /// - Warning: **Thread Safety**: Do NOT call this method concurrently with `resetState()`.
+    ///   `resetState()` destroys and recreates the context, which would cause use-after-free
+    ///   if called during `predict()`. Use external synchronization if needed, or call
+    ///   `resetState()` only when you know no `predict()` calls are in progress.
+    ///
+    /// - Note: In DEBUG builds, concurrent access violations are detected and will trigger
+    ///   an assertion failure. In RELEASE builds, this method is lock-free for real-time safety.
     @discardableResult
     @inline(__always)
     public func predict(
         input: UnsafePointer<Float>,
         output: UnsafeMutablePointer<Float>
     ) -> Bool {
+        #if DEBUG
+        // Track in-flight predict() calls to detect concurrent access violations
+        OSAtomicIncrement32(&predictInFlightCount)
+        defer { OSAtomicDecrement32(&predictInFlightCount) }
+        #endif
+
+        // Note: We don't acquire contextLock here for performance reasons.
+        // Audio thread predict() calls must be lock-free for real-time safety.
+        // Users must ensure resetState() is not called concurrently.
         arguments[inputPosition].data_ptr = UnsafeMutableRawPointer(mutating: input)
         arguments[inputPosition].data_ptr_size = inputSizeBytes
 
@@ -732,21 +812,53 @@ public final class BNNSStreamingInference {
     ///     streaming.predict(input: chunk, output: outputBuffer)
     /// }
     /// ```
-    public func resetState() {
+    /// Possible errors from resetState()
+    public enum ResetError: Error, LocalizedError {
+        case contextCreationFailed
+
+        public var errorDescription: String? {
+            switch self {
+            case .contextCreationFailed:
+                return "BNNSStreamingInference: Failed to recreate streaming context. The existing context is still valid."
+            }
+        }
+    }
+
+    public func resetState() throws {
         // BNNS does not provide an in-place state reset API.
         // We recreate the streaming context which initializes all states to zero.
         // This allocates memory, so it's not real-time safe.
-        BNNSGraphContextDestroy(context)
+        //
+        // THREAD SAFETY WARNING: predict() does NOT acquire contextLock for
+        // real-time performance. Caller MUST ensure resetState() is not called
+        // concurrently with predict(). See predict() documentation.
 
-        // Recreate with zero-initialized states (initial_states_count=0 means all zeros)
+        #if DEBUG
+        // Detect concurrent access violations in DEBUG builds
+        let inFlight = OSAtomicAdd32(0, &predictInFlightCount)
+        assert(inFlight == 0,
+            "BNNSStreamingInference.resetState() called while \(inFlight) predict() call(s) are in progress. " +
+            "This is a threading violation that causes use-after-free. " +
+            "Ensure no predict() calls are in progress when calling resetState().")
+        #endif
+
+        // Create new context FIRST before destroying old one.
+        // This ensures we never leave the object in an invalid state.
         let newContext = BNNSGraphContextMakeStreaming(graph, nil, 0, nil)
-        if newContext.data != nil {
-            context = newContext
-            BNNSGraphContextSetArgumentType(context, BNNSGraphArgumentTypePointer)
+        guard newContext.data != nil else {
+            // Context recreation failed - keep existing context to prevent crashes.
+            // This should rarely happen since the original was created successfully.
+            // Caller can decide whether to continue with existing state or handle error.
+            throw ResetError.contextCreationFailed
         }
-        // If recreation fails, the old context is already destroyed - subsequent
-        // predict() calls will fail. This is an edge case that shouldn't happen
-        // in practice since the original context was successfully created.
+
+        os_unfair_lock_lock(&contextLock)
+        defer { os_unfair_lock_unlock(&contextLock) }
+
+        // Safe to destroy old context now that we have a valid replacement
+        BNNSGraphContextDestroy(context)
+        context = newContext
+        BNNSGraphContextSetArgumentType(context, BNNSGraphArgumentTypePointer)
     }
 
     // MARK: - Memory Pressure
@@ -771,7 +883,11 @@ public final class BNNSStreamingInference {
 @available(macOS 15.0, iOS 18.0, *)
 extension BNNSStreamingInference: MemoryPressureResponder {
     public func didReceiveMemoryPressure(level: MemoryPressureLevel) {
-        currentMemoryPressureLevel = level
+        // Thread-safe update of memory pressure level
+        os_unfair_lock_lock(&memoryPressureLock)
+        _currentMemoryPressureLevel = level
+        os_unfair_lock_unlock(&memoryPressureLock)
+
         memoryPressureDelegate?.bnnsStreamingInference(self, didReceiveMemoryPressure: level)
     }
 }

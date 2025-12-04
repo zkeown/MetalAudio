@@ -892,3 +892,311 @@ final class LSTMMemoryBudgetTests: XCTestCase {
         )
     }
 }
+
+// MARK: - LSTM Error Path Tests
+
+final class LSTMErrorPathTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testPrewarmExceedsMaxSequenceLength() throws {
+        let lstm = try LSTM(
+            device: device,
+            inputSize: 32,
+            hiddenSize: 64,
+            numLayers: 1,
+            bidirectional: false,
+            sequenceLength: 10,
+            maxSequenceLength: 100  // Low max
+        )
+
+        // Should throw for sequence > max
+        XCTAssertThrowsError(try lstm.prewarm(sequenceLength: 200)) { error in
+            guard let audioError = error as? MetalAudioError else {
+                XCTFail("Expected MetalAudioError")
+                return
+            }
+            if case .invalidConfiguration(let msg) = audioError {
+                XCTAssertTrue(msg.contains("exceeds maximum"), "Error should mention exceeding maximum")
+            } else {
+                XCTFail("Expected invalidConfiguration error")
+            }
+        }
+    }
+
+    func testPrewarmExceedsMemoryBudget() throws {
+        let lstm = try LSTM(
+            device: device,
+            inputSize: 128,
+            hiddenSize: 512,  // Large hidden size
+            numLayers: 1,
+            bidirectional: false,
+            sequenceLength: 10,
+            maxSequenceLength: 100_000,
+            maxMemoryBudget: 1024  // Very small budget (1KB)
+        )
+
+        // Should throw for memory budget exceeded
+        XCTAssertThrowsError(try lstm.prewarm(sequenceLength: 10000)) { error in
+            guard let audioError = error as? MetalAudioError else {
+                XCTFail("Expected MetalAudioError")
+                return
+            }
+            if case .invalidConfiguration(let msg) = audioError {
+                XCTAssertTrue(msg.contains("exceeds budget"), "Error should mention budget")
+            } else {
+                XCTFail("Expected invalidConfiguration error")
+            }
+        }
+    }
+
+    func testEstimateMemoryOverflow() throws {
+        let lstm = try LSTM(
+            device: device,
+            inputSize: 32,
+            hiddenSize: 64,
+            numLayers: 1,
+            bidirectional: false,
+            sequenceLength: 10
+        )
+
+        // Very large sequence should return Int.max (overflow indication)
+        let estimated = lstm.estimateMemoryUsage(sequenceLength: Int.max / 2)
+        XCTAssertEqual(estimated, Int.max, "Overflow should return Int.max")
+    }
+
+    func testMultiLayerLSTMCreation() throws {
+        let lstm = try LSTM(
+            device: device,
+            inputSize: 32,
+            hiddenSize: 64,
+            numLayers: 3,
+            bidirectional: false,
+            sequenceLength: 10
+        )
+
+        // Should have 3 layers worth of weights
+        XCTAssertEqual(lstm.inputShape, [10, 32])
+        XCTAssertEqual(lstm.outputShape, [10, 64])
+    }
+
+    func testMultiLayerBidirectionalLSTMCreation() throws {
+        let lstm = try LSTM(
+            device: device,
+            inputSize: 32,
+            hiddenSize: 64,
+            numLayers: 2,
+            bidirectional: true,
+            sequenceLength: 10
+        )
+
+        // Bidirectional output should be 2x hidden size
+        XCTAssertEqual(lstm.outputShape, [10, 128])
+    }
+}
+
+// MARK: - LSTM Forward Validation Tests
+
+final class LSTMForwardValidationTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testMaxSequenceLengthConfiguration() throws {
+        // Creating LSTM with low max sequence length
+        let lstm = try LSTM(
+            device: device,
+            inputSize: 32,
+            hiddenSize: 64,
+            numLayers: 1,
+            bidirectional: false,
+            sequenceLength: 10,
+            maxSequenceLength: 50  // Low max
+        )
+
+        // Prewarm with a sequence within the max should work
+        try lstm.prewarm(sequenceLength: 40)
+
+        // Prewarm exceeding max should throw
+        XCTAssertThrowsError(try lstm.prewarm(sequenceLength: 100)) { error in
+            XCTAssertTrue(error is MetalAudioError, "Expected MetalAudioError")
+        }
+    }
+
+    func testMemoryBudgetConfiguration() throws {
+        // Creating LSTM with small memory budget
+        let lstm = try LSTM(
+            device: device,
+            inputSize: 64,
+            hiddenSize: 256,  // Larger for bigger memory footprint
+            numLayers: 1,
+            bidirectional: false,
+            sequenceLength: 10,
+            maxMemoryBudget: 4096  // Very small budget (4KB)
+        )
+
+        // Large prewarm should fail due to budget
+        XCTAssertThrowsError(try lstm.prewarm(sequenceLength: 10000)) { error in
+            XCTAssertTrue(error is MetalAudioError, "Expected MetalAudioError")
+        }
+    }
+
+    func testLoadWeightsValidation() throws {
+        let lstm = try LSTM(
+            device: device,
+            inputSize: 32,
+            hiddenSize: 64,
+            numLayers: 2,
+            bidirectional: false,
+            sequenceLength: 10
+        )
+
+        // Test loading weights for layer 0
+        let gateSize = 4 * 64
+        try lstm.loadWeights(
+            layer: 0,
+            direction: 0,
+            weightsIH: [Float](repeating: 0.01, count: gateSize * 32),
+            weightsHH: [Float](repeating: 0.01, count: gateSize * 64),
+            biasIH: [Float](repeating: 0, count: gateSize),
+            biasHH: [Float](repeating: 0, count: gateSize)
+        )
+
+        // Test loading weights for layer 1 (input size changes to hiddenSize)
+        try lstm.loadWeights(
+            layer: 1,
+            direction: 0,
+            weightsIH: [Float](repeating: 0.01, count: gateSize * 64),  // 64 from prev layer output
+            weightsHH: [Float](repeating: 0.01, count: gateSize * 64),
+            biasIH: [Float](repeating: 0, count: gateSize),
+            biasHH: [Float](repeating: 0, count: gateSize)
+        )
+    }
+
+    func testLoadWeightsForMultipleDirections() throws {
+        let lstm = try LSTM(
+            device: device,
+            inputSize: 32,
+            hiddenSize: 64,
+            numLayers: 1,
+            bidirectional: true,  // Has 2 directions
+            sequenceLength: 10
+        )
+
+        let gateSize = 4 * 64
+        // Load forward direction
+        try lstm.loadWeights(
+            layer: 0,
+            direction: 0,
+            weightsIH: [Float](repeating: 0.01, count: gateSize * 32),
+            weightsHH: [Float](repeating: 0.01, count: gateSize * 64),
+            biasIH: [Float](repeating: 0, count: gateSize),
+            biasHH: [Float](repeating: 0, count: gateSize)
+        )
+
+        // Load backward direction
+        try lstm.loadWeights(
+            layer: 0,
+            direction: 1,
+            weightsIH: [Float](repeating: 0.02, count: gateSize * 32),
+            weightsHH: [Float](repeating: 0.02, count: gateSize * 64),
+            biasIH: [Float](repeating: 0.1, count: gateSize),
+            biasHH: [Float](repeating: 0.1, count: gateSize)
+        )
+    }
+}
+
+// MARK: - GRU Extended Tests
+
+final class GRUExtendedTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testGRUBasicCreation() throws {
+        let gru = try GRU(
+            device: device,
+            inputSize: 32,
+            hiddenSize: 64,
+            bidirectional: false,
+            sequenceLength: 10
+        )
+
+        XCTAssertEqual(gru.inputShape, [10, 32])
+        XCTAssertEqual(gru.outputShape, [10, 64])
+    }
+
+    func testGRUBidirectionalCreation() throws {
+        let gru = try GRU(
+            device: device,
+            inputSize: 32,
+            hiddenSize: 64,
+            bidirectional: true,
+            sequenceLength: 10
+        )
+
+        XCTAssertEqual(gru.outputShape, [10, 128])  // 2 * hiddenSize
+    }
+
+    func testGRUStateReset() throws {
+        let gru = try GRU(
+            device: device,
+            inputSize: 16,
+            hiddenSize: 32,
+            bidirectional: false,
+            sequenceLength: 5
+        )
+
+        // Load weights
+        let gateSize = 3 * 32
+        try gru.loadWeights(
+            direction: 0,
+            weightsIH: [Float](repeating: 0.1, count: gateSize * 16),
+            weightsHH: [Float](repeating: 0.1, count: gateSize * 32),
+            biasIH: [Float](repeating: 0, count: gateSize),
+            biasHH: [Float](repeating: 0, count: gateSize)
+        )
+
+        // Reset should not throw
+        gru.resetState()
+    }
+
+    func testGRULoadWeightsInvalidDirection() throws {
+        let gru = try GRU(
+            device: device,
+            inputSize: 16,
+            hiddenSize: 32,
+            bidirectional: false,  // Only direction 0 valid
+            sequenceLength: 5
+        )
+
+        let gateSize = 3 * 32
+        XCTAssertThrowsError(try gru.loadWeights(
+            direction: 1,  // Invalid for unidirectional
+            weightsIH: [Float](repeating: 0.1, count: gateSize * 16),
+            weightsHH: [Float](repeating: 0.1, count: gateSize * 32),
+            biasIH: [Float](repeating: 0, count: gateSize),
+            biasHH: [Float](repeating: 0, count: gateSize)
+        )) { error in
+            guard let audioError = error as? MetalAudioError else {
+                XCTFail("Expected MetalAudioError")
+                return
+            }
+            if case .invalidConfiguration(let msg) = audioError {
+                XCTAssertTrue(msg.contains("Direction"), "Error should mention direction")
+            } else {
+                XCTFail("Expected invalidConfiguration error")
+            }
+        }
+    }
+}

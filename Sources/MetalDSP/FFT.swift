@@ -38,6 +38,70 @@ public enum FFTError: Error, LocalizedError {
     }
 }
 
+// MARK: - Debug Validation
+
+/// Validates FFT output for NaN/Inf values in DEBUG builds only.
+/// This check is disabled in release builds for real-time performance.
+///
+/// Uses sampling to check a subset of values (first, last, and ~50 evenly-spaced samples)
+/// to catch common issues without O(n) overhead. Logs warnings but does NOT assert/crash,
+/// since some use cases intentionally handle edge case inputs (e.g., testing with Inf).
+///
+/// - Parameters:
+///   - buffer: Pointer to the buffer to validate
+///   - count: Number of elements to check
+///   - context: Description of the buffer for error messages (e.g., "outputReal")
+@inline(__always)
+internal func debugValidateFFTOutput(_ buffer: UnsafePointer<Float>, count: Int, context: String) {
+    #if DEBUG
+    guard count > 0 else { return }
+
+    // Sample-based validation to avoid O(n) overhead
+    let sampleCount = min(50, count)
+    let stride = max(1, count / sampleCount)
+
+    var foundNaN = false
+    var foundInf = false
+    var nanIndex = -1
+    var infIndex = -1
+
+    var i = 0
+    while i < count && (!foundNaN || !foundInf) {
+        let value = buffer[i]
+        if !foundNaN && value.isNaN {
+            foundNaN = true
+            nanIndex = i
+        }
+        if !foundInf && value.isInfinite {
+            foundInf = true
+            infIndex = i
+        }
+        i += stride
+    }
+
+    // Always check last element (common location for accumulation errors)
+    if count > 1 {
+        let last = buffer[count - 1]
+        if !foundNaN && last.isNaN {
+            foundNaN = true
+            nanIndex = count - 1
+        }
+        if !foundInf && last.isInfinite {
+            foundInf = true
+            infIndex = count - 1
+        }
+    }
+
+    // Log warnings (don't assert - some tests intentionally use edge case inputs)
+    if foundNaN {
+        print("[FFT] Warning: NaN detected in \(context) near index \(nanIndex)")
+    }
+    if foundInf {
+        print("[FFT] Warning: Inf detected in \(context) near index \(infIndex)")
+    }
+    #endif
+}
+
 /// GPU-accelerated Fast Fourier Transform for audio processing
 /// Uses MPSGraph for large transforms, falls back to Accelerate for small buffers
 ///
@@ -703,6 +767,10 @@ public final class FFT {
 
         // No normalization on forward FFT (matches numpy/scipy/librosa convention)
         // Inverse FFT applies 1/N normalization
+
+        // Validate output for NaN/Inf in DEBUG builds only (real-time safe in release)
+        debugValidateFFTOutput(outputReal, count: config.size, context: "forward.outputReal")
+        debugValidateFFTOutput(outputImag, count: config.size, context: "forward.outputImag")
     }
 
     /// Perform inverse FFT using Accelerate
@@ -754,6 +822,9 @@ public final class FFT {
         // Normalize by 1/N (matches numpy/scipy/librosa convention)
         var scale = Float(1.0 / Float(config.size))
         vDSP_vsmul(output, 1, &scale, output, 1, vDSP_Length(config.size))
+
+        // Validate output for NaN/Inf in DEBUG builds only (real-time safe in release)
+        debugValidateFFTOutput(output, count: config.size, context: "inverse.output")
     }
 
     // MARK: - GPU FFT
@@ -1820,9 +1891,13 @@ extension FFT {
         let elementSize = MemoryLayout<Float>.stride * 2  // float2 per element
 
         // Check for overflow in buffer size calculations to prevent memory corruption
+        // SAFETY: Check each multiplication separately and fail fast on first overflow
         let (perFFTBufferSize, overflow1) = fftSize.multipliedReportingOverflow(by: elementSize)
+        guard !overflow1 else {
+            throw FFTError.batchSizeOverflow(batchSize: batchSize, fftSize: fftSize)
+        }
         let (totalBufferSize, overflow2) = batchSize.multipliedReportingOverflow(by: perFFTBufferSize)
-        guard !overflow1 && !overflow2 else {
+        guard !overflow2 else {
             throw FFTError.batchSizeOverflow(batchSize: batchSize, fftSize: fftSize)
         }
 
@@ -1858,9 +1933,21 @@ extension FFT {
         // 1. Batch GPU FFT is already a heavy operation
         // 2. Concurrent batch calls are rare in typical audio pipelines
         // 3. Correctness is more important than concurrent throughput
-        let batchPtr = batchBuffer.contents().assumingMemoryBound(to: Float.self)
+        //
+        // IMPORTANT: executeSync() MUST block until GPU completes, not just until submission.
+        // If executeSync() only waits for submission, we have a race condition where another
+        // thread could acquire the lock and modify the buffer while GPU is still reading it.
+        // Verify ComputeContext.executeSync() calls waitUntilCompleted() or equivalent.
+        let rawPtr = batchBuffer.contents()
+        let batchPtr = rawPtr.assumingMemoryBound(to: Float.self)
+        let bufferCapacity = batchBuffer.length / MemoryLayout<Float>.stride
         for (idx, input) in inputs.enumerated() {
-            let offset = idx * fftSize * 2
+            // Bounds check: offset calculation uses checked arithmetic
+            let (offset, offsetOverflow) = (idx * fftSize).multipliedReportingOverflow(by: 2)
+            guard !offsetOverflow && offset + fftSize * 2 <= bufferCapacity else {
+                os_unfair_lock_unlock(&batchBufferLock)
+                throw FFTError.batchSizeOverflow(batchSize: batchSize, fftSize: fftSize)
+            }
             for i in 0..<min(input.count, fftSize) {
                 batchPtr[offset + i * 2] = input[i]      // Real
                 batchPtr[offset + i * 2 + 1] = 0.0       // Imag (input is real)
@@ -1931,8 +2018,14 @@ extension FFT {
         }
 
         // Copy results back (de-interleave) - still holding lock
+        // Use overflow-checked arithmetic consistent with input side (line 1946)
         for idx in 0..<batchSize {
-            let offset = idx * fftSize * 2
+            let (offset, offsetOverflow) = (idx * fftSize).multipliedReportingOverflow(by: 2)
+            guard !offsetOverflow && offset >= 0 && offset + fftSize * 2 <= bufferCapacity else {
+                // Skip this frame if overflow (matches input-side behavior of throwing)
+                // In practice this should never happen since input side already validated
+                continue
+            }
             for i in 0..<fftSize {
                 outputsReal[idx][i] = batchPtr[offset + i * 2]
                 outputsImag[idx][i] = batchPtr[offset + i * 2 + 1]
@@ -2040,23 +2133,34 @@ extension FFT {
         var windowedFrame = [Float](repeating: 0, count: fftSize)
 
         for (batchIdx, frameIdx) in validIndices.enumerated() {
-            let start = frameIdx * hopSize
+            // Bounds check: prevent buffer overflow from invalid frame indices
+            // This guards against corrupted STFT data or integer overflow in frameIdx * hopSize
+            let (start, overflow) = frameIdx.multipliedReportingOverflow(by: hopSize)
+            guard !overflow && start >= 0 && start + fftSize <= outputLength else {
+                // Skip this frame - it would write out of bounds
+                // This is a defensive check; valid STFT results should never trigger this
+                continue
+            }
 
             // Apply window to frame: windowedFrame = frame * window
             frames[batchIdx].withUnsafeBufferPointer { framePtr in
-                vDSP_vmul(framePtr.baseAddress!, 1, windowBuffer, 1, &windowedFrame, 1, vDSP_Length(fftSize))
+                guard let frameBase = framePtr.baseAddress else { return }
+                vDSP_vmul(frameBase, 1, windowBuffer, 1, &windowedFrame, 1, vDSP_Length(fftSize))
             }
 
             // Overlap-add using vDSP_vadd
+            // SAFETY: start + fftSize <= outputLength verified above
             output.withUnsafeMutableBufferPointer { outPtr in
                 windowedFrame.withUnsafeBufferPointer { winPtr in
-                    vDSP_vadd(outPtr.baseAddress! + start, 1, winPtr.baseAddress!, 1, outPtr.baseAddress! + start, 1, vDSP_Length(fftSize))
+                    guard let outBase = outPtr.baseAddress, let winBase = winPtr.baseAddress else { return }
+                    vDSP_vadd(outBase + start, 1, winBase, 1, outBase + start, 1, vDSP_Length(fftSize))
                 }
             }
 
             windowSum.withUnsafeMutableBufferPointer { sumPtr in
                 windowSquared.withUnsafeBufferPointer { sqPtr in
-                    vDSP_vadd(sumPtr.baseAddress! + start, 1, sqPtr.baseAddress!, 1, sumPtr.baseAddress! + start, 1, vDSP_Length(fftSize))
+                    guard let sumBase = sumPtr.baseAddress, let sqBase = sqPtr.baseAddress else { return }
+                    vDSP_vadd(sumBase + start, 1, sqBase, 1, sumBase + start, 1, vDSP_Length(fftSize))
                 }
             }
         }
@@ -2071,12 +2175,16 @@ extension FFT {
         let configuredFloor = ToleranceProvider.shared.tolerances.windowFloorEpsilon
         let windowFloor = configuredFloor > 0 ? configuredFloor : Float(1e-6)
 
-        // Vectorized: clamp window sum to minimum floor value and divide
+        // Clamp window sum to floor and divide
+        // Note: vDSP_vthr zeros values below threshold (not what we want).
+        // We need max(sum[i], floor), so use vDSP_vclip for proper floor clamping.
         windowSum.withUnsafeMutableBufferPointer { sumPtr in
             output.withUnsafeMutableBufferPointer { outPtr in
-                var floorVal = windowFloor
                 // Clamp to floor: sum[i] = max(sum[i], floor)
-                vDSP_vthr(sumPtr.baseAddress!, 1, &floorVal, sumPtr.baseAddress!, 1, vDSP_Length(outputLength))
+                // vDSP_vclip clips to [low, high] range
+                var low = windowFloor
+                var high = Float.greatestFiniteMagnitude
+                vDSP_vclip(sumPtr.baseAddress!, 1, &low, &high, sumPtr.baseAddress!, 1, vDSP_Length(outputLength))
                 // Divide: out[i] = out[i] / sum[i]
                 vDSP_vdiv(sumPtr.baseAddress!, 1, outPtr.baseAddress!, 1, outPtr.baseAddress!, 1, vDSP_Length(outputLength))
             }

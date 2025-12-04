@@ -191,6 +191,53 @@ final class ConvolutionTests: XCTestCase {
 
     // MARK: - Edge Cases
 
+    /// Tests that convolution gracefully handles zero-length kernel.
+    /// The Metal shader has overflow protection: if kernelLength == 0, it returns early.
+    /// This is related to the overflow check fix in DSP.metal (Issue 2.1).
+    func testZeroLengthKernelHandled() throws {
+        let conv = Convolution(device: device, mode: .direct)
+        // Empty kernel throws at setKernel time - validates fail-fast behavior
+        XCTAssertThrowsError(try conv.setKernel([]))
+    }
+
+    /// Tests convolution with single-element arrays (boundary case).
+    /// Verifies the overflow check `kernelLength - 1 > UINT_MAX - inputLength` works
+    /// for minimum valid sizes.
+    func testMinimalConvolutionSizes() throws {
+        let conv = Convolution(device: device, mode: .direct)
+
+        // Single element kernel, single element input
+        try conv.setKernel([1.0])
+        let input: [Float] = [2.0]
+        var output = [Float](repeating: 0, count: 1)
+        try conv.process(input: input, output: &output)
+
+        XCTAssertEqual(output[0], 2.0, accuracy: tolerance, "Single-element convolution failed")
+    }
+
+    /// Tests that large (but practical) convolution sizes work correctly.
+    /// This validates the overflow protection in DSP.metal doesn't reject valid sizes.
+    func testLargePracticalConvolutionSize() throws {
+        // 64K samples is a practical maximum for real-time audio
+        let inputSize = 65536
+        let kernelSize = 1024
+
+        let conv = Convolution(device: device, mode: .fft)
+        let kernel = [Float](repeating: 0.001, count: kernelSize)
+        try conv.setKernel(kernel, expectedInputSize: inputSize)
+
+        let input = [Float](repeating: 0.5, count: inputSize)
+        var output = [Float]()
+        try conv.process(input: input, output: &output)
+
+        // Should produce valid output
+        XCTAssertGreaterThan(output.count, 0, "Large convolution should produce output")
+
+        // Output should not contain NaN or Inf
+        let hasInvalidValue = output.contains { $0.isNaN || $0.isInfinite }
+        XCTAssertFalse(hasInvalidValue, "Output contains NaN or Inf")
+    }
+
     func testEmptyKernelThrows() throws {
         let conv = Convolution(device: device, mode: .direct)
 

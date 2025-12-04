@@ -96,16 +96,31 @@ public final class LSTM: NNLayer {
     private let maxMemoryBudget: Int
 
     /// Estimates memory required for work buffers at a given sequence length
-    /// - Returns: Estimated memory usage in bytes
+    /// - Returns: Estimated memory usage in bytes, or Int.max if overflow would occur
     public func estimateMemoryUsage(sequenceLength: Int) -> Int {
         let numDirections = bidirectional ? 2 : 1
         let gateSize = 4 * hiddenSize
 
-        let preIHSize = sequenceLength * gateSize
-        let layerOutputSize = sequenceLength * hiddenSize * numDirections
-        let maxLayerInputSize = max(inputSize, hiddenSize * numDirections) * sequenceLength
+        // Use overflow-checked arithmetic to prevent wraparound
+        let (preIHSize, o1) = sequenceLength.multipliedReportingOverflow(by: gateSize)
+        let (hiddenDirs, o2) = hiddenSize.multipliedReportingOverflow(by: numDirections)
+        let (layerOutput1, o3) = sequenceLength.multipliedReportingOverflow(by: hiddenDirs)
+        let maxInputSize = max(inputSize, hiddenDirs)
+        let (maxLayerInputSize, o4) = maxInputSize.multipliedReportingOverflow(by: sequenceLength)
 
-        return (preIHSize + layerOutputSize + maxLayerInputSize) * MemoryLayout<Float>.stride
+        guard !o1 && !o2 && !o3 && !o4 else {
+            return Int.max  // Signal overflow to caller
+        }
+
+        let (sum1, o5) = preIHSize.addingReportingOverflow(layerOutput1)
+        let (sum2, o6) = sum1.addingReportingOverflow(maxLayerInputSize)
+        let (totalBytes, o7) = sum2.multipliedReportingOverflow(by: MemoryLayout<Float>.stride)
+
+        guard !o5 && !o6 && !o7 else {
+            return Int.max
+        }
+
+        return totalBytes
     }
 
     /// Pre-warms the work buffers for a specific sequence length.
@@ -130,19 +145,38 @@ public final class LSTM: NNLayer {
         let numDirections = bidirectional ? 2 : 1
         let gateSize = 4 * hiddenSize
 
-        let preIHSize = sequenceLength * gateSize
+        // SAFETY: Use overflow-checked arithmetic for all size calculations
+        // to prevent integer overflow leading to undersized buffer allocations
+        let (preIHSize, preIHOverflow) = sequenceLength.multipliedReportingOverflow(by: gateSize)
+        guard !preIHOverflow else {
+            throw MetalAudioError.integerOverflow(operation: "LSTM preIH buffer size (sequenceLength * gateSize)")
+        }
         if workPreIHCapacity < preIHSize {
             workPreIH = [Float](repeating: 0, count: preIHSize)
             workPreIHCapacity = preIHSize
         }
 
-        let layerOutputSize = sequenceLength * hiddenSize * numDirections
+        // layerOutputSize = sequenceLength * hiddenSize * numDirections
+        let (partialLayerOutput, overflow1) = sequenceLength.multipliedReportingOverflow(by: hiddenSize)
+        let (layerOutputSize, overflow2) = partialLayerOutput.multipliedReportingOverflow(by: numDirections)
+        guard !overflow1 && !overflow2 else {
+            throw MetalAudioError.integerOverflow(operation: "LSTM layerOutput buffer size")
+        }
         if workLayerOutputCapacity < layerOutputSize {
             workLayerOutput = [Float](repeating: 0, count: layerOutputSize)
             workLayerOutputCapacity = layerOutputSize
         }
 
-        let maxLayerInputSize = max(inputSize, hiddenSize * numDirections) * sequenceLength
+        // maxLayerInputSize = max(inputSize, hiddenSize * numDirections) * sequenceLength
+        let (hiddenDirSize, overflow3) = hiddenSize.multipliedReportingOverflow(by: numDirections)
+        guard !overflow3 else {
+            throw MetalAudioError.integerOverflow(operation: "LSTM hiddenSize * numDirections")
+        }
+        let maxInputDim = max(inputSize, hiddenDirSize)
+        let (maxLayerInputSize, overflow4) = maxInputDim.multipliedReportingOverflow(by: sequenceLength)
+        guard !overflow4 else {
+            throw MetalAudioError.integerOverflow(operation: "LSTM layerInput buffer size")
+        }
         if workLayerInputCapacity < maxLayerInputSize {
             workLayerInput = [Float](repeating: 0, count: maxLayerInputSize)
             workLayerInputCapacity = maxLayerInputSize
@@ -407,7 +441,10 @@ public final class LSTM: NNLayer {
         for layer in 0..<numLayers {
             // Zero the layer output buffer
             workLayerOutput.withUnsafeMutableBufferPointer { ptr in
-                guard let base = ptr.baseAddress else { return }
+                guard let base = ptr.baseAddress else {
+                    assertionFailure("LSTM: workLayerOutput buffer has nil baseAddress")
+                    return
+                }
                 memset(base, 0, layerOutputSize * MemoryLayout<Float>.stride)
             }
 
@@ -427,10 +464,16 @@ public final class LSTM: NNLayer {
                 // pre_ih = X @ W_ih^T where X is [T, in], W_ih is [4h, in]
                 // Result is [T, 4h]
                 workPreIH.withUnsafeMutableBufferPointer { preIHPtr in
-                    guard let preIHBase = preIHPtr.baseAddress else { return }
+                    guard let preIHBase = preIHPtr.baseAddress else {
+                        assertionFailure("LSTM: workPreIH buffer has nil baseAddress")
+                        return
+                    }
 
                     workLayerInput.withUnsafeBufferPointer { inputPtr in
-                        guard let inputBase = inputPtr.baseAddress else { return }
+                        guard let inputBase = inputPtr.baseAddress else {
+                            assertionFailure("LSTM: workLayerInput buffer has nil baseAddress")
+                            return
+                        }
 
                         cblas_sgemm(
                             CblasRowMajor,
@@ -503,10 +546,27 @@ public final class LSTM: NNLayer {
                         }
                     }
 
-                    // Store output
-                    let outputOffset = t * hiddenSize * numDirections + direction * hiddenSize
+                    // Store output with bounds checking
+                    // SAFETY: Check for integer overflow in offset calculation
+                    let (partial1, overflow1) = t.multipliedReportingOverflow(by: hiddenSize)
+                    let (partial2, overflow2) = partial1.multipliedReportingOverflow(by: numDirections)
+                    let (partial3, overflow3) = direction.multipliedReportingOverflow(by: hiddenSize)
+                    let (outputOffset, overflow4) = partial2.addingReportingOverflow(partial3)
+
+                    // SAFETY: Verify offset + hiddenSize is within bounds
+                    // Guard against underflow: workLayerOutput.count must be >= hiddenSize
+                    guard workLayerOutput.count >= hiddenSize else {
+                        throw MetalAudioError.bufferOverflow("LSTM: workLayerOutput.count (\(workLayerOutput.count)) < hiddenSize (\(hiddenSize))")
+                    }
+                    let maxValidOffset = workLayerOutput.count - hiddenSize
+                    guard !overflow1 && !overflow2 && !overflow3 && !overflow4 &&
+                          outputOffset >= 0 && outputOffset <= maxValidOffset else {
+                        throw MetalAudioError.bufferOverflow("LSTM output index overflow at t=\(t), direction=\(direction)")
+                    }
+
                     workLayerOutput.withUnsafeMutableBufferPointer { ptr in
-                        memcpy(ptr.baseAddress! + outputOffset, h, hiddenSize * MemoryLayout<Float>.stride)
+                        guard let base = ptr.baseAddress else { return }
+                        memcpy(base + outputOffset, h, hiddenSize * MemoryLayout<Float>.stride)
                     }
                 }
             }
@@ -923,9 +983,15 @@ public final class GRU: NNLayer {
 
                 // Apply GRU equations
                 workPreIH.withUnsafeBufferPointer { preIHPtr in
-                    guard let preIHBase = preIHPtr.baseAddress else { return }
+                    guard let preIHBase = preIHPtr.baseAddress else {
+                        assertionFailure("GRU: workPreIH buffer has nil baseAddress")
+                        return
+                    }
                     workHHGates[direction].withUnsafeBufferPointer { hhPtr in
-                        guard let hhBase = hhPtr.baseAddress else { return }
+                        guard let hhBase = hhPtr.baseAddress else {
+                            assertionFailure("GRU: workHHGates buffer has nil baseAddress")
+                            return
+                        }
 
                         for j in 0..<hiddenSize {
                             // GRU equations:
@@ -943,10 +1009,33 @@ public final class GRU: NNLayer {
                     }
                 }
 
-                // Store output
-                let outputOffset = t * hiddenSize * numDirections + direction * hiddenSize
-                memcpy(workOutputData.withUnsafeMutableBufferPointer { $0 }.baseAddress! + outputOffset,
-                       h, hiddenSize * MemoryLayout<Float>.stride)
+                // Store output with bounds checking
+                // SAFETY: Check for integer overflow in offset calculation
+                let (partial1, overflow1) = t.multipliedReportingOverflow(by: hiddenSize)
+                let (partial2, overflow2) = partial1.multipliedReportingOverflow(by: numDirections)
+                let (partial3, overflow3) = direction.multipliedReportingOverflow(by: hiddenSize)
+                let (outputOffset, overflow4) = partial2.addingReportingOverflow(partial3)
+
+                // SAFETY: Verify offset + hiddenSize is within bounds
+                // Guard against underflow: workOutputData.count must be >= hiddenSize
+                guard workOutputData.count >= hiddenSize else {
+                    throw MetalAudioError.bufferOverflow("GRU: workOutputData.count (\(workOutputData.count)) < hiddenSize (\(hiddenSize))")
+                }
+                let maxValidOffset = workOutputData.count - hiddenSize
+                guard !overflow1 && !overflow2 && !overflow3 && !overflow4 &&
+                      outputOffset >= 0 && outputOffset <= maxValidOffset else {
+                    // Bounds check failed - this indicates a bug in dimension calculations
+                    // Throw instead of assertionFailure to ensure errors are caught in release builds
+                    throw MetalAudioError.bufferOverflow("GRU: Output offset bounds check failed at t=\(t), dir=\(direction)")
+                }
+
+                workOutputData.withUnsafeMutableBufferPointer { ptr in
+                    guard let base = ptr.baseAddress else {
+                        // This should be unreachable since we verified the array has elements
+                        return
+                    }
+                    memcpy(base + outputOffset, h, hiddenSize * MemoryLayout<Float>.stride)
+                }
             }
         }
 
