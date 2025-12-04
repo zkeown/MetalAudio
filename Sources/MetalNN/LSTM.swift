@@ -71,6 +71,90 @@ public final class LSTM: NNLayer {
     private var hiddenState: [Tensor] = []
     private var cellState: [Tensor] = []
 
+    // Pre-allocated work buffers for real-time safety
+    // These avoid per-forward allocations that would cause GC pressure
+    private var workHHGates: [[Float]] = []  // [layer*direction][4*hiddenSize]
+    private var workFusedInput: [[Float]] = []  // [layer*direction][fusedInputSize]
+    private var workGates: [[Float]] = []  // [layer*direction][4*hiddenSize]
+
+    // Sequence-dependent work buffers (resized as needed, bounded by maxSequenceLength)
+    private var workPreIH: [Float] = []
+    private var workPreIHCapacity: Int = 0
+    private var workLayerOutput: [Float] = []
+    private var workLayerOutputCapacity: Int = 0
+    private var workLayerInput: [Float] = []
+    private var workLayerInputCapacity: Int = 0
+
+    /// Maximum sequence length for work buffer allocation.
+    /// Sequences longer than this will throw an error. Default 100,000 is generous
+    /// for audio (2+ seconds at 44.1kHz) while preventing unbounded memory growth.
+    private let maxSequenceLength: Int
+
+    /// Maximum memory budget for work buffers in bytes. Default 256MB.
+    /// Prevents allocation of work buffers that would exceed this limit.
+    /// On iOS devices with 3GB RAM, 256MB is a reasonable upper bound.
+    private let maxMemoryBudget: Int
+
+    /// Estimates memory required for work buffers at a given sequence length
+    /// - Returns: Estimated memory usage in bytes
+    public func estimateMemoryUsage(sequenceLength: Int) -> Int {
+        let numDirections = bidirectional ? 2 : 1
+        let gateSize = 4 * hiddenSize
+
+        let preIHSize = sequenceLength * gateSize
+        let layerOutputSize = sequenceLength * hiddenSize * numDirections
+        let maxLayerInputSize = max(inputSize, hiddenSize * numDirections) * sequenceLength
+
+        return (preIHSize + layerOutputSize + maxLayerInputSize) * MemoryLayout<Float>.stride
+    }
+
+    /// Pre-warms the work buffers for a specific sequence length.
+    /// Call this during app initialization to avoid allocation during real-time inference.
+    /// - Parameter sequenceLength: Expected maximum sequence length
+    /// - Throws: MetalAudioError if allocation would exceed memory budget
+    public func prewarm(sequenceLength: Int) throws {
+        guard sequenceLength <= maxSequenceLength else {
+            throw MetalAudioError.invalidConfiguration(
+                "Sequence length \(sequenceLength) exceeds maximum \(maxSequenceLength)."
+            )
+        }
+
+        let estimatedMemory = estimateMemoryUsage(sequenceLength: sequenceLength)
+        guard estimatedMemory <= maxMemoryBudget else {
+            throw MetalAudioError.invalidConfiguration(
+                "Estimated memory \(estimatedMemory / 1_000_000)MB exceeds budget \(maxMemoryBudget / 1_000_000)MB. " +
+                "Reduce hiddenSize, sequence length, or increase maxMemoryBudget."
+            )
+        }
+
+        let numDirections = bidirectional ? 2 : 1
+        let gateSize = 4 * hiddenSize
+
+        let preIHSize = sequenceLength * gateSize
+        if workPreIHCapacity < preIHSize {
+            workPreIH = [Float](repeating: 0, count: preIHSize)
+            workPreIHCapacity = preIHSize
+        }
+
+        let layerOutputSize = sequenceLength * hiddenSize * numDirections
+        if workLayerOutputCapacity < layerOutputSize {
+            workLayerOutput = [Float](repeating: 0, count: layerOutputSize)
+            workLayerOutputCapacity = layerOutputSize
+        }
+
+        let maxLayerInputSize = max(inputSize, hiddenSize * numDirections) * sequenceLength
+        if workLayerInputCapacity < maxLayerInputSize {
+            workLayerInput = [Float](repeating: 0, count: maxLayerInputSize)
+            workLayerInputCapacity = maxLayerInputSize
+        }
+    }
+
+    /// Optional cell state clipping range for numerical stability.
+    /// If nil, no clipping is applied (default for trained models).
+    /// Set to e.g. -50...50 if experiencing exploding cell states during inference.
+    /// Note: Models trained without clipping may produce incorrect results with clipping enabled.
+    private let cellStateClipRange: ClosedRange<Float>?
+
     /// Initialize LSTM layer
     /// - Parameters:
     ///   - device: Audio device
@@ -79,19 +163,31 @@ public final class LSTM: NNLayer {
     ///   - numLayers: Number of stacked LSTM layers
     ///   - bidirectional: Whether to use bidirectional LSTM
     ///   - sequenceLength: Expected sequence length (for shape)
+    ///   - maxSequenceLength: Maximum sequence length for work buffers (default 100,000).
+    ///     Prevents unbounded memory growth. Set higher for very long sequences.
+    ///   - maxMemoryBudget: Maximum memory budget for work buffers in bytes (default 256MB).
+    ///     Prevents allocation that would exceed available memory on iOS devices.
+    ///   - cellStateClipRange: Optional clipping range for cell state (nil = no clipping).
+    ///     Set to e.g. `-50...50` if experiencing exploding cell states during inference.
     public init(
         device: AudioDevice,
         inputSize: Int,
         hiddenSize: Int,
         numLayers: Int = 1,
         bidirectional: Bool = false,
-        sequenceLength: Int = 0
+        sequenceLength: Int = 0,
+        maxSequenceLength: Int = 100_000,
+        maxMemoryBudget: Int = 256 * 1024 * 1024,  // 256MB default
+        cellStateClipRange: ClosedRange<Float>? = nil
     ) throws {
         self.device = device
         self.inputSize = inputSize
         self.hiddenSize = hiddenSize
         self.numLayers = numLayers
         self.bidirectional = bidirectional
+        self.maxSequenceLength = maxSequenceLength
+        self.maxMemoryBudget = maxMemoryBudget
+        self.cellStateClipRange = cellStateClipRange
 
         self.inputShape = [sequenceLength, inputSize]
         let outputSize = bidirectional ? hiddenSize * 2 : hiddenSize
@@ -103,25 +199,31 @@ public final class LSTM: NNLayer {
         for layer in 0..<numLayers {
             let layerInputSize = layer == 0 ? inputSize : hiddenSize * numDirections
             let fusedInputSize = layerInputSize + hiddenSize
+            let gateSize = 4 * hiddenSize
 
             for _ in 0..<numDirections {
                 // Input-hidden: [4 * hiddenSize, layerInputSize]
-                weightsIH.append(try Tensor(device: device, shape: [4 * hiddenSize, layerInputSize]))
+                weightsIH.append(try Tensor(device: device, shape: [gateSize, layerInputSize]))
                 // Hidden-hidden: [4 * hiddenSize, hiddenSize]
-                weightsHH.append(try Tensor(device: device, shape: [4 * hiddenSize, hiddenSize]))
+                weightsHH.append(try Tensor(device: device, shape: [gateSize, hiddenSize]))
                 // Biases: [4 * hiddenSize]
-                biasIH.append(try Tensor(device: device, shape: [4 * hiddenSize]))
-                biasHH.append(try Tensor(device: device, shape: [4 * hiddenSize]))
+                biasIH.append(try Tensor(device: device, shape: [gateSize]))
+                biasHH.append(try Tensor(device: device, shape: [gateSize]))
 
                 // Fused weights: [4 * hiddenSize, layerInputSize + hiddenSize]
-                weightsFused.append(try Tensor(device: device, shape: [4 * hiddenSize, fusedInputSize]))
+                weightsFused.append(try Tensor(device: device, shape: [gateSize, fusedInputSize]))
                 // Fused bias: b_ih + b_hh
-                biasFused.append(try Tensor(device: device, shape: [4 * hiddenSize]))
+                biasFused.append(try Tensor(device: device, shape: [gateSize]))
                 fusedInputSizes.append(fusedInputSize)
 
                 // State: [hiddenSize]
                 hiddenState.append(try Tensor(device: device, shape: [hiddenSize]))
                 cellState.append(try Tensor(device: device, shape: [hiddenSize]))
+
+                // Pre-allocate work buffers for real-time safety
+                workHHGates.append([Float](repeating: 0, count: gateSize))
+                workFusedInput.append([Float](repeating: 0, count: fusedInputSize))
+                workGates.append([Float](repeating: 0, count: gateSize))
             }
         }
     }
@@ -138,7 +240,8 @@ public final class LSTM: NNLayer {
     ///   - weightsHH: Hidden-hidden weights [4*hidden, hidden]
     ///   - biasIH: Input-hidden bias [4*hidden]
     ///   - biasHH: Hidden-hidden bias [4*hidden]
-    /// - Throws: `MetalAudioError.bufferSizeMismatch` if weight array sizes don't match
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if weight array sizes don't match,
+    ///           `MetalAudioError.invalidConfiguration` if weights contain NaN or Inf
     public func loadWeights(
         layer: Int,
         direction: Int,
@@ -147,6 +250,28 @@ public final class LSTM: NNLayer {
         biasIH: [Float],
         biasHH: [Float]
     ) throws {
+        // Validate all weights for NaN/Inf before acquiring lock
+        if let warning = try validateWeights(weightsIH, name: "LSTM weightsIH[layer=\(layer),dir=\(direction)]") {
+            #if DEBUG
+            print(warning)
+            #endif
+        }
+        if let warning = try validateWeights(weightsHH, name: "LSTM weightsHH[layer=\(layer),dir=\(direction)]") {
+            #if DEBUG
+            print(warning)
+            #endif
+        }
+        if let warning = try validateWeights(biasIH, name: "LSTM biasIH[layer=\(layer),dir=\(direction)]") {
+            #if DEBUG
+            print(warning)
+            #endif
+        }
+        if let warning = try validateWeights(biasHH, name: "LSTM biasHH[layer=\(layer),dir=\(direction)]") {
+            #if DEBUG
+            print(warning)
+            #endif
+        }
+
         // Acquire lock to prevent races with forward() which reads weights
         os_unfair_lock_lock(&stateLock)
         defer { os_unfair_lock_unlock(&stateLock) }
@@ -213,15 +338,69 @@ public final class LSTM: NNLayer {
     /// Optimized forward pass that batches input matrix multiplications
     /// Phase 1: Compute pre_ih[t] = W_ih @ x[t] + b_ih for all t in one batched GEMM
     /// Phase 2: Sequential scan with only W_hh @ h computations (50% fewer GEMVs)
+    ///
+    /// Uses pre-allocated work buffers to avoid allocations during real-time audio.
     private func forwardOptimized(input: Tensor, output: Tensor) throws {
         let sequenceLength = input.shape[0]
-        let numDirections = bidirectional ? 2 : 1
 
-        var layerInput = input.toArray()
+        // Validate sequence length against maximum to prevent unbounded memory growth
+        guard sequenceLength <= maxSequenceLength else {
+            throw MetalAudioError.invalidConfiguration(
+                "Sequence length \(sequenceLength) exceeds maximum \(maxSequenceLength). " +
+                "Increase maxSequenceLength in LSTM init if longer sequences are needed."
+            )
+        }
+
+        // Validate memory budget before allocating larger buffers
+        let estimatedMemory = estimateMemoryUsage(sequenceLength: sequenceLength)
+        guard estimatedMemory <= maxMemoryBudget else {
+            throw MetalAudioError.invalidConfiguration(
+                "Estimated memory \(estimatedMemory / 1_000_000)MB for sequence length \(sequenceLength) " +
+                "exceeds budget \(maxMemoryBudget / 1_000_000)MB. " +
+                "Reduce sequence length, hiddenSize, or increase maxMemoryBudget in LSTM init."
+            )
+        }
+
+        let numDirections = bidirectional ? 2 : 1
+        let gateSize = 4 * hiddenSize
+
+        // Ensure sequence-dependent work buffers are large enough
+        // These are resized only when sequence length increases (rare in real-time audio)
+        let preIHSize = sequenceLength * gateSize
+        if workPreIHCapacity < preIHSize {
+            workPreIH = [Float](repeating: 0, count: preIHSize)
+            workPreIHCapacity = preIHSize
+        }
+
+        let layerOutputSize = sequenceLength * hiddenSize * numDirections
+        if workLayerOutputCapacity < layerOutputSize {
+            workLayerOutput = [Float](repeating: 0, count: layerOutputSize)
+            workLayerOutputCapacity = layerOutputSize
+        }
+
+        let maxLayerInputSize = max(inputSize, hiddenSize * numDirections) * sequenceLength
+        if workLayerInputCapacity < maxLayerInputSize {
+            workLayerInput = [Float](repeating: 0, count: maxLayerInputSize)
+            workLayerInputCapacity = maxLayerInputSize
+        }
+
+        // Copy input to work buffer
+        let inputArray = input.toArray()
+        workLayerInput.withUnsafeMutableBufferPointer { ptr in
+            guard let base = ptr.baseAddress else { return }
+            inputArray.withUnsafeBufferPointer { srcPtr in
+                guard let srcBase = srcPtr.baseAddress else { return }
+                memcpy(base, srcBase, inputArray.count * MemoryLayout<Float>.stride)
+            }
+        }
         var layerInputSize = inputSize
 
         for layer in 0..<numLayers {
-            var layerOutput = [Float](repeating: 0, count: sequenceLength * hiddenSize * numDirections)
+            // Zero the layer output buffer
+            workLayerOutput.withUnsafeMutableBufferPointer { ptr in
+                guard let base = ptr.baseAddress else { return }
+                memset(base, 0, layerOutputSize * MemoryLayout<Float>.stride)
+            }
 
             for direction in 0..<numDirections {
                 let idx = layer * numDirections + direction
@@ -235,40 +414,39 @@ public final class LSTM: NNLayer {
                 let h = hiddenState[idx].floatPointer
                 let c = cellState[idx].floatPointer
 
-                let gateSize = 4 * hiddenSize
-
                 // Phase 1: Batch compute all input contributions
                 // pre_ih = X @ W_ih^T where X is [T, in], W_ih is [4h, in]
                 // Result is [T, 4h]
-                var preIH = [Float](repeating: 0, count: sequenceLength * gateSize)
-
-                cblas_sgemm(
-                    CblasRowMajor,
-                    CblasNoTrans,      // X not transposed: [T, in]
-                    CblasTrans,        // W_ih transposed: [4h, in]^T = [in, 4h]
-                    Int32(sequenceLength),
-                    Int32(gateSize),
-                    Int32(layerInputSize),
-                    1.0,
-                    layerInput, Int32(layerInputSize),
-                    wIH, Int32(layerInputSize),
-                    0.0,
-                    &preIH, Int32(gateSize)
-                )
-
-                // Add bias to each row using proper pointer access
-                preIH.withUnsafeMutableBufferPointer { preIHPtr in
+                workPreIH.withUnsafeMutableBufferPointer { preIHPtr in
                     guard let preIHBase = preIHPtr.baseAddress else { return }
-                    for t in 0..<sequenceLength {
-                        let rowStart = t * gateSize
-                        vDSP_vadd(preIHBase + rowStart, 1, bIH, 1, preIHBase + rowStart, 1, vDSP_Length(gateSize))
+
+                    workLayerInput.withUnsafeBufferPointer { inputPtr in
+                        guard let inputBase = inputPtr.baseAddress else { return }
+
+                        cblas_sgemm(
+                            CblasRowMajor,
+                            CblasNoTrans,      // X not transposed: [T, in]
+                            CblasTrans,        // W_ih transposed: [4h, in]^T = [in, 4h]
+                            Int32(sequenceLength),
+                            Int32(gateSize),
+                            Int32(layerInputSize),
+                            1.0,
+                            inputBase, Int32(layerInputSize),
+                            wIH, Int32(layerInputSize),
+                            0.0,
+                            preIHBase, Int32(gateSize)
+                        )
+
+                        // Add bias to each row
+                        for t in 0..<sequenceLength {
+                            let rowStart = t * gateSize
+                            vDSP_vadd(preIHBase + rowStart, 1, bIH, 1, preIHBase + rowStart, 1, vDSP_Length(gateSize))
+                        }
                     }
                 }
 
-                // Pre-allocate buffers for sequential phase
-                var hhGates = [Float](repeating: 0, count: gateSize)
-
                 // Phase 2: Sequential scan with only W_hh computations
+                // Use pre-allocated hhGates buffer
                 let start = reverse ? sequenceLength - 1 : 0
                 let end = reverse ? -1 : sequenceLength
                 let step = reverse ? -1 : 1
@@ -277,45 +455,69 @@ public final class LSTM: NNLayer {
                     let preIHOffset = t * gateSize
 
                     // Compute hidden contribution: hhGates = W_hh @ h
-                    cblas_sgemv(
-                        CblasRowMajor, CblasNoTrans,
-                        Int32(gateSize), Int32(hiddenSize),
-                        1.0, wHH, Int32(hiddenSize),
-                        h, 1,
-                        0.0, &hhGates, 1
-                    )
+                    workHHGates[idx].withUnsafeMutableBufferPointer { hhPtr in
+                        guard let hhBase = hhPtr.baseAddress else { return }
+                        cblas_sgemv(
+                            CblasRowMajor, CblasNoTrans,
+                            Int32(gateSize), Int32(hiddenSize),
+                            1.0, wHH, Int32(hiddenSize),
+                            h, 1,
+                            0.0, hhBase, 1
+                        )
+                    }
 
                     // Apply activations and update states
-                    for j in 0..<hiddenSize {
-                        // gates[j] = pre_ih[t, j] + hhGates[j] + b_hh[j]
-                        let i_val = preIH[preIHOffset + j] + hhGates[j] + bHH[j]
-                        let f_val = preIH[preIHOffset + hiddenSize + j] + hhGates[hiddenSize + j] + bHH[hiddenSize + j]
-                        let g_val = preIH[preIHOffset + 2 * hiddenSize + j] + hhGates[2 * hiddenSize + j] + bHH[2 * hiddenSize + j]
-                        let o_val = preIH[preIHOffset + 3 * hiddenSize + j] + hhGates[3 * hiddenSize + j] + bHH[3 * hiddenSize + j]
+                    workPreIH.withUnsafeBufferPointer { preIHPtr in
+                        guard let preIHBase = preIHPtr.baseAddress else { return }
+                        workHHGates[idx].withUnsafeBufferPointer { hhPtr in
+                            guard let hhBase = hhPtr.baseAddress else { return }
 
-                        let i_gate = sigmoid(i_val)
-                        let f_gate = sigmoid(f_val)
-                        let g_gate = tanh(g_val)
-                        let o_gate = sigmoid(o_val)
+                            for j in 0..<hiddenSize {
+                                // gates[j] = pre_ih[t, j] + hhGates[j] + b_hh[j]
+                                let i_val = preIHBase[preIHOffset + j] + hhBase[j] + bHH[j]
+                                let f_val = preIHBase[preIHOffset + hiddenSize + j] + hhBase[hiddenSize + j] + bHH[hiddenSize + j]
+                                let g_val = preIHBase[preIHOffset + 2 * hiddenSize + j] + hhBase[2 * hiddenSize + j] + bHH[2 * hiddenSize + j]
+                                let o_val = preIHBase[preIHOffset + 3 * hiddenSize + j] + hhBase[3 * hiddenSize + j] + bHH[3 * hiddenSize + j]
 
-                        c[j] = f_gate * c[j] + i_gate * g_gate
-                        c[j] = max(-50.0, min(50.0, c[j]))
-                        h[j] = o_gate * tanh(c[j])
+                                let i_gate = sigmoid(i_val)
+                                let f_gate = sigmoid(f_val)
+                                let g_gate = tanh(g_val)
+                                let o_gate = sigmoid(o_val)
+
+                                c[j] = f_gate * c[j] + i_gate * g_gate
+                                // Optional cell state clipping for numerical stability
+                                if let clipRange = self.cellStateClipRange {
+                                    c[j] = max(clipRange.lowerBound, min(clipRange.upperBound, c[j]))
+                                }
+                                h[j] = o_gate * tanh(c[j])
+                            }
+                        }
                     }
 
                     // Store output
                     let outputOffset = t * hiddenSize * numDirections + direction * hiddenSize
-                    layerOutput.withUnsafeMutableBufferPointer { ptr in
+                    workLayerOutput.withUnsafeMutableBufferPointer { ptr in
                         memcpy(ptr.baseAddress! + outputOffset, h, hiddenSize * MemoryLayout<Float>.stride)
                     }
                 }
             }
 
-            layerInput = layerOutput
+            // Copy layer output to layer input for next layer
+            if layer < numLayers - 1 {
+                workLayerOutput.withUnsafeBufferPointer { srcPtr in
+                    guard let srcBase = srcPtr.baseAddress else { return }
+                    workLayerInput.withUnsafeMutableBufferPointer { dstPtr in
+                        guard let dstBase = dstPtr.baseAddress else { return }
+                        memcpy(dstBase, srcBase, layerOutputSize * MemoryLayout<Float>.stride)
+                    }
+                }
+            }
             layerInputSize = hiddenSize * numDirections
         }
 
-        try output.copy(from: layerInput)
+        // Copy final output
+        let finalOutput = Array(workLayerOutput.prefix(layerOutputSize))
+        try output.copy(from: finalOutput)
     }
 
     /// Original CPU forward using fused weights (kept for reference)
@@ -400,9 +602,12 @@ public final class LSTM: NNLayer {
                         // Update cell state: c = f * c + i * g
                         c[j] = f_gate * c[j] + i_gate * g_gate
 
-                        // Clip cell state to prevent divergence
-                        // Large cell states cause NaN when passed through tanh
-                        c[j] = max(-50.0, min(50.0, c[j]))
+                        // Optional cell state clipping for numerical stability
+                        // Only clip if user provided cellStateClipRange at init
+                        // (matches behavior of forwardOptimized path)
+                        if let clipRange = self.cellStateClipRange {
+                            c[j] = max(clipRange.lowerBound, min(clipRange.upperBound, c[j]))
+                        }
 
                         // Update hidden state: h = o * tanh(c)
                         h[j] = o_gate * tanh(c[j])
@@ -492,6 +697,12 @@ public final class GRU: NNLayer {
     private var biasHH: [Tensor] = []
     private var hiddenState: [Tensor] = []
 
+    // Pre-allocated work buffers for real-time safety
+    private var workGates: [[Float]] = []  // [direction][3*hiddenSize]
+    private var workHHGates: [[Float]] = []  // [direction][3*hiddenSize]
+    private var workOutputData: [Float] = []
+    private var workOutputCapacity: Int = 0
+
     public init(
         device: AudioDevice,
         inputSize: Int,
@@ -509,14 +720,20 @@ public final class GRU: NNLayer {
         let outputSize = hiddenSize * numDirections
         self.outputShape = [sequenceLength, outputSize]
 
+        let gateSize = 3 * hiddenSize
+
         // GRU has 3 gates: reset, update, new
         // Allocate weights for each direction
         for _ in 0..<numDirections {
-            weightsIH.append(try Tensor(device: device, shape: [3 * hiddenSize, inputSize]))
-            weightsHH.append(try Tensor(device: device, shape: [3 * hiddenSize, hiddenSize]))
-            biasIH.append(try Tensor(device: device, shape: [3 * hiddenSize]))
-            biasHH.append(try Tensor(device: device, shape: [3 * hiddenSize]))
+            weightsIH.append(try Tensor(device: device, shape: [gateSize, inputSize]))
+            weightsHH.append(try Tensor(device: device, shape: [gateSize, hiddenSize]))
+            biasIH.append(try Tensor(device: device, shape: [gateSize]))
+            biasHH.append(try Tensor(device: device, shape: [gateSize]))
             hiddenState.append(try Tensor(device: device, shape: [hiddenSize]))
+
+            // Pre-allocate work buffers
+            workGates.append([Float](repeating: 0, count: gateSize))
+            workHHGates.append([Float](repeating: 0, count: gateSize))
         }
     }
 
@@ -531,7 +748,8 @@ public final class GRU: NNLayer {
     ///   - weightsHH: Hidden-hidden weights [3*hidden, hidden]
     ///   - biasIH: Input-hidden bias [3*hidden]
     ///   - biasHH: Hidden-hidden bias [3*hidden]
-    /// - Throws: `MetalAudioError.bufferSizeMismatch` if weight array sizes don't match
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if weight array sizes don't match,
+    ///           `MetalAudioError.invalidConfiguration` if weights contain NaN or Inf
     public func loadWeights(
         direction: Int = 0,
         weightsIH: [Float],
@@ -541,6 +759,28 @@ public final class GRU: NNLayer {
     ) throws {
         guard direction < numDirections else {
             throw MetalAudioError.invalidConfiguration("Direction \(direction) invalid for \(bidirectional ? "bidirectional" : "unidirectional") GRU")
+        }
+
+        // Validate all weights for NaN/Inf before acquiring lock
+        if let warning = try validateWeights(weightsIH, name: "GRU weightsIH[dir=\(direction)]") {
+            #if DEBUG
+            print(warning)
+            #endif
+        }
+        if let warning = try validateWeights(weightsHH, name: "GRU weightsHH[dir=\(direction)]") {
+            #if DEBUG
+            print(warning)
+            #endif
+        }
+        if let warning = try validateWeights(biasIH, name: "GRU biasIH[dir=\(direction)]") {
+            #if DEBUG
+            print(warning)
+            #endif
+        }
+        if let warning = try validateWeights(biasHH, name: "GRU biasHH[dir=\(direction)]") {
+            #if DEBUG
+            print(warning)
+            #endif
         }
 
         // Acquire lock to prevent races with forward() which reads weights
@@ -581,8 +821,20 @@ public final class GRU: NNLayer {
     private func forwardCPU(input: Tensor, output: Tensor) throws {
         let sequenceLength = input.shape[0]
         let inputData = input.toArray()
+        let gateSize = 3 * hiddenSize
+        let outputSize = sequenceLength * hiddenSize * numDirections
 
-        var outputData = [Float](repeating: 0, count: sequenceLength * hiddenSize * numDirections)
+        // Ensure output work buffer is large enough
+        if workOutputCapacity < outputSize {
+            workOutputData = [Float](repeating: 0, count: outputSize)
+            workOutputCapacity = outputSize
+        } else {
+            // Zero existing buffer
+            workOutputData.withUnsafeMutableBufferPointer { ptr in
+                guard let base = ptr.baseAddress else { return }
+                memset(base, 0, outputSize * MemoryLayout<Float>.stride)
+            }
+        }
 
         for direction in 0..<numDirections {
             let reverse = direction == 1
@@ -594,11 +846,11 @@ public final class GRU: NNLayer {
             let h = hiddenState[direction].floatPointer
 
             // Process sequence (reversed for backward direction)
-            let indices = reverse ?
-                Array((0..<sequenceLength).reversed()) :
-                Array(0..<sequenceLength)
+            let start = reverse ? sequenceLength - 1 : 0
+            let end = reverse ? -1 : sequenceLength
+            let step = reverse ? -1 : 1
 
-            for t in indices {
+            for t in stride(from: start, to: end, by: step) {
                 let inputOffset = t * inputSize
 
                 // Bounds check before pointer arithmetic
@@ -609,59 +861,72 @@ public final class GRU: NNLayer {
                     )
                 }
 
-                // Compute gates
-                var gates = [Float](repeating: 0, count: 3 * hiddenSize)
-                var hhGates = [Float](repeating: 0, count: 3 * hiddenSize)
+                // Use pre-allocated gate buffers
+                workGates[direction].withUnsafeMutableBufferPointer { gatesPtr in
+                    guard let gatesBase = gatesPtr.baseAddress else { return }
 
-                // W_ih @ x + b_ih
-                inputData.withUnsafeBufferPointer { inputPtr in
-                    guard let baseAddress = inputPtr.baseAddress else { return }
+                    // W_ih @ x + b_ih
+                    inputData.withUnsafeBufferPointer { inputPtr in
+                        guard let inputBase = inputPtr.baseAddress else { return }
+                        cblas_sgemv(
+                            CblasRowMajor, CblasNoTrans,
+                            Int32(gateSize), Int32(inputSize),
+                            1.0, wih, Int32(inputSize),
+                            inputBase + inputOffset, 1,
+                            0.0, gatesBase, 1
+                        )
+                    }
+                    vDSP_vadd(gatesBase, 1, bih, 1, gatesBase, 1, vDSP_Length(gateSize))
+                }
+
+                workHHGates[direction].withUnsafeMutableBufferPointer { hhPtr in
+                    guard let hhBase = hhPtr.baseAddress else { return }
+
+                    // W_hh @ h + b_hh
                     cblas_sgemv(
                         CblasRowMajor, CblasNoTrans,
-                        Int32(3 * hiddenSize), Int32(inputSize),
-                        1.0, wih, Int32(inputSize),
-                        baseAddress + inputOffset, 1,
-                        0.0, &gates, 1
+                        Int32(gateSize), Int32(hiddenSize),
+                        1.0, whh, Int32(hiddenSize),
+                        h, 1,
+                        0.0, hhBase, 1
                     )
+                    vDSP_vadd(hhBase, 1, bhh, 1, hhBase, 1, vDSP_Length(gateSize))
                 }
-                vDSP_vadd(gates, 1, bih, 1, &gates, 1, vDSP_Length(3 * hiddenSize))
 
-                // W_hh @ h + b_hh
-                cblas_sgemv(
-                    CblasRowMajor, CblasNoTrans,
-                    Int32(3 * hiddenSize), Int32(hiddenSize),
-                    1.0, whh, Int32(hiddenSize),
-                    h, 1,
-                    0.0, &hhGates, 1
-                )
-                vDSP_vadd(hhGates, 1, bhh, 1, &hhGates, 1, vDSP_Length(3 * hiddenSize))
+                // Apply GRU equations using pre-allocated buffers
+                workGates[direction].withUnsafeBufferPointer { gatesPtr in
+                    guard let gatesBase = gatesPtr.baseAddress else { return }
+                    workHHGates[direction].withUnsafeBufferPointer { hhPtr in
+                        guard let hhBase = hhPtr.baseAddress else { return }
 
-                // Apply GRU equations
-                for j in 0..<hiddenSize {
-                    let r = sigmoid(gates[j] + hhGates[j])                           // Reset gate
-                    let z = sigmoid(gates[hiddenSize + j] + hhGates[hiddenSize + j]) // Update gate
-                    let n = Darwin.tanh(gates[2 * hiddenSize + j] + r * hhGates[2 * hiddenSize + j])  // New gate
+                        for j in 0..<hiddenSize {
+                            let r = sigmoid(gatesBase[j] + hhBase[j])                           // Reset gate
+                            let z = sigmoid(gatesBase[hiddenSize + j] + hhBase[hiddenSize + j]) // Update gate
+                            let n = Darwin.tanh(gatesBase[2 * hiddenSize + j] + r * hhBase[2 * hiddenSize + j])  // New gate
 
-                    h[j] = (1 - z) * n + z * h[j]
+                            h[j] = (1 - z) * n + z * h[j]
+                        }
+                    }
                 }
 
                 // Store output with bounds checking
                 let outputOffset = t * hiddenSize * numDirections + direction * hiddenSize
                 let outputEnd = outputOffset + hiddenSize
-                guard outputOffset >= 0 && outputEnd <= outputData.count else {
+                guard outputOffset >= 0 && outputEnd <= workOutputData.count else {
                     throw MetalAudioError.indexOutOfBounds(
                         index: [t, direction],
                         shape: [sequenceLength, numDirections]
                     )
                 }
-                outputData.withUnsafeMutableBufferPointer { ptr in
+                workOutputData.withUnsafeMutableBufferPointer { ptr in
                     guard let baseAddress = ptr.baseAddress else { return }
                     memcpy(baseAddress + outputOffset, h, hiddenSize * MemoryLayout<Float>.stride)
                 }
             }
         }
 
-        try output.copy(from: outputData)
+        let finalOutput = Array(workOutputData.prefix(outputSize))
+        try output.copy(from: finalOutput)
     }
 
     /// Numerically stable sigmoid that avoids overflow for extreme values
@@ -821,14 +1086,16 @@ extension LSTM {
     /// Executes LSTM on a background thread and calls completion on main queue.
     /// Use this for batch processing where latency is less critical.
     ///
+    /// **Note:** LSTM runs entirely on CPU using Accelerate. No GPU encoder is needed.
+    /// The result tensors are ready for immediate CPU access upon completion.
+    ///
     /// - Parameters:
-    ///   - input: Input tensor
-    ///   - output: Output tensor
+    ///   - input: Input tensor [sequenceLength, inputSize]
+    ///   - output: Output tensor [sequenceLength, hiddenSize * directions]
     ///   - completion: Called on main queue with optional error
     public func forwardAsync(
         input: Tensor,
         output: Tensor,
-        encoder: MTLComputeCommandEncoder,
         completion: @escaping (Error?) -> Void
     ) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -840,7 +1107,12 @@ extension LSTM {
             }
 
             do {
-                try self.forward(input: input, output: output, encoder: encoder)
+                // LSTM runs on CPU via Accelerate - no encoder needed
+                // We call the internal optimized forward directly
+                os_unfair_lock_lock(&self.stateLock)
+                defer { os_unfair_lock_unlock(&self.stateLock) }
+                try self.forwardOptimized(input: input, output: output)
+
                 DispatchQueue.main.async {
                     completion(nil)
                 }
@@ -850,5 +1122,18 @@ extension LSTM {
                 }
             }
         }
+    }
+
+    /// Deprecated: Use forwardAsync(input:output:completion:) instead.
+    /// The encoder parameter was never used since LSTM runs on CPU.
+    @available(*, deprecated, message: "Use forwardAsync(input:output:completion:) instead. LSTM runs on CPU, encoder is not used.")
+    public func forwardAsync(
+        input: Tensor,
+        output: Tensor,
+        encoder: MTLComputeCommandEncoder,
+        completion: @escaping (Error?) -> Void
+    ) {
+        // Forward to the new signature, ignoring the unused encoder
+        forwardAsync(input: input, output: output, completion: completion)
     }
 }

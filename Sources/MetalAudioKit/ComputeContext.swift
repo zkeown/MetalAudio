@@ -26,6 +26,13 @@ public final class ComputeContext: @unchecked Sendable {
     // os_unfair_lock doesn't suffer from priority inversion issues
     internal var unfairLock = os_unfair_lock()
 
+    /// Count of GPU command buffers currently referencing triple buffers
+    /// Used to prevent clearing buffers while GPU is still accessing them
+    internal var tripleBufferInFlightCount: Int = 0
+
+    /// Flag to indicate deferred clearing of triple buffers after memory pressure
+    internal var tripleBufferPendingClear: Bool = false
+
     /// Semaphore for limiting in-flight command buffers
     private let inFlightSemaphore: DispatchSemaphore
 
@@ -41,25 +48,65 @@ public final class ComputeContext: @unchecked Sendable {
     /// Lock for event value updates
     private var eventLock = os_unfair_lock()
 
+    // MARK: - Triple Buffer Synchronization
+
+    /// Semaphore signaled when tripleBufferInFlightCount reaches 0
+    /// Used by setupTripleBuffering to wait for in-flight buffers to complete
+    internal var tripleBufferDrainSemaphore: DispatchSemaphore?
+    /// Flag indicating we're waiting for buffers to drain
+    internal var waitingForDrain: Bool = false
+
+    /// Errors specific to ComputeContext operations
+    public enum ComputeContextError: Error, LocalizedError {
+        case invalidBufferCount(Int)
+        case sharedEventCreationFailed
+
+        public var errorDescription: String? {
+            switch self {
+            case .invalidBufferCount(let count):
+                return "maxInFlightBuffers must be between 1 and 16, got \(count)"
+            case .sharedEventCreationFailed:
+                return "Failed to create MTLSharedEvent for GPU/CPU synchronization"
+            }
+        }
+    }
+
     /// Initialize compute context
     /// - Parameters:
     ///   - device: Audio device
-    ///   - maxInFlightBuffers: Maximum concurrent GPU operations (nil = hardware-adaptive)
-    public init(device: AudioDevice, maxInFlightBuffers: Int? = nil) {
+    ///   - maxInFlightBuffers: Maximum concurrent GPU operations (nil = hardware-adaptive, 1-16)
+    /// - Throws: `ComputeContextError.invalidBufferCount` if count is invalid,
+    ///           `ComputeContextError.sharedEventCreationFailed` if GPU event creation fails
+    public init(device: AudioDevice, maxInFlightBuffers: Int? = nil) throws {
         self.device = device
         self.commandQueue = device.commandQueue
         // Use hardware-adaptive default if not specified
         let bufferCount = maxInFlightBuffers ?? ToleranceProvider.shared.tolerances.maxInFlightBuffers
+        // Validate buffer count to prevent deadlock (0) or excessive resource usage (>16)
+        guard bufferCount >= 1, bufferCount <= 16 else {
+            throw ComputeContextError.invalidBufferCount(bufferCount)
+        }
         self.maxInFlightBuffers = bufferCount
         self.inFlightSemaphore = DispatchSemaphore(value: bufferCount)
 
         // Create shared event for GPU/CPU synchronization
-        self.sharedEvent = device.device.makeSharedEvent()
+        guard let event = device.device.makeSharedEvent() else {
+            throw ComputeContextError.sharedEventCreationFailed
+        }
+        self.sharedEvent = event
     }
 
-    /// Default GPU timeout in seconds (used when no explicit timeout is provided)
-    /// Set to 30 seconds to catch GPU hangs while allowing for legitimate long operations
-    public static let defaultGPUTimeout: TimeInterval = 30.0
+    /// Default GPU timeout in seconds for general operations
+    ///
+    /// Set to 2 seconds - sufficient for most audio processing operations while catching
+    /// GPU hangs quickly. For long-running operations (large FFTs, neural network inference),
+    /// pass an explicit timeout to `executeSync(timeout:_:)`.
+    ///
+    /// ## Timeout Guidelines
+    /// - Small kernels (< 64K samples): 0.1 - 0.5 seconds
+    /// - Medium operations (FFT, convolution): 1 - 2 seconds
+    /// - Large neural networks: 5 - 30 seconds (pass explicitly)
+    public static let defaultGPUTimeout: TimeInterval = 2.0
 
     /// Execute a compute operation synchronously
     /// - Parameters:
@@ -70,6 +117,12 @@ public final class ComputeContext: @unchecked Sendable {
     ///
     /// - Note: A default timeout is always applied to prevent indefinite hangs.
     ///   Pass an explicit timeout for operations that may take longer.
+    ///
+    /// - Warning: **GPU resources not released on timeout.** Metal does not support
+    ///   cancelling a committed command buffer. If this method times out, the GPU
+    ///   continues executing the command buffer in the background. Buffers and other
+    ///   resources remain in use until GPU completion. In case of a true GPU hang,
+    ///   the system watchdog will eventually reset the GPU.
     public func executeSync<T>(
         timeout: TimeInterval? = nil,
         _ encode: (MTLComputeCommandEncoder) throws -> T
@@ -99,6 +152,13 @@ public final class ComputeContext: @unchecked Sendable {
         // Wait with timeout
         let waitResult = semaphore.wait(timeout: .now() + effectiveTimeout)
         if waitResult == .timedOut {
+            // IMPORTANT: Metal does not support cancelling a committed command buffer.
+            // The GPU will continue executing this work even after we return.
+            // Resources bound to this command buffer remain in use until GPU completes.
+            // In extreme cases (GPU hang), the system watchdog will reset the GPU.
+            #if DEBUG
+            print("[MetalAudio] Warning: GPU timeout after \(effectiveTimeout)s. Command buffer still executing on GPU.")
+            #endif
             throw MetalAudioError.gpuTimeout(effectiveTimeout)
         }
         guard commandBuffer.status == .completed else {
@@ -110,8 +170,8 @@ public final class ComputeContext: @unchecked Sendable {
 
     /// Execute a compute operation asynchronously with completion handler
     ///
-    /// - Warning: This method blocks up to 30 seconds if no command buffer slots are available.
-    ///   For real-time audio callbacks, use `tryExecuteAsync(_:completion:)` instead.
+    /// - Warning: This method blocks up to `defaultGPUTimeout` (2 seconds) if no command buffer
+    ///   slots are available. For real-time audio callbacks, use `tryExecuteAsync(_:completion:)` instead.
     ///
     /// - Parameters:
     ///   - encode: Closure to encode compute commands
@@ -300,13 +360,39 @@ public final class ComputeContext: @unchecked Sendable {
 }
 
 // MARK: - Dispatch Helpers
+//
+// ## Thread Group Sizing Rationale
+//
+// Apple GPUs execute threads in SIMD groups (typically 32 threads on Apple Silicon).
+// The `threadExecutionWidth` property tells us the actual SIMD width.
+//
+// Key considerations for audio processing:
+// - 256 threads per group is a good default balance between occupancy and register pressure
+// - For small data (<256 elements), we still use min(dataLength, 256) for simplicity
+// - The penalty for small threadgroups is minimal compared to kernel launch overhead
+// - For large data, multiple threadgroups run in parallel across GPU cores
+//
+// Memory access patterns:
+// - Coalesced access: Adjacent threads accessing adjacent memory addresses
+// - Threadgroup memory: 32KB shared across all threads in a group (use for reductions)
+// - For audio, data is typically sequential so coalescing is natural
+//
+// Occupancy tradeoffs:
+// - More threads per group = better latency hiding, but more register pressure
+// - Fewer threads = less register pressure, but may leave GPU cores idle
+// - 256 achieves ~8 SIMD groups which keeps the GPU scheduler busy
 
 extension ComputeContext {
     /// Calculate optimal threadgroup size for a 1D dispatch
+    ///
+    /// Uses a default of 256 threads per group which provides good occupancy on Apple Silicon
+    /// while leaving headroom for register usage. The actual size may be limited by the
+    /// pipeline's `maxTotalThreadsPerThreadgroup`.
+    ///
     /// - Parameters:
     ///   - pipeline: Compute pipeline state
     ///   - dataLength: Total number of elements to process
-    /// - Returns: Threadgroup size and grid size
+    /// - Returns: Threadgroup size and grid size for dispatchThreadgroups
     public static func calculate1DDispatch(
         pipeline: MTLComputePipelineState,
         dataLength: Int
@@ -314,7 +400,9 @@ extension ComputeContext {
         let maxThreads = pipeline.maxTotalThreadsPerThreadgroup
         let threadExecutionWidth = pipeline.threadExecutionWidth
 
-        // Use thread execution width as base, up to max threads
+        // Target 256 threads (8 SIMD groups) for good occupancy
+        // Ensure we're at least threadExecutionWidth for efficient SIMD utilization
+        // Cap at pipeline's maximum supported threads
         let threadsPerGroup = min(maxThreads, max(threadExecutionWidth, 256))
         let numGroups = (dataLength + threadsPerGroup - 1) / threadsPerGroup
 
@@ -355,12 +443,20 @@ extension ComputeContext {
     /// Signal a fence value from GPU after completing work on a buffer
     /// - Parameter commandBuffer: Command buffer to encode the signal into
     /// - Returns: The fence value that will be signaled when GPU completes
+    ///
+    /// - Note: Event values are monotonically increasing but wrap around at UInt64.max.
+    ///   Value 0 is reserved as sentinel for "never signaled", so values cycle 1...UInt64.max.
     @discardableResult
     public func signalFenceFromGPU(commandBuffer: MTLCommandBuffer) -> UInt64 {
         guard let event = sharedEvent else { return 0 }
 
         os_unfair_lock_lock(&eventLock)
-        eventValue += 1
+        // Handle wraparound: skip 0 to use it as sentinel for "never signaled"
+        if eventValue == UInt64.max {
+            eventValue = 1
+        } else {
+            eventValue += 1
+        }
         let signalValue = eventValue
         os_unfair_lock_unlock(&eventLock)
 
@@ -387,26 +483,36 @@ extension ComputeContext {
         }
 
         // Use a listener for async notification with timeout
+        // The semaphore is captured strongly by the closure, keeping it alive
+        // until the notification fires (even after this method returns)
         let semaphore = DispatchSemaphore(value: 0)
         let listener = MTLSharedEventListener(dispatchQueue: .global())
 
-        event.notify(listener, atValue: fenceValue) { _, _ in
-            semaphore.signal()
+        // Wrap semaphore in a class to ensure proper capture semantics
+        // This guarantees the semaphore stays alive until the callback completes
+        final class SemaphoreHolder {
+            let semaphore: DispatchSemaphore
+            init(_ sem: DispatchSemaphore) { self.semaphore = sem }
+        }
+        let holder = SemaphoreHolder(semaphore)
+
+        event.notify(listener, atValue: fenceValue) { [holder] _, _ in
+            // The holder keeps the semaphore alive until this closure executes
+            holder.semaphore.signal()
         }
 
         // Always use a timeout to prevent indefinite blocking
         let effectiveTimeout = timeout ?? Self.defaultGPUTimeout
         let result = semaphore.wait(timeout: .now() + effectiveTimeout)
 
-        // Note: If we timed out, the listener callback may still fire later.
-        // The listener is retained by the event until the notification fires or
-        // the event is deallocated. We keep 'listener' alive until this method
-        // returns to ensure the callback can safely access 'semaphore'.
-        // After return, if the callback fires later, it will signal an orphaned
-        // semaphore which is harmless.
-        _ = listener  // Keep listener alive until method returns
-
-        return result == .success
+        // Lifetime notes:
+        // - Metal retains `listener` internally until the notification fires or event deallocates
+        // - `holder` must stay alive until callback completes to prevent semaphore use-after-free
+        // - If we timeout and return, the callback may still fire later (with the retained holder)
+        // - withExtendedLifetime ensures both stay alive through this function's scope
+        return withExtendedLifetime((listener, holder)) {
+            result == .success
+        }
     }
 
     /// Wait on GPU for CPU to signal a fence value
@@ -424,6 +530,11 @@ extension ComputeContext {
     }
 
     /// Execute with automatic fence signaling for safe CPU access after GPU completion
+    ///
+    /// - Warning: This method blocks up to `defaultGPUTimeout` (2 seconds) if no command buffer
+    ///   slots are available. For real-time audio callbacks, consider using `tryExecuteAsync(_:completion:)`
+    ///   with manual fence signaling instead.
+    ///
     /// - Parameters:
     ///   - encode: Closure to encode compute commands
     ///   - completion: Called with fence value when GPU completes; CPU can safely access buffers
@@ -431,7 +542,12 @@ extension ComputeContext {
         _ encode: @escaping (MTLComputeCommandEncoder) throws -> Void,
         completion: @escaping (Result<UInt64, Error>) -> Void
     ) {
-        inFlightSemaphore.wait()
+        // Wait for a slot with timeout to prevent indefinite blocking
+        let waitResult = inFlightSemaphore.wait(timeout: .now() + Self.defaultGPUTimeout)
+        guard waitResult == .success else {
+            completion(.failure(MetalAudioError.gpuTimeout(Self.defaultGPUTimeout)))
+            return
+        }
 
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             inFlightSemaphore.signal()
@@ -471,8 +587,20 @@ extension ComputeContext {
     /// Setup triple buffering for audio callback integration
     /// - Parameters:
     ///   - bufferSize: Size in bytes for each buffer
-    /// - Note: Thread-safe. Will block if audio callbacks are currently accessing buffers.
-    public func setupTripleBuffering(bufferSize: Int) throws {
+    ///   - timeout: Maximum time to wait for in-flight buffers to drain (default: 1 second)
+    /// - Note: Thread-safe. Waits for any in-flight buffer accesses to complete before
+    ///   replacing buffers. This prevents use-after-free when GPU command buffers
+    ///   still reference the old buffers.
+    /// - Warning: **Not real-time safe**. This method may block if buffers are currently
+    ///   being used by GPU command buffers. Do not call from audio render callbacks.
+    ///   Call this during setup or from a background thread.
+    /// - Throws: `MetalAudioError.gpuTimeout` if timeout is exceeded waiting for buffers to drain.
+    public func setupTripleBuffering(bufferSize: Int, timeout: TimeInterval = 1.0) throws {
+        // Validate buffer size
+        guard bufferSize > 0 else {
+            throw MetalAudioError.bufferAllocationFailed(bufferSize)
+        }
+
         // Allocate new buffers first (outside lock to avoid blocking audio callbacks during allocation)
         var newBuffers: [MTLBuffer] = []
         for _ in 0..<3 {
@@ -485,10 +613,43 @@ extension ComputeContext {
             newBuffers.append(buffer)
         }
 
-        // Swap atomically under lock
+        // Try to swap buffers, or wait for in-flight accesses to complete
         os_unfair_lock_lock(&unfairLock)
+
+        if tripleBufferInFlightCount == 0 {
+            // Fast path: no buffers in flight, swap immediately
+            tripleBuffer = newBuffers
+            currentWriteIndex = 0
+            tripleBufferPendingClear = false
+            os_unfair_lock_unlock(&unfairLock)
+            return
+        }
+
+        // Slow path: need to wait for in-flight buffers to complete
+        // Create a semaphore that will be signaled when count reaches 0
+        let drainSemaphore = DispatchSemaphore(value: 0)
+        tripleBufferDrainSemaphore = drainSemaphore
+        waitingForDrain = true
+        os_unfair_lock_unlock(&unfairLock)
+
+        // Wait for buffers to drain with timeout
+        let result = drainSemaphore.wait(timeout: .now() + timeout)
+
+        // Clean up and attempt swap
+        os_unfair_lock_lock(&unfairLock)
+        waitingForDrain = false
+        tripleBufferDrainSemaphore = nil
+
+        if result == .timedOut {
+            os_unfair_lock_unlock(&unfairLock)
+            // Buffers are stuck in-flight (likely GPU command buffers still executing)
+            throw MetalAudioError.gpuTimeout(timeout)
+        }
+
+        // Semaphore was signaled, safe to swap
         tripleBuffer = newBuffers
         currentWriteIndex = 0
+        tripleBufferPendingClear = false
         os_unfair_lock_unlock(&unfairLock)
     }
 
@@ -496,6 +657,15 @@ extension ComputeContext {
     ///
     /// This closure-based API prevents TOCTOU race conditions by ensuring the lock
     /// is held while the buffer is being accessed.
+    ///
+    /// ## Scope of Protection
+    /// The in-flight tracking protects against `setupTripleBuffering()` deallocating
+    /// buffers **during the closure execution**. It does NOT track actual GPU command
+    /// buffer lifetime. Once the closure returns, buffers may be reallocated even if
+    /// a GPU command buffer still references them.
+    ///
+    /// For full GPU lifetime protection, ensure `setupTripleBuffering()` is only called
+    /// when no GPU command buffers are in flight (e.g., after waiting for completion).
     ///
     /// - Warning: **CRITICAL**: The buffer reference is ONLY valid within the closure scope.
     ///   Do NOT capture, store, or pass the buffer reference to async operations.
@@ -529,14 +699,22 @@ extension ComputeContext {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
         guard !tripleBuffer.isEmpty else { return nil }
-        return access(tripleBuffer[currentWriteIndex])
+        tripleBufferInFlightCount += 1
+        let result = access(tripleBuffer[currentWriteIndex])
+        tripleBufferInFlightCount -= 1
+        // Signal drain semaphore if someone is waiting and count reached 0
+        if tripleBufferInFlightCount == 0 && waitingForDrain {
+            tripleBufferDrainSemaphore?.signal()
+        }
+        return result
     }
 
     /// Access the buffer ready for CPU reading with lock held during access
     ///
     /// This closure-based API prevents TOCTOU race conditions by ensuring the lock
     /// is held while the buffer is being accessed. Use this from audio callbacks
-    /// to safely read GPU-produced data.
+    /// to safely read GPU-produced data. In-flight tracking prevents buffer
+    /// deallocation while the closure is executing.
     ///
     /// - Warning: **CRITICAL**: The buffer reference is ONLY valid within the closure scope.
     ///   Do NOT capture, store, or pass the buffer reference to async operations.
@@ -552,9 +730,23 @@ extension ComputeContext {
     public func withReadBuffer<T>(_ access: (MTLBuffer) -> T) -> T? {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
-        guard !tripleBuffer.isEmpty else { return nil }
-        let readIndex = (currentWriteIndex + 2) % 3
-        return access(tripleBuffer[readIndex])
+
+        let bufferCount = tripleBuffer.count
+        // Need at least 3 buffers for triple buffering to work correctly
+        guard bufferCount >= 3 else { return nil }
+
+        tripleBufferInFlightCount += 1
+        // Read index is the "ready" buffer - 2 positions ahead of write (wraps to 1 behind)
+        // For triple buffer: write=0→read=2, write=1→read=0, write=2→read=1
+        let readIndex = (currentWriteIndex + bufferCount - 1) % bufferCount
+        let result = access(tripleBuffer[readIndex])
+        tripleBufferInFlightCount -= 1
+
+        // Signal drain semaphore if someone is waiting and count reached 0
+        if tripleBufferInFlightCount == 0 && waitingForDrain {
+            tripleBufferDrainSemaphore?.signal()
+        }
+        return result
     }
 
     // REMOVED: writeBuffer and readBuffer properties
@@ -562,10 +754,65 @@ extension ComputeContext {
     // Use withWriteBuffer(_:) and withReadBuffer(_:) instead.
 
     /// Advance triple buffer indices (call after GPU write completes)
+    ///
+    /// Also checks if a deferred buffer clear is pending (from memory pressure)
+    /// and executes it when safe.
     public func advanceTripleBuffer() {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
-        currentWriteIndex = (currentWriteIndex + 1) % 3
+
+        // Use actual buffer count for safety (should always be 3, but defensive)
+        let bufferCount = tripleBuffer.count
+        if bufferCount > 0 {
+            currentWriteIndex = (currentWriteIndex + 1) % bufferCount
+        }
+
+        // Check for deferred clear from memory pressure
+        if tripleBufferPendingClear && tripleBufferInFlightCount == 0 {
+            tripleBuffer.removeAll()
+            currentWriteIndex = 0
+            tripleBufferPendingClear = false
+        }
+    }
+
+    /// Clear triple buffers to free memory (safe version)
+    ///
+    /// If buffers are currently in-flight (referenced by GPU command buffers),
+    /// the clear is deferred until all GPU operations complete.
+    ///
+    /// - Returns: `true` if buffers were cleared immediately, `false` if deferred
+    @discardableResult
+    public func clearTripleBuffering() -> Bool {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+
+        if tripleBufferInFlightCount == 0 {
+            tripleBuffer.removeAll()
+            currentWriteIndex = 0
+            tripleBufferPendingClear = false
+            return true
+        } else {
+            // Defer until in-flight count reaches 0
+            tripleBufferPendingClear = true
+            return false
+        }
+    }
+
+    /// Clear triple buffers immediately without safety checks
+    ///
+    /// - Warning: **UNSAFE** - This clears buffers even if GPU command buffers are still
+    ///   referencing them, which can cause use-after-free crashes. Only use this if you
+    ///   are certain no GPU operations are in flight, or in emergency shutdown scenarios
+    ///   where crashing is acceptable.
+    ///
+    /// For safe buffer clearing, use `clearTripleBuffering()` instead.
+    public func clearTripleBufferingUnsafe() {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+
+        tripleBuffer.removeAll()
+        currentWriteIndex = 0
+        tripleBufferPendingClear = false
     }
 }
 

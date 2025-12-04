@@ -218,7 +218,7 @@ final class ComputeContextMemoryPressureTests: XCTestCase {
     }
 
     func testComputeContextRespondsToMemoryPressure() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         // Register the context for memory pressure
         MemoryPressureObserver.shared.register(context)
@@ -244,7 +244,7 @@ final class ComputeContextMemoryPressureTests: XCTestCase {
     }
 
     func testComputeContextWarningDoesNotClearBuffers() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         // Set up triple buffering
         try context.setupTripleBuffering(bufferSize: 1024)
@@ -411,7 +411,7 @@ final class ComputeContextDirectMemoryPressureTests: XCTestCase {
     }
 
     func testDirectCriticalPressureResponse() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         // Setup triple buffering
         try context.setupTripleBuffering(bufferSize: 1024)
@@ -435,7 +435,7 @@ final class ComputeContextDirectMemoryPressureTests: XCTestCase {
     }
 
     func testDirectWarningPressureResponse() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         try context.setupTripleBuffering(bufferSize: 1024)
 
@@ -450,7 +450,7 @@ final class ComputeContextDirectMemoryPressureTests: XCTestCase {
     }
 
     func testDirectNormalPressureResponse() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         try context.setupTripleBuffering(bufferSize: 1024)
 
@@ -467,8 +467,8 @@ final class ComputeContextDirectMemoryPressureTests: XCTestCase {
         XCTAssertFalse(hasBuffer, "Buffer should remain cleared after normal (not auto-restored)")
     }
 
-    func testPressureWithoutTripleBuffering() {
-        let context = ComputeContext(device: device)
+    func testPressureWithoutTripleBuffering() throws {
+        let context = try ComputeContext(device: device)
 
         // Should not crash when no triple buffering is set up
         context.didReceiveMemoryPressure(level: .critical)
@@ -479,7 +479,7 @@ final class ComputeContextDirectMemoryPressureTests: XCTestCase {
     }
 
     func testRepeatedCriticalPressure() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         try context.setupTripleBuffering(bufferSize: 1024)
 

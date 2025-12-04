@@ -11,6 +11,7 @@ public struct HardwareProfile: Sendable {
     /// GPU family classification for Apple devices
     public enum GPUFamily: Int, Comparable, Sendable {
         case unknown = 0
+        case apple4 = 4      // A11 (2017) - limited SIMD, max ~192 threads
         case apple5 = 5      // A12 (2018)
         case apple6 = 6      // A13 (2019)
         case apple7 = 7      // A14, M1 (2020)
@@ -20,6 +21,22 @@ public struct HardwareProfile: Sendable {
 
         public static func < (lhs: GPUFamily, rhs: GPUFamily) -> Bool {
             lhs.rawValue < rhs.rawValue
+        }
+
+        /// Maximum recommended threads per threadgroup for this GPU family
+        /// A11 (apple4) has limited SIMD capabilities and lower thread limits
+        public var recommendedMaxThreads: Int {
+            switch self {
+            case .apple4: return 128  // A11 limited to ~192, use conservative 128
+            case .unknown: return 128 // Conservative default
+            default: return 256       // A12+ support full 256
+            }
+        }
+
+        /// Whether hardware DAZ (Denormals-Are-Zero) is supported
+        /// A11 and earlier require software denormal flushing
+        public var hasHardwareDAZ: Bool {
+            return self >= .apple5
         }
     }
 
@@ -36,6 +53,7 @@ public struct HardwareProfile: Sendable {
         case aProRecent    // A17 Pro, A16 Bionic
         case aRecent       // A15, A14
         case aOlder        // A12, A13
+        case aLegacy       // A11 (limited SIMD, needs denormal flushing)
 
         // Other
         case intelMac
@@ -57,6 +75,8 @@ public struct HardwareProfile: Sendable {
                 return 4096    // Standard recent iOS
             case .aOlder:
                 return 8192    // Older iOS, favor CPU
+            case .aLegacy:
+                return 16384   // A11, heavily favor CPU due to limited GPU
             case .intelMac, .unknown:
                 return 4096    // Conservative default
             }
@@ -150,6 +170,9 @@ public struct HardwareProfile: Sendable {
         if name.contains("a12") || name.contains("a13") {
             return .aOlder
         }
+        if name.contains("a11") {
+            return .aLegacy
+        }
 
         // Fallback based on GPU family
         switch family {
@@ -157,6 +180,7 @@ public struct HardwareProfile: Sendable {
         case .apple8: return .aRecent    // Could be M2 or A15
         case .apple7: return .aRecent    // Could be M1 or A14
         case .apple6, .apple5: return .aOlder
+        case .apple4: return .aLegacy    // A11
         case .mac2: return .intelMac
         case .unknown: return .unknown
         }
@@ -169,6 +193,7 @@ public struct HardwareProfile: Sendable {
         if device.supportsFamily(.apple7) { return .apple7 }
         if device.supportsFamily(.apple6) { return .apple6 }
         if device.supportsFamily(.apple5) { return .apple5 }
+        if device.supportsFamily(.apple4) { return .apple4 }
         if device.supportsFamily(.mac2) { return .mac2 }
         return .unknown
     }
@@ -205,9 +230,35 @@ public struct HardwareProfile: Sendable {
         if name.contains("a14") { return 40 }
         if name.contains("a13") { return 35 }
         if name.contains("a12") { return 30 }
+        if name.contains("a11") { return 25 }
 
         // Conservative default
         return 50
+    }
+
+    // MARK: - Threadgroup Sizing
+
+    /// Calculate optimal threadgroup size for 1D compute workloads
+    /// Considers device limits and workload size for efficiency
+    /// - Parameters:
+    ///   - workloadSize: Total number of threads needed (must be > 0)
+    ///   - preferredSize: Preferred threadgroup size (default 256, clamped to device limits)
+    /// - Returns: Optimal threadgroup width (minimum 32)
+    public func optimal1DThreadgroupSize(workloadSize: Int, preferredSize: Int = 256) -> Int {
+        // Guard against invalid input (prevents integer overflow in bit shift)
+        guard workloadSize > 0 else { return 32 }
+
+        // Clamp to device and GPU family limits
+        let maxThreads = min(maxThreadsPerThreadgroup, gpuFamily.recommendedMaxThreads)
+        let size = min(preferredSize, maxThreads)
+
+        // For small workloads, use smaller threadgroups to avoid wasted threads
+        if workloadSize < size {
+            // Round up to next power of 2 for efficiency
+            return max(32, 1 << (Int.bitWidth - (workloadSize - 1).leadingZeroBitCount))
+        }
+
+        return size
     }
 }
 

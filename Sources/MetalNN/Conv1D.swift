@@ -24,8 +24,17 @@ public final class Conv1D: NNLayer {
 
     // Threshold for using tiled kernel (based on cooperative loading benefits)
     private static let tiledKernelThreshold = 16
+    // Maximum kernel size for tiled kernel (must match MAX_KERNEL_SIZE in shader)
+    // Kernels larger than this will fall back to non-tiled implementation
+    private static let tiledMaxKernelSize = 128
     // Minimum output length for vec4 kernel benefit (amortize setup cost)
     private static let vec4MinOutputLength = 128
+
+    // Threadgroup memory requirements for tiled kernel:
+    // - sharedInput: (TILE_SIZE * 4 + MAX_KERNEL_SIZE) * 4 bytes = 1,536 bytes
+    // - sharedWeights: MAX_KERNEL_SIZE * 4 bytes = 512 bytes
+    // - Total: 2,048 bytes (2KB) - compatible with all Metal devices (minimum 16KB limit)
+    private static let tiledKernelThreadgroupMemory = 2048
 
     /// Initialize Conv1D layer
     /// - Parameters:
@@ -93,11 +102,29 @@ public final class Conv1D: NNLayer {
         )
 
         // Create tiled pipeline for large kernels (cooperative loading benefits)
+        // Only create if device supports required threadgroup memory (2KB, all devices support this)
         if kernelSize > Self.tiledKernelThreshold {
-            self.tiledPipeline = try device.makeComputePipeline(
+            let tiledPipeline = try device.makeComputePipeline(
                 source: Self.shaderSource,
                 functionName: "conv1d_forward_tiled"
             )
+
+            // Validate device supports required threadgroup memory
+            let maxThreadgroupMemory = tiledPipeline.maxTotalThreadsPerThreadgroup > 0
+                ? device.device.maxThreadgroupMemoryLength
+                : 0
+
+            if maxThreadgroupMemory >= Self.tiledKernelThreadgroupMemory {
+                self.tiledPipeline = tiledPipeline
+            } else {
+                // Fall back to basic kernel on devices with insufficient threadgroup memory
+                // This should never happen as all Metal devices support at least 16KB
+                #if DEBUG
+                print("[MetalAudio] Warning: Device threadgroup memory (\(maxThreadgroupMemory) bytes) " +
+                      "insufficient for tiled kernel (\(Self.tiledKernelThreadgroupMemory) bytes). Using basic kernel.")
+                #endif
+                self.tiledPipeline = nil
+            }
         }
 
         // Create vectorized pipeline for moderate kernel sizes and large outputs
@@ -110,8 +137,23 @@ public final class Conv1D: NNLayer {
     }
 
     /// Load weights from arrays
-    /// - Throws: `MetalAudioError.bufferSizeMismatch` if weight array sizes don't match
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if weight array sizes don't match,
+    ///           `MetalAudioError.invalidConfiguration` if weights contain NaN or Inf
     public func loadWeights(_ weightData: [Float], bias biasData: [Float]? = nil) throws {
+        // Validate weights for NaN/Inf
+        if let warning = try validateWeights(weightData, name: "Conv1D weights") {
+            #if DEBUG
+            print(warning)
+            #endif
+        }
+        if let biasData = biasData {
+            if let warning = try validateWeights(biasData, name: "Conv1D bias") {
+                #if DEBUG
+                print(warning)
+                #endif
+            }
+        }
+
         try weights.copy(from: weightData)
         if let biasData = biasData, let bias = bias {
             try bias.copy(from: biasData)
@@ -141,7 +183,10 @@ public final class Conv1D: NNLayer {
         let outputChannels = outputShape[0]
 
         // Use tiled kernel for large kernel sizes (1.5-2x faster due to cooperative loading)
-        if let tiledPipeline = tiledPipeline, kernelSize > Self.tiledKernelThreshold {
+        // Only use if kernel fits in shared memory (kernelSize <= tiledMaxKernelSize)
+        if let tiledPipeline = tiledPipeline,
+           kernelSize > Self.tiledKernelThreshold,
+           kernelSize <= Self.tiledMaxKernelSize {
             encoder.setComputePipelineState(tiledPipeline)
             encoder.setBuffer(input.buffer, offset: 0, index: 0)
             encoder.setBuffer(weights.buffer, offset: 0, index: 1)
@@ -277,10 +322,12 @@ public final class Conv1D: NNLayer {
     // Vectorized conv1d kernel - processes 4 output positions per thread using float4
     // 2-4x memory throughput improvement for moderate kernel sizes
     // Best for: kernel sizes 3-16, output lengths divisible by 4
+    /// Vectorized Conv1D kernel - processes 4 output positions per thread
+    /// Uses float4 internally for SIMD efficiency, but scalar output for alignment safety
     kernel void conv1d_forward_vec4(
         device const float* input [[buffer(0)]],
         device const float* weights [[buffer(1)]],
-        device float4* output [[buffer(2)]],  // Output as float4
+        device float* output [[buffer(2)]],  // Scalar output for alignment safety
         device const float* bias [[buffer(3)]],
         constant Conv1DParams& params [[buffer(4)]],
         uint2 gid [[thread_position_in_grid]]
@@ -295,6 +342,7 @@ public final class Conv1D: NNLayer {
         uint group = outChannel / outputChannelsPerGroup;
         uint groupInputStart = group * groupSize;
 
+        // Use float4 internally for SIMD efficiency
         float4 sum = float4(0.0f);
         uint weightBase = outChannel * groupSize * params.kernelSize;
 
@@ -327,18 +375,10 @@ public final class Conv1D: NNLayer {
             sum += float4(b);
         }
 
-        // Write output (vec4 aligned)
-        uint outIdx = outChannel * (params.outputLength / 4) + gid.x;
-
-        // Handle boundary: if not all 4 positions are valid, write individually
-        if (outPosBase + 3 < params.outputLength) {
-            output[outIdx] = sum;
-        } else {
-            device float* scalarOutput = (device float*)output;
-            uint scalarBase = outChannel * params.outputLength + outPosBase;
-            for (uint i = 0; i < 4 && outPosBase + i < params.outputLength; i++) {
-                scalarOutput[scalarBase + i] = sum[i];
-            }
+        // Write output using scalar addressing for correctness with any output length
+        uint scalarBase = outChannel * params.outputLength + outPosBase;
+        for (uint i = 0; i < 4 && outPosBase + i < params.outputLength; i++) {
+            output[scalarBase + i] = sum[i];
         }
     }
 
@@ -454,6 +494,7 @@ public final class ConvTranspose1D: NNLayer {
     private let stride: Int
     private let padding: Int
     private let outputPadding: Int
+    private let dilation: Int
 
     private var pipeline: MTLComputePipelineState?
 
@@ -466,6 +507,7 @@ public final class ConvTranspose1D: NNLayer {
     ///   - stride: Stride of convolution
     ///   - padding: Padding amount
     ///   - outputPadding: Additional padding for output
+    ///   - dilation: Dilation factor (default 1)
     ///   - useBias: Whether to use bias
     ///   - inputLength: Expected input sequence length
     ///   - weightInit: Weight initialization strategy (default: he)
@@ -477,6 +519,7 @@ public final class ConvTranspose1D: NNLayer {
         stride: Int = 1,
         padding: Int = 0,
         outputPadding: Int = 0,
+        dilation: Int = 1,
         useBias: Bool = true,
         inputLength: Int = 0,
         weightInit: WeightInitialization = .he
@@ -486,12 +529,14 @@ public final class ConvTranspose1D: NNLayer {
         self.stride = stride
         self.padding = padding
         self.outputPadding = outputPadding
+        self.dilation = dilation
 
         self.inputShape = [inputChannels, inputLength]
 
-        // Calculate output length for transposed conv
+        // Calculate output length for transposed conv using PyTorch's formula:
+        // H_out = (H_in - 1) * stride - 2 * padding + dilation * (kernel_size - 1) + output_padding + 1
         let outputLength = inputLength > 0 ?
-            (inputLength - 1) * stride - 2 * padding + kernelSize + outputPadding : 0
+            (inputLength - 1) * stride - 2 * padding + dilation * (kernelSize - 1) + outputPadding + 1 : 0
         self.outputShape = [outputChannels, outputLength]
 
         // Weights: [inputChannels, outputChannels, kernelSize] (note: reversed from Conv1D)
@@ -519,8 +564,23 @@ public final class ConvTranspose1D: NNLayer {
     }
 
     /// Load weights from arrays
-    /// - Throws: `MetalAudioError.bufferSizeMismatch` if weight array sizes don't match
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if weight array sizes don't match,
+    ///           `MetalAudioError.invalidConfiguration` if weights contain NaN or Inf
     public func loadWeights(_ weightData: [Float], bias biasData: [Float]? = nil) throws {
+        // Validate weights for NaN/Inf
+        if let warning = try validateWeights(weightData, name: "ConvTranspose1D weights") {
+            #if DEBUG
+            print(warning)
+            #endif
+        }
+        if let biasData = biasData {
+            if let warning = try validateWeights(biasData, name: "ConvTranspose1D bias") {
+                #if DEBUG
+                print(warning)
+                #endif
+            }
+        }
+
         try weights.copy(from: weightData)
         if let biasData = biasData, let bias = bias {
             try bias.copy(from: biasData)
@@ -732,7 +792,23 @@ public final class FusedConv1D: NNLayer {
     }
 
     /// Load weights from arrays
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if weight array sizes don't match,
+    ///           `MetalAudioError.invalidConfiguration` if weights contain NaN or Inf
     public func loadWeights(_ weightData: [Float], bias biasData: [Float]? = nil) throws {
+        // Validate weights for NaN/Inf
+        if let warning = try validateWeights(weightData, name: "FusedConv1D weights") {
+            #if DEBUG
+            print(warning)
+            #endif
+        }
+        if let biasData = biasData {
+            if let warning = try validateWeights(biasData, name: "FusedConv1D bias") {
+                #if DEBUG
+                print(warning)
+                #endif
+            }
+        }
+
         try weights.copy(from: weightData)
         if let biasData = biasData, let bias = bias {
             try bias.copy(from: biasData)

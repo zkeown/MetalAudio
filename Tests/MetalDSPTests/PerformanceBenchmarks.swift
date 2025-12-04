@@ -105,7 +105,7 @@ final class PerformanceBenchmarks: XCTestCase {
 
         measure {
             for _ in 0..<500 {
-                conv.process(input: input, output: &output)
+                try! conv.process(input: input, output: &output)
             }
         }
     }
@@ -114,12 +114,13 @@ final class PerformanceBenchmarks: XCTestCase {
         let conv = Convolution(device: device, mode: .fft)
         let input = (0..<4096).map { Float(sin(Double($0) * 0.1)) }
         let kernel = [Float](repeating: 1.0 / 512.0, count: 512)
-        try conv.setKernel(kernel)
+        // Specify expected input size to prevent circular convolution artifacts
+        try conv.setKernel(kernel, expectedInputSize: 4096)
         var output = [Float](repeating: 0, count: input.count + kernel.count - 1)
 
         measure {
             for _ in 0..<200 {
-                conv.process(input: input, output: &output)
+                try! conv.process(input: input, output: &output)
             }
         }
     }
@@ -147,7 +148,7 @@ final class PerformanceBenchmarks: XCTestCase {
         }
         try inputTensor.copy(from: inputData)
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         measure {
             for _ in 0..<100 {
@@ -179,7 +180,7 @@ final class PerformanceBenchmarks: XCTestCase {
         }
         try inputTensor.copy(from: inputData)
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         measure {
             for _ in 0..<100 {
@@ -211,7 +212,7 @@ final class PerformanceBenchmarks: XCTestCase {
         }
         try inputTensor.copy(from: inputData)
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         measure {
             for _ in 0..<50 {
@@ -241,7 +242,7 @@ final class PerformanceBenchmarks: XCTestCase {
         }
         try inputTensor.copy(from: inputData)
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         measure {
             for _ in 0..<25 {

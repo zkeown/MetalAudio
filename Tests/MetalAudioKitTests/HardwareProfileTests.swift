@@ -93,7 +93,7 @@ final class ToleranceConfigurationTests: XCTestCase {
         // Conservative should have safe, moderate values
         XCTAssertEqual(conservative.gpuCpuThreshold, 4096)
         XCTAssertEqual(conservative.maxInFlightBuffers, 3)
-        XCTAssertGreaterThanOrEqual(conservative.fftAccuracy, 1e-5)
+        XCTAssertEqual(conservative.fftAccuracy, 1e-6)  // Tightened from 1e-5
     }
 
     func testAggressiveConfiguration() {
@@ -325,9 +325,9 @@ final class ToleranceConfigurationPropertiesTests: XCTestCase {
         XCTAssertEqual(config.maxInFlightBuffers, 3)
         XCTAssertEqual(config.preferredLatencyFrames, 4)
         XCTAssertEqual(config.windowFloorEpsilon, 1e-8)
-        XCTAssertEqual(config.fftAccuracy, 1e-5)
-        XCTAssertEqual(config.convolutionAccuracy, 1e-5)
-        XCTAssertEqual(config.nnLayerAccuracy, 5e-4)
+        XCTAssertEqual(config.fftAccuracy, 1e-6)       // Tightened
+        XCTAssertEqual(config.convolutionAccuracy, 1e-6) // Tightened
+        XCTAssertEqual(config.nnLayerAccuracy, 1e-4)   // Tightened
     }
 
     func testAggressiveAllProperties() {
@@ -341,10 +341,10 @@ final class ToleranceConfigurationPropertiesTests: XCTestCase {
         XCTAssertEqual(config.optimalBufferSize, 1024)
         XCTAssertEqual(config.maxInFlightBuffers, 4)
         XCTAssertEqual(config.preferredLatencyFrames, 1)
-        XCTAssertEqual(config.windowFloorEpsilon, 1e-10)
-        XCTAssertEqual(config.fftAccuracy, 5e-7)
-        XCTAssertEqual(config.convolutionAccuracy, 5e-7)
-        XCTAssertEqual(config.nnLayerAccuracy, 5e-5)
+        XCTAssertEqual(config.windowFloorEpsilon, 1e-11)  // Tightened
+        XCTAssertEqual(config.fftAccuracy, 3e-7)          // Tightened
+        XCTAssertEqual(config.convolutionAccuracy, 2e-7)  // Tightened
+        XCTAssertEqual(config.nnLayerAccuracy, 2e-5)      // Tightened
     }
 
     func testOptimalForCurrentDevice() throws {
@@ -397,10 +397,10 @@ final class ToleranceConfigurationBranchTests: XCTestCase {
         XCTAssertEqual(config.gpuCpuThreshold, profile.deviceType.recommendedGpuCpuThreshold)
         XCTAssertEqual(config.minBufferSize, 64)
         XCTAssertEqual(config.preferredLatencyFrames, 2)
-        XCTAssertEqual(config.windowFloorEpsilon, 1e-9)
-        XCTAssertEqual(config.fftAccuracy, 1e-6)
-        XCTAssertEqual(config.convolutionAccuracy, 1e-6)
-        XCTAssertEqual(config.nnLayerAccuracy, 1e-4)
+        XCTAssertEqual(config.windowFloorEpsilon, 1e-10)   // Tightened
+        XCTAssertEqual(config.fftAccuracy, 5e-7)           // Tightened
+        XCTAssertEqual(config.convolutionAccuracy, 5e-7)   // Tightened
+        XCTAssertEqual(config.nnLayerAccuracy, 5e-5)       // Tightened
     }
 
     func testOptimalForApple8() {
@@ -412,7 +412,7 @@ final class ToleranceConfigurationBranchTests: XCTestCase {
         XCTAssertEqual(config.normalizationEpsilon, 1e-6)
         XCTAssertEqual(config.minBufferSize, 64)
         XCTAssertEqual(config.preferredLatencyFrames, 2)
-        XCTAssertEqual(config.fftAccuracy, 1e-6)
+        XCTAssertEqual(config.fftAccuracy, 5e-7)           // Tightened
     }
 
     func testOptimalForApple7() {
@@ -424,7 +424,7 @@ final class ToleranceConfigurationBranchTests: XCTestCase {
         XCTAssertEqual(config.normalizationEpsilon, 1e-5)
         XCTAssertEqual(config.minBufferSize, 128)
         XCTAssertEqual(config.preferredLatencyFrames, 3)
-        XCTAssertEqual(config.fftAccuracy, 1e-5)
+        XCTAssertEqual(config.fftAccuracy, 1e-6)           // Tightened
     }
 
     func testOptimalForApple5() {
@@ -438,7 +438,7 @@ final class ToleranceConfigurationBranchTests: XCTestCase {
         XCTAssertEqual(config.optimalBufferSize, 4096)
         XCTAssertEqual(config.maxInFlightBuffers, 3)
         XCTAssertEqual(config.preferredLatencyFrames, 4)
-        XCTAssertEqual(config.fftAccuracy, 1e-4)
+        XCTAssertEqual(config.fftAccuracy, 5e-5)           // Tightened
     }
 
     func testOptimalForApple6() {
@@ -448,7 +448,7 @@ final class ToleranceConfigurationBranchTests: XCTestCase {
         // apple5 and apple6 share the same case
         XCTAssertEqual(config.epsilon, 1e-7)
         XCTAssertEqual(config.float16Epsilon, 1e-3)
-        XCTAssertEqual(config.fftAccuracy, 1e-4)
+        XCTAssertEqual(config.fftAccuracy, 5e-5)           // Tightened
     }
 
     func testOptimalForMac2() {
@@ -458,7 +458,7 @@ final class ToleranceConfigurationBranchTests: XCTestCase {
         // mac2 falls through to conservative()
         XCTAssertEqual(config.gpuCpuThreshold, 4096)
         XCTAssertEqual(config.maxInFlightBuffers, 3)
-        XCTAssertEqual(config.fftAccuracy, 1e-5)
+        XCTAssertEqual(config.fftAccuracy, 1e-6)           // Tightened
     }
 
     func testOptimalForUnknown() {
@@ -468,7 +468,7 @@ final class ToleranceConfigurationBranchTests: XCTestCase {
         // unknown falls through to conservative()
         XCTAssertEqual(config.gpuCpuThreshold, 4096)
         XCTAssertEqual(config.maxInFlightBuffers, 3)
-        XCTAssertEqual(config.fftAccuracy, 1e-5)
+        XCTAssertEqual(config.fftAccuracy, 1e-6)           // Tightened
     }
 
     func testHighBandwidthDeviceGetsMoreBuffers() {

@@ -467,7 +467,7 @@ final class ExtendedSequentialModelTests: XCTestCase {
     }
 
     func testAddUnchecked() throws {
-        let model = Sequential(device: device)
+        let model = try Sequential(device: device)
 
         // Add layers without shape checking
         model.addUnchecked(try Linear(device: device, inputFeatures: 8, outputFeatures: 4))
@@ -480,7 +480,7 @@ final class ExtendedSequentialModelTests: XCTestCase {
     }
 
     func testLayerCount() throws {
-        let model = Sequential(device: device)
+        let model = try Sequential(device: device)
         XCTAssertEqual(model.layerCount, 0)
 
         try model.add(Linear(device: device, inputFeatures: 8, outputFeatures: 4))
@@ -494,7 +494,7 @@ final class ExtendedSequentialModelTests: XCTestCase {
     }
 
     func testLayerAtIndex() throws {
-        let model = Sequential(device: device)
+        let model = try Sequential(device: device)
 
         let linear1 = try Linear(device: device, inputFeatures: 8, outputFeatures: 4)
         let relu = try ReLU(device: device, inputShape: [4])
@@ -516,7 +516,7 @@ final class ExtendedSequentialModelTests: XCTestCase {
     }
 
     func testShapeMismatchError() throws {
-        let model = Sequential(device: device)
+        let model = try Sequential(device: device)
 
         try model.add(Linear(device: device, inputFeatures: 8, outputFeatures: 4))
 
@@ -530,7 +530,7 @@ final class ExtendedSequentialModelTests: XCTestCase {
     }
 
     func testEmptyModelError() throws {
-        let model = Sequential(device: device)
+        let model = try Sequential(device: device)
         let input = try Tensor(device: device, shape: [8])
 
         XCTAssertThrowsError(try model.forward(input)) { error in
@@ -542,7 +542,7 @@ final class ExtendedSequentialModelTests: XCTestCase {
     }
 
     func testForwardWithoutBuildError() throws {
-        let model = Sequential(device: device)
+        let model = try Sequential(device: device)
         try model.add(Linear(device: device, inputFeatures: 8, outputFeatures: 4))
 
         // Don't call build()
@@ -557,7 +557,7 @@ final class ExtendedSequentialModelTests: XCTestCase {
     }
 
     func testAsyncForward() throws {
-        let model = Sequential(device: device)
+        let model = try Sequential(device: device)
 
         try model.add(Linear(device: device, inputFeatures: 8, outputFeatures: 4))
         try model.add(ReLU(device: device, inputShape: [4]))
@@ -589,7 +589,7 @@ final class ExtendedSequentialModelTests: XCTestCase {
     }
 
     func testAsyncForwardEmptyModelError() throws {
-        let model = Sequential(device: device)
+        let model = try Sequential(device: device)
         let input = try Tensor(device: device, shape: [8])
 
         let expectation = self.expectation(description: "Async forward error")
@@ -612,7 +612,7 @@ final class ExtendedSequentialModelTests: XCTestCase {
     }
 
     func testAsyncForwardWithoutBuildError() throws {
-        let model = Sequential(device: device)
+        let model = try Sequential(device: device)
         try model.add(Linear(device: device, inputFeatures: 8, outputFeatures: 4))
         // Don't call build()
 
@@ -638,7 +638,7 @@ final class ExtendedSequentialModelTests: XCTestCase {
     }
 
     func testBuildAllocatesBuffers() throws {
-        let model = Sequential(device: device)
+        let model = try Sequential(device: device)
 
         try model.add(Linear(device: device, inputFeatures: 8, outputFeatures: 4))
         try model.add(ReLU(device: device, inputShape: [4]))
@@ -655,7 +655,7 @@ final class ExtendedSequentialModelTests: XCTestCase {
     }
 
     func testBuildRebuildClearsBuffers() throws {
-        let model = Sequential(device: device)
+        let model = try Sequential(device: device)
 
         try model.add(Linear(device: device, inputFeatures: 8, outputFeatures: 4))
 
@@ -670,7 +670,7 @@ final class ExtendedSequentialModelTests: XCTestCase {
     }
 
     func testShapeMismatchDimensionCount() throws {
-        let model = Sequential(device: device)
+        let model = try Sequential(device: device)
 
         // Linear outputs [4], but next layer expects [2, 2]
         try model.add(Linear(device: device, inputFeatures: 8, outputFeatures: 4))
@@ -701,7 +701,7 @@ final class ExtendedSequentialModelTests: XCTestCase {
     }
 
     func testForwardPassOutputShape() throws {
-        let model = Sequential(device: device)
+        let model = try Sequential(device: device)
 
         try model.add(Linear(device: device, inputFeatures: 10, outputFeatures: 8))
         try model.add(ReLU(device: device, inputShape: [8]))
@@ -721,7 +721,7 @@ final class ExtendedSequentialModelTests: XCTestCase {
     }
 
     func testForwardPassWithBatches() throws {
-        let model = Sequential(device: device)
+        let model = try Sequential(device: device)
 
         // Model with batch dimension
         try model.add(Linear(device: device, inputFeatures: 8, outputFeatures: 4))

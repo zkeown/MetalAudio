@@ -53,7 +53,8 @@ final class AudioBufferTests: XCTestCase {
         let testData: [Float] = [1.0, 2.0, 3.0, 4.0]
         try buffer.copyFromCPU(testData)
 
-        let contents = buffer.floatContents
+        // Use unchecked version - we know this is float32 format
+        let contents = buffer.floatContentsUnchecked
         XCTAssertEqual(contents[0], 1.0)
         XCTAssertEqual(contents[1], 2.0)
         XCTAssertEqual(contents[2], 3.0)
@@ -221,9 +222,18 @@ final class AudioBufferExtendedTests: XCTestCase {
         let testData: [Float] = [1.5, 2.5]
         try buffer.copyFromCPU(testData)
 
-        let ptr = buffer.floatContents
+        // Test safe optional version returns non-nil for float32 format
+        XCTAssertNotNil(buffer.floatContents, "floatContents should return non-nil for float32 format")
+
+        // Test unchecked version for actual values
+        let ptr = buffer.floatContentsUnchecked
         XCTAssertEqual(ptr[0], 1.5)
         XCTAssertEqual(ptr[1], 2.5)
+    }
+
+    func testFloatContentsReturnsNilForNonFloat32() throws {
+        let buffer = try AudioBuffer(device: device, sampleCount: 2, channelCount: 1, format: .float16)
+        XCTAssertNil(buffer.floatContents, "floatContents should return nil for float16 format")
     }
 
     // MARK: - Sample Format Tests
@@ -902,7 +912,7 @@ final class ComputeContextTests: XCTestCase {
     }
 
     func testSyncExecution() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         let result = try context.executeSync { encoder in
             // Just test that we can create encoder
@@ -913,7 +923,7 @@ final class ComputeContextTests: XCTestCase {
     }
 
     func testTripleBuffering() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.setupTripleBuffering(bufferSize: 1024)
 
         // Test write buffer access using safe closure-based API
@@ -942,7 +952,7 @@ final class ComputeContextTests: XCTestCase {
     }
 
     func testAsyncExecution() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         let expectation = self.expectation(description: "Async execution completed")
         var executionCompleted = false
@@ -963,7 +973,7 @@ final class ComputeContextTests: XCTestCase {
     }
 
     func testTryExecuteAsyncSuccess() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         var completionCalled = false
         let success = context.tryExecuteAsync({ encoder in
@@ -1039,7 +1049,7 @@ final class ComputeContextTests: XCTestCase {
     }
 
     func testTripleBufferCycle() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.setupTripleBuffering(bufferSize: 512)
 
         // Collect addresses for 6 advances (should cycle twice through all 3 buffers)
@@ -1063,7 +1073,7 @@ final class ComputeContextTests: XCTestCase {
     }
 
     func testContextWithoutTripleBuffering() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         // Don't set up triple buffering
 
         // withWriteBuffer should handle the case gracefully (noop)
@@ -1090,7 +1100,7 @@ final class ComputeContextExtendedTests: XCTestCase {
     // MARK: - Try Execute Sync Tests
 
     func testTryExecuteSyncSuccess() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         let result = try context.tryExecuteSync(timeout: 5.0) { encoder in
             return 123
@@ -1100,7 +1110,7 @@ final class ComputeContextExtendedTests: XCTestCase {
     }
 
     func testTryExecuteSyncReturnsValue() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         let result = try context.tryExecuteSync(timeout: 5.0) { encoder in
             return "test value"
@@ -1112,7 +1122,7 @@ final class ComputeContextExtendedTests: XCTestCase {
     // MARK: - Batch Execution Tests
 
     func testExecuteBatchSinglePass() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         var passExecuted = false
         try context.executeBatch([
@@ -1125,7 +1135,7 @@ final class ComputeContextExtendedTests: XCTestCase {
     }
 
     func testExecuteBatchMultiplePasses() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         var passesExecuted = 0
         try context.executeBatch([
@@ -1138,7 +1148,7 @@ final class ComputeContextExtendedTests: XCTestCase {
     }
 
     func testExecuteBatchWithTimeout() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         var executed = false
         try context.executeBatch([
@@ -1149,7 +1159,7 @@ final class ComputeContextExtendedTests: XCTestCase {
     }
 
     func testExecuteBatchEmptyArray() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         // Empty batch should not throw
         try context.executeBatch([])
@@ -1158,7 +1168,7 @@ final class ComputeContextExtendedTests: XCTestCase {
     // MARK: - Fence Synchronization Tests
 
     func testSignalFenceFromGPU() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         // Create a command buffer and signal a fence
         try context.executeSync { encoder in
@@ -1171,7 +1181,7 @@ final class ComputeContextExtendedTests: XCTestCase {
     }
 
     func testCurrentFenceValue() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         // Initial fence value
         let initialValue = context.currentFenceValue
@@ -1186,7 +1196,7 @@ final class ComputeContextExtendedTests: XCTestCase {
     }
 
     func testExecuteWithFenceCompletion() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         let expectation = self.expectation(description: "Execute with fence completed")
         var receivedFence: UInt64 = 0
@@ -1209,7 +1219,7 @@ final class ComputeContextExtendedTests: XCTestCase {
     }
 
     func testWaitForGPUSuccess() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         // Execute and get fence
         let expectation = self.expectation(description: "Got fence")
@@ -1234,7 +1244,7 @@ final class ComputeContextExtendedTests: XCTestCase {
     // MARK: - Max In-Flight Buffers Tests
 
     func testMaxInFlightBuffersDefault() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         // Should have a default value > 0
         XCTAssertGreaterThan(context.maxInFlightBuffers, 0,
@@ -1242,22 +1252,22 @@ final class ComputeContextExtendedTests: XCTestCase {
     }
 
     func testMaxInFlightBuffersCustom() throws {
-        let context = ComputeContext(device: device, maxInFlightBuffers: 2)
+        let context = try ComputeContext(device: device, maxInFlightBuffers: 2)
 
         XCTAssertEqual(context.maxInFlightBuffers, 2,
             "Custom maxInFlightBuffers should be respected")
     }
 
     func testDefaultGPUTimeout() {
-        // Verify the default timeout constant
-        XCTAssertEqual(ComputeContext.defaultGPUTimeout, 30.0,
-            "Default GPU timeout should be 30 seconds")
+        // Verify the default timeout constant (2 seconds for real-time audio responsiveness)
+        XCTAssertEqual(ComputeContext.defaultGPUTimeout, 2.0,
+            "Default GPU timeout should be 2 seconds for real-time audio")
     }
 
     // MARK: - withReadBuffer Tests
 
     func testWithReadBufferNilWhenNotSetup() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         // Without triple buffering setup, withReadBuffer should return nil
         let result: Int? = context.withReadBuffer { buffer in
@@ -1268,7 +1278,7 @@ final class ComputeContextExtendedTests: XCTestCase {
     }
 
     func testWithReadBufferReturnsValue() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.setupTripleBuffering(bufferSize: 1024)
 
         let result: Int? = context.withReadBuffer { buffer in
@@ -1281,7 +1291,7 @@ final class ComputeContextExtendedTests: XCTestCase {
     // MARK: - withWriteBuffer Tests
 
     func testWithWriteBufferNilWhenNotSetup() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         let result: Int? = context.withWriteBuffer { buffer in
             return 42
@@ -1291,7 +1301,7 @@ final class ComputeContextExtendedTests: XCTestCase {
     }
 
     func testWithWriteBufferReturnsValue() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.setupTripleBuffering(bufferSize: 1024)
 
         let result: Int? = context.withWriteBuffer { buffer in
@@ -1302,7 +1312,7 @@ final class ComputeContextExtendedTests: XCTestCase {
     }
 
     func testTripleBufferReadWriteDifferentBuffers() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.setupTripleBuffering(bufferSize: 1024)
 
         var writeAddress: UInt64 = 0
@@ -1333,7 +1343,7 @@ final class ComputeContextAsyncTests: XCTestCase {
     }
 
     func testAsyncExecuteWithReturn() async throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         let result = try await context.execute(timeout: 5.0) { encoder in
             return 42
@@ -1343,7 +1353,7 @@ final class ComputeContextAsyncTests: XCTestCase {
     }
 
     func testAsyncExecuteVoid() async throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         var executed = false
         try await context.execute { encoder in
@@ -1354,7 +1364,7 @@ final class ComputeContextAsyncTests: XCTestCase {
     }
 
     func testAsyncExecuteWithFence() async throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         let fence = try await context.executeWithFence { encoder in
             // Do some work
@@ -1364,7 +1374,7 @@ final class ComputeContextAsyncTests: XCTestCase {
     }
 
     func testAsyncPipelineSequential() async throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         var stagesExecuted = 0
         let pipeline = context.pipeline()
@@ -1378,7 +1388,7 @@ final class ComputeContextAsyncTests: XCTestCase {
     }
 
     func testAsyncPipelineWithProgress() async throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         var progressCalls: [(Int, Int)] = []
         let pipeline = context.pipeline()
@@ -1397,7 +1407,7 @@ final class ComputeContextAsyncTests: XCTestCase {
     }
 
     func testAsyncPipelineWithFence() async throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         let pipeline = context.pipeline()
             .then { encoder in }
@@ -1408,7 +1418,7 @@ final class ComputeContextAsyncTests: XCTestCase {
     }
 
     func testAsyncPipelineReset() async throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         var stagesExecuted = 0
         let pipeline = context.pipeline()
@@ -1426,7 +1436,7 @@ final class ComputeContextAsyncTests: XCTestCase {
     }
 
     func testAsyncPipelineEmpty() async throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         let pipeline = context.pipeline()
 
@@ -1435,7 +1445,7 @@ final class ComputeContextAsyncTests: XCTestCase {
     }
 
     func testGPUPipelineStage() async throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         var executed = false
         let stage = GPUPipelineStage { encoder in
@@ -1449,7 +1459,7 @@ final class ComputeContextAsyncTests: XCTestCase {
     }
 
     func testStreamProcess() async throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         var chunksProcessed = 0
         var completedChunks: [Int] = []
@@ -1472,7 +1482,7 @@ final class ComputeContextAsyncTests: XCTestCase {
     }
 
     func testStreamProcessZeroChunks() async throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         var setupCalled = false
         try await context.streamProcess(
@@ -1636,7 +1646,7 @@ final class ComputeContextParallelTests: XCTestCase {
     }
 
     func testExecuteParallelReturnsResultsInOrder() async throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         let operations: [(MTLComputeCommandEncoder) throws -> Int] = [
             { _ in return 10 },
@@ -1653,7 +1663,7 @@ final class ComputeContextParallelTests: XCTestCase {
     }
 
     func testExecuteParallelVoid() async throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         var executionCount = 0
         let lock = NSLock()
@@ -1670,7 +1680,7 @@ final class ComputeContextParallelTests: XCTestCase {
     }
 
     func testExecuteParallelEmpty() async throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         let operations: [(MTLComputeCommandEncoder) throws -> Int] = []
 
@@ -1680,7 +1690,7 @@ final class ComputeContextParallelTests: XCTestCase {
     }
 
     func testExecuteParallelSingleOperation() async throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         let operations: [(MTLComputeCommandEncoder) throws -> String] = [
             { _ in return "single" }
@@ -1705,7 +1715,7 @@ final class ComputeContextFenceAdvancedTests: XCTestCase {
     }
 
     func testFenceValuesMonotonicallyIncrease() async throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         var fenceValues: [UInt64] = []
 
@@ -1724,7 +1734,7 @@ final class ComputeContextFenceAdvancedTests: XCTestCase {
     }
 
     func testWaitForGPUTimeout() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         // Request a fence value far in the future that will never be signaled
         let futureFence = context.currentFenceValue + 1000
@@ -1739,7 +1749,7 @@ final class ComputeContextFenceAdvancedTests: XCTestCase {
     }
 
     func testWaitForGPUFastPathAlreadySignaled() async throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         // Execute and get fence
         let fence = try await context.executeWithFence { encoder in }
@@ -1757,7 +1767,7 @@ final class ComputeContextFenceAdvancedTests: XCTestCase {
     }
 
     func testWaitOnGPUDoesNotCrash() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         // Just verify this doesn't crash - hard to test actual GPU-side wait
         try context.executeSync { encoder in
@@ -2199,7 +2209,7 @@ final class ComputeContextEdgeCaseTests: XCTestCase {
         // Test that errors during encoding are properly propagated
         // Note: We can't easily test encoder errors without crashing,
         // so we test that valid encoding works correctly
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         let result = try context.executeSync { encoder in
             // Valid encoding that doesn't throw
@@ -2210,7 +2220,7 @@ final class ComputeContextEdgeCaseTests: XCTestCase {
     }
 
     func testTripleBufferSetupMultipleTimes() throws {
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         // Setup triple buffering multiple times
         try context.setupTripleBuffering(bufferSize: 512)
@@ -2227,7 +2237,7 @@ final class ComputeContextEdgeCaseTests: XCTestCase {
 
     func testAsyncCompletionCalled() throws {
         // Test that async completion is properly called on success
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         let expectation = self.expectation(description: "Completion called")
         var completionCalled = false

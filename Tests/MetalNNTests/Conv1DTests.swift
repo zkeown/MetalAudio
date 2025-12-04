@@ -9,6 +9,11 @@ final class Conv1DTests: XCTestCase {
 
     var device: AudioDevice!
 
+    /// Hardware-adaptive tolerance for convolution tests
+    var tolerance: Float {
+        ToleranceProvider.shared.tolerances.convolutionAccuracy
+    }
+
     override func setUpWithError() throws {
         device = try AudioDevice()
     }
@@ -84,7 +89,7 @@ final class Conv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [outputChannels, inputLength])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -93,8 +98,8 @@ final class Conv1DTests: XCTestCase {
         let expected: [Float] = [1.0, 2.0, 3.0, 4.0, 5.0]
 
         for i in 0..<expected.count {
-            XCTAssertEqual(result[i], expected[i], accuracy: 1e-4,
-                "Identity kernel failed at index \(i): got \(result[i]), expected \(expected[i])")
+            XCTAssertEqual(result[i], expected[i], accuracy: tolerance,
+                "Identity kernel failed at index \(i): got \(result[i]), expected \(expected[i]) (tolerance: \(tolerance))")
         }
     }
 
@@ -124,7 +129,7 @@ final class Conv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [outputChannels, inputLength])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -166,7 +171,7 @@ final class Conv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [outputChannels, inputLength])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -215,7 +220,7 @@ final class Conv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [outputChannels, inputLength])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -262,7 +267,7 @@ final class Conv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [1, 3])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -309,7 +314,7 @@ final class Conv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [outputChannels, inputLength])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -352,7 +357,7 @@ final class Conv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [1, 1])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -390,7 +395,7 @@ final class Conv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [1, 4])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -424,7 +429,7 @@ final class Conv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [2, 5])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -495,7 +500,7 @@ final class ConvTranspose1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [1, 6])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -540,7 +545,7 @@ final class ConvTranspose1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [outputChannels, inputLength])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -582,7 +587,7 @@ final class ConvTranspose1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [outputChannels, inputLength])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -616,7 +621,7 @@ final class ConvTranspose1DTests: XCTestCase {
         let outputLength = conv.outputShape[1]
         let output = try Tensor(device: device, shape: [2, outputLength])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -679,7 +684,7 @@ final class FusedConv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [outputChannels, inputLength])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -719,7 +724,7 @@ final class FusedConv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [outputChannels, inputLength])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -759,7 +764,7 @@ final class FusedConv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [outputChannels, inputLength])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -795,7 +800,7 @@ final class FusedConv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [outputChannels, inputLength])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -832,7 +837,7 @@ final class FusedConv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [outputChannels, inputLength])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -874,7 +879,7 @@ final class FusedConv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [outputChannels, inputLength])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forwardWithResidual(input: input, residual: residual, output: output, encoder: encoder)
         }
@@ -914,7 +919,7 @@ final class FusedConv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [outputChannels, inputLength])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -1003,7 +1008,7 @@ final class FusedConv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [outputChannels, inputLength])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -1074,7 +1079,7 @@ final class HalfConv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [outputChannels, inputLength], dataType: .float16)
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -1112,7 +1117,7 @@ final class HalfConv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [outputChannels, inputLength], dataType: .float16)
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -1156,7 +1161,7 @@ final class HalfConv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [outputChannels, inputLength], dataType: .float16)
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }
@@ -1242,7 +1247,7 @@ final class HalfConv1DTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [outputChannels, inputLength], dataType: .float16)
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try conv.forward(input: input, output: output, encoder: encoder)
         }

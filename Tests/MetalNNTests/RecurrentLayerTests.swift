@@ -9,6 +9,16 @@ final class LSTMTests: XCTestCase {
 
     var device: AudioDevice!
 
+    /// Hardware-adaptive tolerance for recurrent layer tests
+    var tolerance: Float {
+        ToleranceProvider.shared.tolerances.nnLayerAccuracy
+    }
+
+    /// Looser tolerance for recurrent layers (sequential dependencies accumulate error)
+    var recurrentTolerance: Float {
+        tolerance * 100  // 100x looser for recurrent
+    }
+
     override func setUpWithError() throws {
         device = try AudioDevice()
     }
@@ -92,7 +102,7 @@ final class LSTMTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [sequenceLength, hiddenSize])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try lstm.forward(input: input, output: output, encoder: encoder)
         }
@@ -103,7 +113,7 @@ final class LSTMTests: XCTestCase {
         // c = f*c + i*g = 0.5*0 + 0.5*0 = 0
         // h = o * tanh(c) = 0.5 * tanh(0) = 0
         for i in 0..<result.count {
-            XCTAssertEqual(result[i], 0.0, accuracy: 1e-5, "Expected zero output at index \(i)")
+            XCTAssertEqual(result[i], 0.0, accuracy: tolerance, "Expected zero output at index \(i) (tolerance: \(tolerance))")
         }
     }
 
@@ -152,7 +162,7 @@ final class LSTMTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [sequenceLength, hiddenSize])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try lstm.forward(input: input, output: output, encoder: encoder)
         }
@@ -188,7 +198,7 @@ final class LSTMTests: XCTestCase {
         try input.copy(from: [Float](repeating: 1.0, count: 12))
         let output = try Tensor(device: device, shape: [3, 2])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         // First pass
         try context.executeSync { encoder in
@@ -259,7 +269,7 @@ final class LSTMTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [sequenceLength, hiddenSize * 2])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try lstm.forward(input: input, output: output, encoder: encoder)
         }
@@ -292,7 +302,7 @@ final class LSTMTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [1, 2])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try lstm.forward(input: input, output: output, encoder: encoder)
         }
@@ -329,7 +339,7 @@ final class LSTMTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [16, 128])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try lstm.forward(input: input, output: output, encoder: encoder)
         }
@@ -369,7 +379,7 @@ final class LSTMTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [100, 1])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try lstm.forward(input: input, output: output, encoder: encoder)
         }
@@ -453,7 +463,7 @@ final class GRUTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [sequenceLength, hiddenSize])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try gru.forward(input: input, output: output, encoder: encoder)
         }
@@ -486,7 +496,7 @@ final class GRUTests: XCTestCase {
         try input.copy(from: [Float](repeating: 1.0, count: 12))
         let output = try Tensor(device: device, shape: [3, 2])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         // First pass
         try context.executeSync { encoder in
@@ -535,7 +545,7 @@ final class GRUTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [sequenceLength, hiddenSize * 2])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try gru.forward(input: input, output: output, encoder: encoder)
         }
@@ -597,7 +607,7 @@ final class GRUTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [10, 2])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try gru.forward(input: input, output: output, encoder: encoder)
         }

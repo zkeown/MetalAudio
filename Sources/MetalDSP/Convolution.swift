@@ -2,6 +2,49 @@ import Metal
 import MetalPerformanceShaders
 import Accelerate
 import MetalAudioKit
+import os.lock
+
+/// Errors specific to convolution operations
+public enum ConvolutionError: Error, LocalizedError {
+    /// Input buffer exceeds the expected size for FFT convolution, which would cause
+    /// circular convolution artifacts (wrap-around distortion)
+    case inputSizeMismatch(inputSize: Int, expectedMaxSize: Int, fftSize: Int)
+
+    /// Convolution kernel has not been configured
+    case kernelNotConfigured
+
+    /// Kernel passed to setKernel() is empty
+    case emptyKernel
+
+    /// FFT resources failed to initialize (internal error)
+    case fftNotInitialized
+
+    /// Partitioned convolution is in an invalid state
+    case invalidPartitionState(reason: String)
+
+    /// Output size would overflow (input + kernel too large)
+    case outputSizeOverflow(inputSize: Int, kernelSize: Int)
+
+    public var errorDescription: String? {
+        switch self {
+        case .inputSizeMismatch(let inputSize, let expectedMaxSize, let fftSize):
+            return "Convolution input size \(inputSize) exceeds expected maximum \(expectedMaxSize) " +
+                "(FFT size: \(fftSize)). This would cause circular convolution artifacts. " +
+                "Call setKernel() with a larger expectedInputSize parameter."
+        case .kernelNotConfigured:
+            return "Convolution kernel has not been set. Call setKernel() before processing."
+        case .emptyKernel:
+            return "Convolution kernel cannot be empty. Provide at least one sample."
+        case .fftNotInitialized:
+            return "FFT resources failed to initialize. This may indicate a Metal device error."
+        case .invalidPartitionState(let reason):
+            return "Partitioned convolution is in an invalid state: \(reason)"
+        case .outputSizeOverflow(let inputSize, let kernelSize):
+            return "Output size would overflow: input (\(inputSize)) + kernel (\(kernelSize)) - 1 exceeds Int.max. " +
+                "Use smaller buffers or process in chunks."
+        }
+    }
+}
 
 /// GPU-accelerated convolution for audio processing
 /// Supports real-time partitioned convolution for long impulse responses
@@ -22,9 +65,32 @@ import MetalAudioKit
 /// - **Partitioned**: Long kernels (> 4096 samples). Real-time reverb, convolution effects.
 ///
 /// ## Thread Safety
-/// `Convolution` is NOT thread-safe. Partitioned convolution mode maintains
-/// internal state (input ring buffer, write indices) that is modified during
-/// processing. For concurrent convolution operations, use separate instances.
+/// `Convolution` is NOT thread-safe. For concurrent convolution operations,
+/// create separate `Convolution` instances (one per thread).
+///
+/// **Why not thread-safe:**
+/// - **Partitioned mode**: Maintains ring buffer (`inputBuffer`) and write index
+///   (`inputWriteIndex`) modified on every `process()` call
+/// - **All modes**: Share working buffers (`workInputReal`, `workAccumReal`, etc.)
+///   that are mutated during processing
+/// - **reset()**: Clears internal state without synchronization
+///
+/// **Recommended patterns:**
+/// ```swift
+/// // Per-thread instances
+/// let convolutions = (0..<threadCount).map { _ in
+///     Convolution(device: device, mode: .partitioned(blockSize: 4096))
+/// }
+///
+/// // Thread-local processing (note: process() throws in FFT mode)
+/// DispatchQueue.concurrentPerform(iterations: batches) { idx in
+///     do {
+///         try convolutions[idx].process(input: inputs[idx], output: &outputs[idx])
+///     } catch {
+///         // Handle ConvolutionError.inputSizeMismatch in FFT mode
+///     }
+/// }
+/// ```
 public final class Convolution {
 
     /// Convolution mode
@@ -46,6 +112,7 @@ public final class Convolution {
     private var fftSize: Int = 0
     private var fft: FFT?
     private var inverseFft: FFT?  // Cached inverse FFT to avoid per-process allocation
+    private var expectedInputSize: Int = 0  // Maximum input size for correct linear convolution
 
     // For partitioned convolution
     private var partitions: [(real: [Float], imag: [Float])] = []
@@ -54,6 +121,7 @@ public final class Convolution {
     private var partitionCount: Int = 0
     private var inputWriteIndex: Int = 0
     private var partitionOffsets: [Int] = []  // Pre-computed: offsets[p] = (partitionCount - p) % partitionCount
+    private var stateLock = os_unfair_lock()  // Protects inputBuffer and inputWriteIndex modifications
 
     // For direct convolution
     private var kernel: [Float] = []
@@ -79,8 +147,19 @@ public final class Convolution {
     }
 
     /// Set the convolution kernel (impulse response)
-    /// - Parameter kernel: Impulse response samples
-    public func setKernel(_ kernel: [Float]) throws {
+    /// - Parameters:
+    ///   - kernel: Impulse response samples (must not be empty)
+    ///   - expectedInputSize: Expected input buffer size for FFT mode. If nil, defaults to kernel length.
+    ///     For correct linear convolution, FFT size must be ≥ input + kernel - 1.
+    ///     If actual input exceeds this size, results will wrap (circular convolution artifacts).
+    /// - Throws: `ConvolutionError.emptyKernel` if kernel is empty
+    public func setKernel(_ kernel: [Float], expectedInputSize: Int? = nil) throws {
+        // Validate kernel at configuration time rather than process time
+        // This provides clearer error messages and fails fast
+        guard !kernel.isEmpty else {
+            throw ConvolutionError.emptyKernel
+        }
+
         self.kernel = kernel
 
         switch mode {
@@ -89,16 +168,20 @@ public final class Convolution {
             break
 
         case .fft:
-            try setupFFTConvolution(kernel)
+            try setupFFTConvolution(kernel, expectedInputSize: expectedInputSize ?? kernel.count)
 
         case .partitioned(let blockSize):
             try setupPartitionedConvolution(kernel, blockSize: blockSize)
         }
     }
 
-    private func setupFFTConvolution(_ kernel: [Float]) throws {
-        // FFT size must be at least kernel + input - 1, rounded to power of 2
-        let minSize = kernel.count * 2
+    private func setupFFTConvolution(_ kernel: [Float], expectedInputSize inputSize: Int) throws {
+        // Store expected input size for runtime validation
+        self.expectedInputSize = inputSize
+
+        // FFT size must be at least input + kernel - 1 for correct linear convolution
+        // Using smaller FFT causes circular convolution artifacts (wrap-around)
+        let minSize = inputSize + kernel.count - 1
         fftSize = 1 << Int(ceil(log2(Double(minSize))))
 
         fft = try FFT(device: device, config: .init(size: fftSize, windowType: .none))
@@ -119,11 +202,16 @@ public final class Convolution {
         kernelFFTImag = [Float](repeating: 0, count: fftSize)
 
         paddedKernel.withUnsafeBufferPointer { ptr in
+            guard let baseAddress = ptr.baseAddress,
+                  var outReal = kernelFFTReal,
+                  var outImag = kernelFFTImag else { return }
             fft?.forward(
-                input: ptr.baseAddress!,
-                outputReal: &kernelFFTReal!,
-                outputImag: &kernelFFTImag!
+                input: baseAddress,
+                outputReal: &outReal,
+                outputImag: &outImag
             )
+            kernelFFTReal = outReal
+            kernelFFTImag = outImag
         }
     }
 
@@ -167,7 +255,8 @@ public final class Convolution {
             var imag = [Float](repeating: 0, count: fftSize)
 
             block.withUnsafeBufferPointer { ptr in
-                fft?.forward(input: ptr.baseAddress!, outputReal: &real, outputImag: &imag)
+                guard let baseAddress = ptr.baseAddress else { return }
+                fft?.forward(input: baseAddress, outputReal: &real, outputImag: &imag)
             }
 
             partitions.append((real: real, imag: imag))
@@ -189,14 +278,29 @@ public final class Convolution {
     /// - Parameters:
     ///   - input: Input audio samples
     ///   - output: Output buffer (will be resized to input + kernel - 1 for full convolution)
-    public func process(input: [Float], output: inout [Float]) {
+    /// - Throws: `ConvolutionError.inputSizeMismatch` if input exceeds expected size in FFT mode
+    ///
+    /// ## FFT Mode Input Size Validation
+    /// In FFT mode, input size is validated against `expectedInputSize` set in `setKernel()`.
+    /// If input exceeds this size, an error is thrown to prevent circular convolution artifacts
+    /// (wrap-around distortion that causes audible glitches). To process larger inputs:
+    /// - Call `setKernel(_:expectedInputSize:)` with a larger `expectedInputSize`, or
+    /// - Use `.partitioned` mode for streaming/real-time processing
+    public func process(input: [Float], output: inout [Float]) throws {
+        // Handle empty input gracefully - return empty output
+        // This is a valid edge case (e.g., audio stream end, zero-length buffer)
+        guard !input.isEmpty else {
+            output = []
+            return
+        }
+
         switch mode {
         case .direct:
-            processDirectConvolution(input: input, output: &output)
+            try processDirectConvolution(input: input, output: &output)
         case .fft:
-            processFFTConvolution(input: input, output: &output)
+            try processFFTConvolution(input: input, output: &output)
         case .partitioned:
-            processPartitionedConvolution(input: input, output: &output)
+            try processPartitionedConvolution(input: input, output: &output)
         }
     }
 
@@ -218,8 +322,23 @@ public final class Convolution {
         return inputSize + kernel.count - 1
     }
 
-    private func processDirectConvolution(input: [Float], output: inout [Float]) {
-        guard !kernel.isEmpty else { return }
+    /// Maximum input size for correct linear convolution (FFT mode only)
+    ///
+    /// In FFT mode, inputs larger than this value cause circular convolution artifacts.
+    /// Returns 0 for direct mode (no limit) or partitioned mode (processes blocks).
+    public var maxInputSize: Int {
+        switch mode {
+        case .fft:
+            return expectedInputSize
+        case .direct, .partitioned:
+            return 0  // No practical limit
+        }
+    }
+
+    private func processDirectConvolution(input: [Float], output: inout [Float]) throws {
+        guard !kernel.isEmpty else {
+            throw ConvolutionError.kernelNotConfigured
+        }
 
         let outputSize = input.count + kernel.count - 1
         if output.count < outputSize {
@@ -244,11 +363,24 @@ public final class Convolution {
         )
     }
 
-    private func processFFTConvolution(input: [Float], output: inout [Float]) {
+    private func processFFTConvolution(input: [Float], output: inout [Float]) throws {
         guard let fft = fft,
               let inverseFft = inverseFft,
               let kernelReal = kernelFFTReal,
-              let kernelImag = kernelFFTImag else { return }
+              let kernelImag = kernelFFTImag else {
+            throw ConvolutionError.fftNotInitialized
+        }
+
+        // Validate input size to prevent circular convolution artifacts
+        // If input exceeds expectedInputSize, FFT output will wrap around causing audible artifacts
+        // This is a hard error - silent truncation would produce incorrect audio output
+        guard input.count <= expectedInputSize else {
+            throw ConvolutionError.inputSizeMismatch(
+                inputSize: input.count,
+                expectedMaxSize: expectedInputSize,
+                fftSize: fftSize
+            )
+        }
 
         // Zero-pad input using pre-allocated buffer (no allocation in hot path)
         let copyCount = min(input.count, fftSize)
@@ -279,13 +411,23 @@ public final class Convolution {
         inverseFft.inverse(inputReal: workOutputReal, inputImag: workOutputImag, output: &output)
     }
 
-    private func processPartitionedConvolution(input: [Float], output: inout [Float]) {
-        guard let fft = fft, let inverseFft = inverseFft, !partitions.isEmpty else { return }
-        guard partitionCount > 0, inputWriteIndex < partitionCount else { return }
+    private func processPartitionedConvolution(input: [Float], output: inout [Float]) throws {
+        guard let fft = fft, let inverseFft = inverseFft, !partitions.isEmpty else {
+            throw ConvolutionError.fftNotInitialized
+        }
+        guard partitionCount > 0, inputWriteIndex < partitionCount else {
+            throw ConvolutionError.invalidPartitionState(
+                reason: "partitionCount=\(partitionCount), inputWriteIndex=\(inputWriteIndex)"
+            )
+        }
 
         // Full convolution output size: input + kernel - 1
         // We need to process enough blocks to capture the entire convolution tail
-        let fullOutputSize = input.count + kernel.count - 1
+        // Check for overflow before computing fullOutputSize
+        let (fullOutputSize, overflow) = input.count.addingReportingOverflow(kernel.count - 1)
+        guard !overflow else {
+            throw ConvolutionError.outputSizeOverflow(inputSize: input.count, kernelSize: kernel.count)
+        }
         let totalBlocks = (fullOutputSize + blockSize - 1) / blockSize
 
         // Ensure output buffer is large enough for full convolution
@@ -322,10 +464,14 @@ public final class Convolution {
             }
 
             // Store in ring buffer (interleaved real/imag)
+            // Lock protects concurrent access to inputBuffer and inputWriteIndex
+            os_unfair_lock_lock(&stateLock)
+            let currentWriteIndex = inputWriteIndex
             for i in 0..<fftSize {
-                inputBuffer[inputWriteIndex][i * 2] = workInputReal[i]
-                inputBuffer[inputWriteIndex][i * 2 + 1] = workInputImag[i]
+                inputBuffer[currentWriteIndex][i * 2] = workInputReal[i]
+                inputBuffer[currentWriteIndex][i * 2 + 1] = workInputImag[i]
             }
+            os_unfair_lock_unlock(&stateLock)
 
             // Reset accumulators (using pre-allocated buffers)
             for i in 0..<fftSize {
@@ -336,8 +482,10 @@ public final class Convolution {
             // Accumulate convolution across all partitions
             // Using pre-computed offsets with conditional subtraction instead of modulo
             // (conditional is ~20x faster than integer division for modulo)
+            // Lock protects reading from inputBuffer which may be modified by memory pressure handler
+            os_unfair_lock_lock(&stateLock)
             for p in 0..<partitionCount {
-                var bufferIdx = inputWriteIndex + partitionOffsets[p]
+                var bufferIdx = currentWriteIndex + partitionOffsets[p]
                 if bufferIdx >= partitionCount { bufferIdx -= partitionCount }
                 let partition = partitions[p]
 
@@ -349,6 +497,7 @@ public final class Convolution {
                     workAccumImag[i] += inReal * partition.imag[i] + inImag * partition.real[i]
                 }
             }
+            os_unfair_lock_unlock(&stateLock)
 
             // Inverse FFT using cached instance and pre-allocated output buffer
             inverseFft.inverse(inputReal: workAccumReal, inputImag: workAccumImag, output: &workOutputBlock)
@@ -367,14 +516,19 @@ public final class Convolution {
                 }
             }
 
+            // Update write index atomically
+            os_unfair_lock_lock(&stateLock)
             inputWriteIndex = (inputWriteIndex + 1) % partitionCount
+            os_unfair_lock_unlock(&stateLock)
         }
     }
 
     /// Reset internal state (for partitioned convolution)
     public func reset() {
+        os_unfair_lock_lock(&stateLock)
         inputBuffer = [[Float]](repeating: [Float](repeating: 0, count: fftSize * 2), count: partitionCount)
         inputWriteIndex = 0
+        os_unfair_lock_unlock(&stateLock)
     }
 }
 
@@ -395,5 +549,40 @@ extension Convolution {
             inputFeatureChannels: inputChannels,
             outputFeatureChannels: outputChannels
         )
+    }
+
+    /// Release FFT resources to reduce memory footprint
+    ///
+    /// For partitioned convolution, this releases the FFT instances.
+    /// The partitions array (kernel data) is kept since it's needed for processing.
+    /// Call this when convolution won't be used for a while.
+    public func releaseFFTResources() {
+        fft?.releaseGPUResources()
+        inverseFft?.releaseGPUResources()
+    }
+}
+
+// MARK: - Memory Pressure Integration
+
+extension Convolution: MemoryPressureResponder {
+    public func didReceiveMemoryPressure(level: MemoryPressureLevel) {
+        switch level {
+        case .critical:
+            // Release FFT GPU resources
+            releaseFFTResources()
+            // Clear input buffer ring buffer to save memory (will be reallocated on next process)
+            // Lock protects against concurrent access from process() method
+            os_unfair_lock_lock(&stateLock)
+            if !partitions.isEmpty {
+                inputBuffer = [[Float]](repeating: [], count: partitionCount)
+            }
+            os_unfair_lock_unlock(&stateLock)
+        case .warning:
+            // Release just FFT GPU resources
+            releaseFFTResources()
+        case .normal:
+            // Pressure relieved - no action needed
+            break
+        }
     }
 }

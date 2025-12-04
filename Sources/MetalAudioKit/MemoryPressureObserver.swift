@@ -1,5 +1,8 @@
 import Foundation
 import Metal
+#if os(iOS) || os(tvOS)
+import UIKit
+#endif
 
 /// Protocol for components that can respond to memory pressure events
 public protocol MemoryPressureResponder: AnyObject {
@@ -9,12 +12,27 @@ public protocol MemoryPressureResponder: AnyObject {
 }
 
 /// Memory pressure severity levels
+///
+/// ## Platform Differences
+///
+/// **macOS**: Full support for all three levels via `dispatch_source_memorypressure`.
+/// The system reports `.warning`, `.critical`, and `.normal` transitions.
+///
+/// **iOS/tvOS**: Only `.warning` is supported via `UIApplication.didReceiveMemoryWarningNotification`.
+/// iOS does not distinguish between warning and critical levels - by the time the app
+/// receives a memory warning, the situation may already be critical. iOS also does not
+/// notify when pressure returns to normal (the app should assume pressure persists).
+///
+/// For iOS, treat `.warning` as potentially critical and release as much memory as
+/// possible to avoid jetsam termination.
 public enum MemoryPressureLevel {
     /// Low memory pressure - consider releasing caches
     case warning
     /// Critical memory pressure - release as much as possible
+    /// - Note: iOS never reports this level; `.warning` is the only notification
     case critical
     /// Normal pressure - can restore caches if needed
+    /// - Note: iOS never reports this level; apps should assume pressure persists after warning
     case normal
 }
 
@@ -36,6 +54,10 @@ public final class MemoryPressureObserver: @unchecked Sendable {
     private var responders = NSHashTable<AnyObject>.weakObjects()
     private var lock = os_unfair_lock()
 
+    /// Lock for thread-safe access to currentLevel
+    private var levelLock = os_unfair_lock()
+    private var _currentLevel: MemoryPressureLevel = .normal
+
     /// Memory pressure source (macOS)
     #if os(macOS)
     private var memoryPressureSource: DispatchSourceMemoryPressure?
@@ -46,8 +68,12 @@ public final class MemoryPressureObserver: @unchecked Sendable {
     private var notificationObserver: NSObjectProtocol?
     #endif
 
-    /// Current memory pressure level
-    public private(set) var currentLevel: MemoryPressureLevel = .normal
+    /// Current memory pressure level (thread-safe)
+    public var currentLevel: MemoryPressureLevel {
+        os_unfair_lock_lock(&levelLock)
+        defer { os_unfair_lock_unlock(&levelLock) }
+        return _currentLevel
+    }
 
     private init() {
         setupMemoryPressureMonitoring()
@@ -129,7 +155,10 @@ public final class MemoryPressureObserver: @unchecked Sendable {
     }
 
     private func notifyResponders(level: MemoryPressureLevel) {
-        currentLevel = level
+        // Update current level with thread safety
+        os_unfair_lock_lock(&levelLock)
+        _currentLevel = level
+        os_unfair_lock_unlock(&levelLock)
 
         os_unfair_lock_lock(&lock)
         let currentResponders = responders.allObjects
@@ -156,17 +185,73 @@ extension ComputeContext: MemoryPressureResponder {
     public func didReceiveMemoryPressure(level: MemoryPressureLevel) {
         switch level {
         case .critical:
-            // Release triple buffer if not actively in use
+            // Release triple buffer only if no GPU commands are currently referencing them
+            // Lock is held through entire check-and-clear to prevent race with audio thread
             os_unfair_lock_lock(&unfairLock)
-            tripleBuffer.removeAll()
-            os_unfair_lock_unlock(&unfairLock)
+            defer { os_unfair_lock_unlock(&unfairLock) }
+
+            if tripleBufferInFlightCount == 0 && !waitingForDrain {
+                // Safe to clear - no GPU commands are using these buffers
+                // and setupTripleBuffering isn't waiting for them
+                tripleBuffer.removeAll()
+                tripleBufferPendingClear = false
+            } else {
+                // GPU is still using buffers or setup is waiting - defer clearing
+                // The completion handler will check this flag and clear when safe
+                tripleBufferPendingClear = true
+            }
         case .warning:
             // Could reduce maxInFlightBuffers, but that's immutable
             // In future versions, consider making this dynamic
             break
         case .normal:
-            // Could restore buffers, but they'll be recreated on demand
-            break
+            // Clear pending flag - memory pressure resolved
+            os_unfair_lock_lock(&unfairLock)
+            tripleBufferPendingClear = false
+            os_unfair_lock_unlock(&unfairLock)
+        }
+    }
+
+    /// Mark that a GPU command buffer is now referencing triple buffers
+    ///
+    /// **Advanced API**: For custom GPU lifetime tracking when `withWriteBuffer` scope
+    /// isn't sufficient. Most users should rely on `withWriteBuffer`/`withReadBuffer` instead.
+    ///
+    /// Call this before committing a command buffer that uses triple buffers, and call
+    /// `tripleBufferGPUUseComplete()` from the command buffer's completion handler.
+    ///
+    /// - Important: You MUST call `tripleBufferGPUUseComplete()` from the command
+    ///   buffer's completion handler, otherwise `setupTripleBuffering()` and memory
+    ///   pressure handlers will block indefinitely.
+    internal func tripleBufferWillBeUsedByGPU() {
+        os_unfair_lock_lock(&unfairLock)
+        tripleBufferInFlightCount += 1
+        os_unfair_lock_unlock(&unfairLock)
+    }
+
+    /// Mark that a GPU command buffer has finished using triple buffers
+    ///
+    /// **Advanced API**: Call this from the command buffer's completion handler when
+    /// using manual GPU lifetime tracking via `tripleBufferWillBeUsedByGPU()`.
+    ///
+    /// This method signals the drain semaphore if `setupTripleBuffering()` is waiting,
+    /// and clears buffers if memory pressure requested it.
+    internal func tripleBufferGPUUseComplete() {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+
+        tripleBufferInFlightCount -= 1
+
+        if tripleBufferInFlightCount == 0 {
+            // Signal drain semaphore if setupTripleBuffering is waiting
+            if waitingForDrain {
+                tripleBufferDrainSemaphore?.signal()
+            }
+            // Clear buffers if memory pressure requested it
+            else if tripleBufferPendingClear {
+                tripleBuffer.removeAll()
+                tripleBufferPendingClear = false
+            }
         }
     }
 }

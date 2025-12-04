@@ -1,5 +1,8 @@
 import Metal
 import Foundation
+#if os(iOS) || os(tvOS)
+import UIKit
+#endif
 
 /// Errors specific to MetalAudioKit operations
 public enum MetalAudioError: Error, LocalizedError {
@@ -67,6 +70,28 @@ public protocol DeviceLossDelegate: AnyObject {
     func audioDevice(_ device: AudioDevice, didLoseDevice recovered: Bool)
 }
 
+/// Protocol for handling app lifecycle events (iOS)
+///
+/// Implement this protocol to handle background/foreground transitions.
+/// This is crucial for proper GPU resource management on iOS.
+public protocol AppLifecycleDelegate: AnyObject {
+    /// Called when the app enters background
+    ///
+    /// Recommended actions:
+    /// - Finish any pending GPU work
+    /// - Release non-essential GPU resources
+    /// - Stop non-critical processing
+    func audioDeviceWillEnterBackground(_ device: AudioDevice)
+
+    /// Called when the app enters foreground
+    ///
+    /// Recommended actions:
+    /// - Verify device availability
+    /// - Restore processing
+    /// - Re-acquire resources if needed
+    func audioDeviceDidEnterForeground(_ device: AudioDevice)
+}
+
 /// Central GPU device manager for audio processing
 /// Handles device selection, command queue management, and shader compilation
 ///
@@ -79,6 +104,106 @@ public protocol DeviceLossDelegate: AnyObject {
 /// On macOS, external GPUs can be disconnected. The device monitors for removal
 /// notifications and notifies the delegate if this occurs. Use `DeviceLossDelegate`
 /// to handle recovery scenarios.
+
+/// LRU (Least Recently Used) cache for pipeline states
+/// Thread-safety must be handled by the caller
+///
+/// ## Performance Note
+/// Uses Array for access order tracking. Operations like `firstIndex(of:)` and
+/// `removeFirst()` are O(n) but acceptable for small caches (maxSize ~64) accessed
+/// infrequently (shader compilation). For larger or hot-path caches, consider using
+/// a doubly-linked list with Dictionary for O(1) operations.
+private final class LRUPipelineCache<Key: Hashable, Value> {
+    private var cache: [Key: Value] = [:]
+    private var accessOrder: [Key] = []  // Most recent at end
+    private let maxSize: Int
+
+    init(maxSize: Int) {
+        self.maxSize = maxSize
+    }
+
+    func get(_ key: Key) -> Value? {
+        guard let value = cache[key] else { return nil }
+        // Move to end (most recently used)
+        if let index = accessOrder.firstIndex(of: key) {
+            accessOrder.remove(at: index)
+            accessOrder.append(key)
+        }
+        return value
+    }
+
+    func set(_ key: Key, value: Value) {
+        if cache[key] != nil {
+            // Update existing - move to end
+            if let index = accessOrder.firstIndex(of: key) {
+                accessOrder.remove(at: index)
+            }
+        } else if cache.count >= maxSize {
+            // Evict least recently used (first in accessOrder)
+            if let lruKey = accessOrder.first {
+                cache.removeValue(forKey: lruKey)
+                accessOrder.removeFirst()
+            }
+        }
+        cache[key] = value
+        accessOrder.append(key)
+    }
+
+    func removeAll() {
+        cache.removeAll()
+        accessOrder.removeAll()
+    }
+
+    var count: Int { cache.count }
+}
+
+/// Cache entry for source-compiled pipelines
+/// Stores full source for hash collision verification
+private struct SourcePipelineCacheEntry {
+    let source: String
+    let functionName: String
+    let pipeline: MTLComputePipelineState
+
+    /// Key for dictionary lookup (uses hash)
+    var hashKey: Int {
+        var hasher = Hasher()
+        hasher.combine(source)
+        hasher.combine(functionName)
+        return hasher.finalize()
+    }
+}
+
+/// Cache key for source-compiled pipelines
+/// Uses combined hash of source + functionName for fast lookup
+private struct SourcePipelineCacheKey: Hashable {
+    let hashKey: Int  // Combined hash of source + functionName
+    let source: String  // Store full source for collision verification
+    let functionName: String
+
+    init(source: String, functionName: String) {
+        self.source = source
+        self.functionName = functionName
+        // Use combined hash for the Hashable conformance
+        var hasher = Hasher()
+        hasher.combine(source)
+        hasher.combine(functionName)
+        self.hashKey = hasher.finalize()
+    }
+
+    // Custom Hashable: use the pre-computed hash
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(hashKey)
+    }
+
+    // Equality must compare actual source to handle hash collisions
+    static func == (lhs: SourcePipelineCacheKey, rhs: SourcePipelineCacheKey) -> Bool {
+        // Fast path: if hashes differ, keys are definitely different
+        guard lhs.hashKey == rhs.hashKey else { return false }
+        // Slow path: verify actual content matches (handles hash collisions)
+        return lhs.source == rhs.source && lhs.functionName == rhs.functionName
+    }
+}
+
 public final class AudioDevice: @unchecked Sendable {
 
     /// Shared instance for convenience (uses default GPU)
@@ -129,23 +254,44 @@ public final class AudioDevice: @unchecked Sendable {
     /// Delegate for handling device loss events
     public weak var deviceLossDelegate: DeviceLossDelegate?
 
+    /// Delegate for handling app lifecycle events (iOS)
+    public weak var lifecycleDelegate: AppLifecycleDelegate?
+
     /// Lock for thread-safe access to device state
     private var stateLock = os_unfair_lock()
+
+    #if os(iOS) || os(tvOS)
+    /// Notification observers for app lifecycle
+    private var backgroundObserver: NSObjectProtocol?
+    private var foregroundObserver: NSObjectProtocol?
+    #endif
 
     /// Internal storage for device availability
     private var _isDeviceAvailable: Bool = true
 
     // MARK: - Pipeline Caching
 
+    /// Maximum number of cached source pipelines (prevents unbounded memory growth)
+    /// 64 is reasonable for most apps; each pipeline is ~100KB-1MB
+    private static let maxSourcePipelineCacheSize = 64
+
     /// Lock for thread-safe access to pipeline cache
     private var cacheLock = os_unfair_lock()
 
-    /// Cache for compiled compute pipelines (source hash -> pipeline)
-    /// Key is hash of (source + functionName) to avoid storing large source strings
-    private var pipelineCache: [Int: MTLComputePipelineState] = [:]
+    /// LRU cache for compiled compute pipelines from source code
+    /// Uses hash of source + functionName to reduce memory; LRU eviction prevents unbounded growth
+    private lazy var sourcePipelineCache = LRUPipelineCache<SourcePipelineCacheKey, MTLComputePipelineState>(
+        maxSize: Self.maxSourcePipelineCacheSize
+    )
 
     /// Cache for library function pipelines (functionName -> pipeline)
+    /// Not LRU because library functions are finite and pre-compiled
     private var libraryPipelineCache: [String: MTLComputePipelineState] = [:]
+
+    /// Separate lock for pipeline compilation (allows concurrent reads during compilation)
+    /// Using NSLock (not os_unfair_lock) because compilation can take 100-500ms and we want
+    /// fair scheduling. Pipeline lookup still uses cacheLock for fast path.
+    private let compilationLock = NSLock()
 
     /// Whether the device is currently available (thread-safe)
     public var isDeviceAvailable: Bool {
@@ -179,7 +325,50 @@ public final class AudioDevice: @unchecked Sendable {
 
         // Initialize global tolerance provider with hardware detection
         ToleranceProvider.shared.initialize(with: mtlDevice)
+
+        // Setup lifecycle notifications on iOS/tvOS
+        #if os(iOS) || os(tvOS)
+        setupLifecycleNotifications()
+        #endif
     }
+
+    #if os(iOS) || os(tvOS)
+    /// Setup app lifecycle notification observers
+    private func setupLifecycleNotifications() {
+        let center = NotificationCenter.default
+
+        backgroundObserver = center.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            self.lifecycleDelegate?.audioDeviceWillEnterBackground(self)
+        }
+
+        foregroundObserver = center.addObserver(
+            forName: UIApplication.willEnterForegroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            // Verify device is still available after coming to foreground
+            if !self.isDeviceAvailable {
+                _ = self.checkDeviceAvailability()
+            }
+            self.lifecycleDelegate?.audioDeviceDidEnterForeground(self)
+        }
+    }
+
+    deinit {
+        if let observer = backgroundObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = foregroundObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+    #endif
 
     /// Check if the device is still available
     /// On macOS, external GPUs can be disconnected. Call this to verify device state.
@@ -206,8 +395,9 @@ public final class AudioDevice: @unchecked Sendable {
         }
         commandBuffer.commit()
 
-        // Use a short timeout (5 seconds) - device check should be fast
-        let timeout: TimeInterval = 5.0
+        // Use a short timeout (1 second) - device check should be fast
+        // Empty command buffers complete immediately on healthy GPUs
+        let timeout: TimeInterval = 1.0
         let result = semaphore.wait(timeout: .now() + timeout)
 
         if result == .timedOut {
@@ -289,8 +479,11 @@ public final class AudioDevice: @unchecked Sendable {
     /// - Returns: Compiled compute pipeline state
     /// - Throws: `MetalAudioError.functionNotFound` if function doesn't exist,
     ///           `MetalAudioError.pipelineCreationFailed` if compilation fails
+    ///
+    /// - Note: Thread-safe. Concurrent requests for the same function will serialize
+    ///   on compilation to avoid duplicate work. Different functions compile concurrently.
     public func makeComputePipeline(functionName: String) throws -> MTLComputePipelineState {
-        // Check cache first (thread-safe)
+        // Fast path: check cache with lightweight lock
         os_unfair_lock_lock(&cacheLock)
         if let cached = libraryPipelineCache[functionName] {
             os_unfair_lock_unlock(&cacheLock)
@@ -298,7 +491,20 @@ public final class AudioDevice: @unchecked Sendable {
         }
         os_unfair_lock_unlock(&cacheLock)
 
-        // Compile pipeline
+        // Slow path: serialize compilations to avoid duplicate work
+        // NSLock provides fair scheduling for potentially long wait
+        compilationLock.lock()
+        defer { compilationLock.unlock() }
+
+        // Double-check after acquiring compilation lock - another thread may have compiled it
+        os_unfair_lock_lock(&cacheLock)
+        if let cached = libraryPipelineCache[functionName] {
+            os_unfair_lock_unlock(&cacheLock)
+            return cached
+        }
+        os_unfair_lock_unlock(&cacheLock)
+
+        // Actually compile the shader (now serialized)
         guard let function = library.makeFunction(name: functionName) else {
             throw MetalAudioError.functionNotFound(functionName)
         }
@@ -310,7 +516,7 @@ public final class AudioDevice: @unchecked Sendable {
             throw MetalAudioError.pipelineCreationFailed(error.localizedDescription)
         }
 
-        // Store in cache (thread-safe)
+        // Store in cache
         os_unfair_lock_lock(&cacheLock)
         libraryPipelineCache[functionName] = pipeline
         os_unfair_lock_unlock(&cacheLock)
@@ -331,22 +537,40 @@ public final class AudioDevice: @unchecked Sendable {
     /// - Returns: Compiled compute pipeline state
     /// - Throws: `MetalAudioError.functionNotFound` if function doesn't exist,
     ///           `MetalAudioError.pipelineCreationFailed` if compilation fails
+    ///
+    /// - Note: Thread-safe. Concurrent requests for the same source will serialize
+    ///   on compilation to avoid duplicate work. Cache uses full source comparison
+    ///   to prevent hash collision issues.
+    ///
+    /// ## Low Power Mode Advisory
+    /// On iOS, shader compilation during Low Power Mode may be slower due to
+    /// reduced CPU frequency. Consider pre-compiling shaders during app launch
+    /// before entering Low Power Mode, or using pre-compiled .metallib files.
     public func makeComputePipeline(source: String, functionName: String) throws -> MTLComputePipelineState {
-        // Generate cache key from source and function name
-        var hasher = Hasher()
-        hasher.combine(source)
-        hasher.combine(functionName)
-        let cacheKey = hasher.finalize()
+        // Use composite key that stores full source for collision-safe comparison
+        let cacheKey = SourcePipelineCacheKey(source: source, functionName: functionName)
 
-        // Check cache first (thread-safe)
+        // Fast path: check cache with lightweight lock
         os_unfair_lock_lock(&cacheLock)
-        if let cached = pipelineCache[cacheKey] {
+        if let cached = sourcePipelineCache.get(cacheKey) {
             os_unfair_lock_unlock(&cacheLock)
             return cached
         }
         os_unfair_lock_unlock(&cacheLock)
 
-        // Compile shader (expensive operation, ~100-500ms)
+        // Slow path: serialize compilations to avoid duplicate work
+        compilationLock.lock()
+        defer { compilationLock.unlock() }
+
+        // Double-check after acquiring compilation lock - another thread may have compiled it
+        os_unfair_lock_lock(&cacheLock)
+        if let cached = sourcePipelineCache.get(cacheKey) {
+            os_unfair_lock_unlock(&cacheLock)
+            return cached
+        }
+        os_unfair_lock_unlock(&cacheLock)
+
+        // Actually compile the shader (now serialized)
         let library = try device.makeLibrary(source: source, options: nil)
         guard let function = library.makeFunction(name: functionName) else {
             throw MetalAudioError.functionNotFound(functionName)
@@ -359,9 +583,9 @@ public final class AudioDevice: @unchecked Sendable {
             throw MetalAudioError.pipelineCreationFailed(error.localizedDescription)
         }
 
-        // Store in cache (thread-safe)
+        // Store in cache
         os_unfair_lock_lock(&cacheLock)
-        pipelineCache[cacheKey] = pipeline
+        sourcePipelineCache.set(cacheKey, value: pipeline)
         os_unfair_lock_unlock(&cacheLock)
 
         return pipeline
@@ -374,7 +598,7 @@ public final class AudioDevice: @unchecked Sendable {
     /// for the lifetime of the AudioDevice.
     public func clearPipelineCache() {
         os_unfair_lock_lock(&cacheLock)
-        pipelineCache.removeAll()
+        sourcePipelineCache.removeAll()
         libraryPipelineCache.removeAll()
         os_unfair_lock_unlock(&cacheLock)
     }
@@ -382,7 +606,7 @@ public final class AudioDevice: @unchecked Sendable {
     /// Number of cached pipelines (for debugging/diagnostics)
     public var cachedPipelineCount: Int {
         os_unfair_lock_lock(&cacheLock)
-        let count = pipelineCache.count + libraryPipelineCache.count
+        let count = sourcePipelineCache.count + libraryPipelineCache.count
         os_unfair_lock_unlock(&cacheLock)
         return count
     }
@@ -422,9 +646,16 @@ extension AudioDevice {
 
     /// Recommended storage mode for audio buffers on this device
     public var preferredStorageMode: MTLResourceOptions {
-        // Unified memory (Apple Silicon) - shared is fastest
-        // Discrete GPU - managed or private depending on use case
-        hasUnifiedMemory ? .storageModeShared : .storageModeManaged
+        // iOS/tvOS/watchOS only support .storageModeShared and .storageModePrivate
+        // .storageModeManaged does NOT exist on these platforms
+        #if os(iOS) || os(tvOS) || os(watchOS)
+        // All Apple Silicon iOS devices have unified memory - shared is fastest
+        return .storageModeShared
+        #else
+        // macOS: Unified memory (Apple Silicon) - shared is fastest
+        // Discrete GPU (Intel Macs) - managed for CPU/GPU access
+        return hasUnifiedMemory ? .storageModeShared : .storageModeManaged
+        #endif
     }
 
     /// Print device capabilities for debugging

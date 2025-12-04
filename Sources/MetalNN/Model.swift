@@ -5,6 +5,7 @@ import MetalAudioKit
 public enum SequentialModelError: Error, LocalizedError {
     case shapeMismatch(layerIndex: Int, expectedInput: [Int], actualInput: [Int])
     case emptyModel
+    case inputShapeMismatch(expected: [Int], actual: [Int])
 
     public var errorDescription: String? {
         switch self {
@@ -12,6 +13,8 @@ public enum SequentialModelError: Error, LocalizedError {
             return "Layer \(index) shape mismatch: expected input \(expected), got \(actual)"
         case .emptyModel:
             return "Cannot run inference on empty model"
+        case .inputShapeMismatch(let expected, let actual):
+            return "Model input shape mismatch: expected \(expected), got \(actual)"
         }
     }
 }
@@ -21,6 +24,10 @@ public enum SequentialModelError: Error, LocalizedError {
 /// ## Thread Safety
 /// `Sequential` is safe for concurrent inference after `build()` is called.
 /// Layer addition and building should be done from a single thread before inference.
+///
+/// ## Memory Optimization
+/// Uses ping-pong buffer reuse when layers have compatible output shapes,
+/// reducing memory usage by up to 50% for deep networks.
 public final class Sequential {
 
     private let device: AudioDevice
@@ -28,17 +35,31 @@ public final class Sequential {
     private var layers: [NNLayer] = []
     private var intermediateBuffers: [Tensor] = []
 
+    // Ping-pong buffer indices for memory reuse
+    private var bufferIndices: [Int] = []
+    // Shared ping-pong buffers (max 2 + any unique shapes)
+    private var sharedBuffers: [Tensor] = []
+
+    /// Lock protecting layer list and buffer state during add/build operations.
+    /// Forward passes after build() don't need locking since state is read-only.
+    private var buildLock = os_unfair_lock()
+
     /// Initialize sequential model
     /// - Parameter device: Audio device
-    public init(device: AudioDevice) {
+    /// - Throws: `ComputeContext.ComputeContextError` if compute context creation fails
+    public init(device: AudioDevice) throws {
         self.device = device
-        self.context = ComputeContext(device: device)
+        self.context = try ComputeContext(device: device)
     }
 
     /// Add a layer to the model with optional shape validation
     /// - Parameter layer: The layer to add
     /// - Throws: `SequentialModelError.shapeMismatch` if layer input doesn't match previous output
+    /// - Note: Thread-safe with respect to other add/build calls
     public func add(_ layer: NNLayer) throws {
+        os_unfair_lock_lock(&buildLock)
+        defer { os_unfair_lock_unlock(&buildLock) }
+
         // Validate shape compatibility with previous layer
         if let lastLayer = layers.last {
             let previousOutput = lastLayer.outputShape
@@ -72,31 +93,113 @@ public final class Sequential {
     }
 
     /// Add a layer without shape validation (for dynamic shapes)
+    /// - Note: Thread-safe with respect to other add/build calls
     public func addUnchecked(_ layer: NNLayer) {
+        os_unfair_lock_lock(&buildLock)
+        defer { os_unfair_lock_unlock(&buildLock) }
         layers.append(layer)
     }
 
     /// Prepare model for inference (allocate intermediate buffers)
+    ///
+    /// Uses ping-pong buffer optimization: layers with compatible output shapes
+    /// share buffers in an alternating pattern, reducing memory usage.
+    ///
+    /// For example, a 10-layer network with identical shapes uses only 2 buffers
+    /// instead of 10, achieving ~80% memory reduction.
+    ///
+    /// - Note: Thread-safe with respect to other add/build calls
     public func build() throws {
+        os_unfair_lock_lock(&buildLock)
+        defer { os_unfair_lock_unlock(&buildLock) }
+
         intermediateBuffers.removeAll()
+        bufferIndices.removeAll()
+        sharedBuffers.removeAll()
+
+        guard !layers.isEmpty else { return }
+
+        // Track buffer shapes for reuse
+        // Key: shape as string, Value: (bufferIndex, lastUsedLayer)
+        var shapeToBuffers: [String: [(index: Int, lastUsed: Int)]] = [:]
 
         for i in 0..<layers.count {
             let outputShape = layers[i].outputShape
-            let buffer = try Tensor(device: device, shape: outputShape)
-            intermediateBuffers.append(buffer)
+            let shapeKey = outputShape.map { String($0) }.joined(separator: "x")
+
+            // Find a reusable buffer (one that wasn't used by the immediately previous layer)
+            var reuseIndex: Int? = nil
+            if let candidates = shapeToBuffers[shapeKey] {
+                for (bufferIdx, lastUsed) in candidates {
+                    // Can reuse if there's at least one layer gap (ping-pong pattern)
+                    if i - lastUsed >= 2 {
+                        reuseIndex = bufferIdx
+                        break
+                    }
+                }
+            }
+
+            if let reuse = reuseIndex {
+                // Reuse existing buffer
+                bufferIndices.append(reuse)
+                // Update last used
+                if var candidates = shapeToBuffers[shapeKey] {
+                    for j in 0..<candidates.count {
+                        if candidates[j].index == reuse {
+                            candidates[j] = (reuse, i)
+                            shapeToBuffers[shapeKey] = candidates
+                            break
+                        }
+                    }
+                }
+            } else {
+                // Allocate new buffer
+                let buffer = try Tensor(device: device, shape: outputShape)
+                let newIndex = sharedBuffers.count
+                sharedBuffers.append(buffer)
+                bufferIndices.append(newIndex)
+
+                // Track for potential reuse
+                if shapeToBuffers[shapeKey] == nil {
+                    shapeToBuffers[shapeKey] = []
+                }
+                shapeToBuffers[shapeKey]?.append((newIndex, i))
+            }
         }
+
+        // Build intermediateBuffers array for backward compatibility
+        for idx in bufferIndices {
+            intermediateBuffers.append(sharedBuffers[idx])
+        }
+    }
+
+    /// Statistics about buffer allocation after build()
+    /// - Returns: Tuple of (unique buffers allocated, total layers)
+    public var bufferStats: (allocated: Int, layers: Int) {
+        (sharedBuffers.count, layers.count)
     }
 
     /// Run inference
     /// - Parameter input: Input tensor
     /// - Returns: Output tensor
-    /// - Throws: `SequentialModelError.emptyModel` if no layers, or layer errors
+    /// - Throws: `SequentialModelError.emptyModel` if no layers,
+    ///           `SequentialModelError.inputShapeMismatch` if input shape doesn't match,
+    ///           or layer errors
     public func forward(_ input: Tensor) throws -> Tensor {
         guard !layers.isEmpty else {
             throw SequentialModelError.emptyModel
         }
         guard !intermediateBuffers.isEmpty else {
             throw MetalAudioError.invalidConfiguration("Model not built. Call build() first.")
+        }
+
+        // Validate input shape matches first layer's expected input
+        let expectedShape = layers[0].inputShape
+        guard input.shape == expectedShape else {
+            throw SequentialModelError.inputShapeMismatch(
+                expected: expectedShape,
+                actual: input.shape
+            )
         }
 
         var currentInput = input
@@ -121,6 +224,16 @@ public final class Sequential {
         }
         guard !intermediateBuffers.isEmpty else {
             completion(.failure(MetalAudioError.invalidConfiguration("Model not built. Call build() first.")))
+            return
+        }
+
+        // Validate input shape matches first layer's expected input
+        let expectedShape = layers[0].inputShape
+        guard input.shape == expectedShape else {
+            completion(.failure(SequentialModelError.inputShapeMismatch(
+                expected: expectedShape,
+                actual: input.shape
+            )))
             return
         }
 
@@ -349,15 +462,25 @@ public final class BinaryModelLoader {
                 throw ModelLoaderError.invalidTensorName
             }
 
-            // Read shape
+            // Read shape with overflow checking to prevent security issues with malicious files
             var shape: [Int] = []
+            var elementCount = 1
             for _ in 0..<numDims {
                 let dim = try readUInt32()
                 shape.append(Int(dim))
+                // Check for overflow when multiplying dimensions
+                let (newCount, overflow) = elementCount.multipliedReportingOverflow(by: Int(dim))
+                guard !overflow else {
+                    throw MetalAudioError.integerOverflow(operation: "tensor shape in model file")
+                }
+                elementCount = newCount
             }
 
-            // Validate data size matches shape
-            let expectedBytes = shape.reduce(1, *) * MemoryLayout<Float>.size
+            // Validate data size matches shape (with overflow check for byte size)
+            let (expectedBytes, bytesOverflow) = elementCount.multipliedReportingOverflow(by: MemoryLayout<Float>.size)
+            guard !bytesOverflow else {
+                throw MetalAudioError.integerOverflow(operation: "tensor byte size in model file")
+            }
             guard dataSize == expectedBytes else {
                 throw ModelLoaderError.dataSizeMismatch(
                     tensorName: name,
@@ -371,8 +494,17 @@ public final class BinaryModelLoader {
 
             // Create tensor and copy data
             let tensor = try Tensor(device: device, shape: shape)
-            data.withUnsafeBytes { ptr in
-                memcpy(tensor.buffer.contents(), ptr.baseAddress! + dataOffset, Int(dataSize))
+
+            // Only copy if there's actual data to copy (dataSize > 0)
+            // baseAddress is nil for empty Data, so we must check first
+            if dataSize > 0 {
+                data.withUnsafeBytes { ptr in
+                    guard let baseAddress = ptr.baseAddress else {
+                        // This shouldn't happen if dataSize > 0, but be defensive
+                        return
+                    }
+                    memcpy(tensor.buffer.contents(), baseAddress + dataOffset, Int(dataSize))
+                }
             }
 
             tensors[name] = tensor

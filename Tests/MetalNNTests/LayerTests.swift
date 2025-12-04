@@ -6,6 +6,16 @@ final class LinearLayerTests: XCTestCase {
 
     var device: AudioDevice!
 
+    /// Hardware-adaptive tolerance for NN layer tests
+    var tolerance: Float {
+        ToleranceProvider.shared.tolerances.nnLayerAccuracy
+    }
+
+    /// Tighter tolerance for linear/BLAS operations
+    var linearTolerance: Float {
+        tolerance * 0.01  // BLAS is very precise
+    }
+
     override func setUpWithError() throws {
         device = try AudioDevice()
     }
@@ -40,20 +50,30 @@ final class LinearLayerTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [2])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try layer.forward(input: input, output: output, encoder: encoder)
         }
 
         let result = output.toArray()
-        XCTAssertEqual(result[0], 1.0, accuracy: 0.001)
-        XCTAssertEqual(result[1], 2.0, accuracy: 0.001)
+        XCTAssertEqual(result[0], 1.0, accuracy: linearTolerance)
+        XCTAssertEqual(result[1], 2.0, accuracy: linearTolerance)
     }
 }
 
 final class ActivationTests: XCTestCase {
 
     var device: AudioDevice!
+
+    /// Hardware-adaptive tolerance for NN layer tests
+    var tolerance: Float {
+        ToleranceProvider.shared.tolerances.nnLayerAccuracy
+    }
+
+    /// Tolerance for activation saturation tests (looser due to approximations)
+    var activationTolerance: Float {
+        tolerance * 10  // Activations use approximations
+    }
 
     override func setUpWithError() throws {
         device = try AudioDevice()
@@ -67,7 +87,7 @@ final class ActivationTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [4])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try relu.forward(input: input, output: output, encoder: encoder)
         }
@@ -87,7 +107,7 @@ final class ActivationTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [3])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try sigmoid.forward(input: input, output: output, encoder: encoder)
         }
@@ -106,7 +126,7 @@ final class ActivationTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [3])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try tanh.forward(input: input, output: output, encoder: encoder)
         }
@@ -127,7 +147,7 @@ final class SequentialModelTests: XCTestCase {
     }
 
     func testSequentialModel() throws {
-        let model = Sequential(device: device)
+        let model = try Sequential(device: device)
 
         try model.add(Linear(device: device, inputFeatures: 8, outputFeatures: 4))
         try model.add(ReLU(device: device, inputShape: [4]))
@@ -162,7 +182,7 @@ final class ExtendedActivationTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [5])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try gelu.forward(input: input, output: output, encoder: encoder)
         }
@@ -186,7 +206,7 @@ final class ExtendedActivationTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [4])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try leakyRelu.forward(input: input, output: output, encoder: encoder)
         }
@@ -208,7 +228,7 @@ final class ExtendedActivationTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [2])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try leakyRelu.forward(input: input, output: output, encoder: encoder)
         }
@@ -228,7 +248,7 @@ final class ExtendedActivationTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [5])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try swish.forward(input: input, output: output, encoder: encoder)
         }
@@ -377,7 +397,7 @@ final class LayerNormTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [featureSize])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try layerNorm.forward(input: input, output: output, encoder: encoder)
         }
@@ -409,7 +429,7 @@ final class LayerNormTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [featureSize])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try layerNorm.forward(input: input, output: output, encoder: encoder)
         }
@@ -428,6 +448,11 @@ final class LayerNormTests: XCTestCase {
 final class PoolingLayerTests: XCTestCase {
 
     var device: AudioDevice!
+
+    /// Hardware-adaptive tolerance for pooling tests
+    var tolerance: Float {
+        ToleranceProvider.shared.tolerances.nnLayerAccuracy * 0.01
+    }
 
     override func setUpWithError() throws {
         device = try AudioDevice()
@@ -448,14 +473,14 @@ final class PoolingLayerTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [channels])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try pool.forward(input: input, output: output, encoder: encoder)
         }
 
         let result = output.toArray()
-        XCTAssertEqual(result[0], 2.5, accuracy: 0.001, "Channel 0 mean should be 2.5")
-        XCTAssertEqual(result[1], 6.5, accuracy: 0.001, "Channel 1 mean should be 6.5")
+        XCTAssertEqual(result[0], 2.5, accuracy: tolerance, "Channel 0 mean should be 2.5")
+        XCTAssertEqual(result[1], 6.5, accuracy: tolerance, "Channel 1 mean should be 6.5")
     }
 
     func testMaxPool1D() throws {
@@ -477,7 +502,7 @@ final class PoolingLayerTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [channels * 4])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try pool.forward(input: input, output: output, encoder: encoder)
         }
@@ -511,7 +536,7 @@ final class PoolingLayerTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [2])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try pool.forward(input: input, output: output, encoder: encoder)
         }
@@ -554,7 +579,7 @@ final class LayerNormExtendedTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [featureSize])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try norm.forward(input: input, output: output, encoder: encoder)
         }
@@ -581,7 +606,7 @@ final class LayerNormExtendedTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [featureSize])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try norm.forward(input: input, output: output, encoder: encoder)
         }
@@ -607,7 +632,7 @@ final class LayerNormExtendedTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [featureSize])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try norm.forward(input: input, output: output, encoder: encoder)
         }
@@ -651,7 +676,7 @@ final class GlobalAvgPoolTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [channels])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try pool.forward(input: input, output: output, encoder: encoder)
         }
@@ -671,7 +696,7 @@ final class GlobalAvgPoolTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [channels])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try pool.forward(input: input, output: output, encoder: encoder)
         }
@@ -721,7 +746,7 @@ final class LinearLayerBatchTests: XCTestCase {
         // Output should be [batchSize, outputFeatures]
         let output = try Tensor(device: device, shape: [batchSize, outputFeatures])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try layer.forward(input: input, output: output, encoder: encoder)
         }
@@ -762,7 +787,7 @@ final class LinearLayerBatchTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [batchSize, outputFeatures])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try layer.forward(input: input, output: output, encoder: encoder)
         }
@@ -797,7 +822,7 @@ final class LinearLayerBatchTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [2])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try layer.forward(input: input, output: output, encoder: encoder)
         }
@@ -825,7 +850,7 @@ final class LinearLayerBatchTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [batchSize, outputFeatures])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
 
         // Should not crash with large batch
         try context.executeSync { encoder in
@@ -865,7 +890,7 @@ final class LinearLayerExtendedTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [2])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try layer.forward(input: input, output: output, encoder: encoder)
         }
@@ -891,7 +916,7 @@ final class LinearLayerExtendedTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [32])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try layer.forward(input: input, output: output, encoder: encoder)
         }
@@ -1003,7 +1028,7 @@ final class ActivationNumericalStabilityTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [3])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try sigmoid.forward(input: input, output: output, encoder: encoder)
         }
@@ -1026,7 +1051,7 @@ final class ActivationNumericalStabilityTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [3])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try sigmoid.forward(input: input, output: output, encoder: encoder)
         }
@@ -1050,7 +1075,7 @@ final class ActivationNumericalStabilityTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [5])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try gelu.forward(input: input, output: output, encoder: encoder)
         }
@@ -1084,7 +1109,7 @@ final class ActivationNumericalStabilityTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [4])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try tanh.forward(input: input, output: output, encoder: encoder)
         }
@@ -1110,7 +1135,7 @@ final class ActivationNumericalStabilityTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [6])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try relu.forward(input: input, output: output, encoder: encoder)
         }
@@ -1133,7 +1158,7 @@ final class ActivationNumericalStabilityTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [3])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try leakyRelu.forward(input: input, output: output, encoder: encoder)
         }
@@ -1154,7 +1179,7 @@ final class ActivationNumericalStabilityTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [1])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try swish.forward(input: input, output: output, encoder: encoder)
         }
@@ -1194,7 +1219,7 @@ final class MaxPool1DExtendedTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [4])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try pool.forward(input: input, output: output, encoder: encoder)
         }
@@ -1224,7 +1249,7 @@ final class MaxPool1DExtendedTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [3])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try pool.forward(input: input, output: output, encoder: encoder)
         }
@@ -1248,7 +1273,7 @@ final class MaxPool1DExtendedTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [2])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try pool.forward(input: input, output: output, encoder: encoder)
         }
@@ -1378,7 +1403,7 @@ final class LinearWeightLoadingTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [2])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try layer.forward(input: input, output: output, encoder: encoder)
         }
@@ -1401,7 +1426,7 @@ final class LinearWeightLoadingTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [2])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try layer.forward(input: input, output: output, encoder: encoder)
         }
@@ -1440,7 +1465,7 @@ final class GlobalAvgPool1DExtendedTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [channels])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try pool.forward(input: input, output: output, encoder: encoder)
         }
@@ -1466,7 +1491,7 @@ final class GlobalAvgPool1DExtendedTests: XCTestCase {
 
         let output = try Tensor(device: device, shape: [channels])
 
-        let context = ComputeContext(device: device)
+        let context = try ComputeContext(device: device)
         try context.executeSync { encoder in
             try pool.forward(input: input, output: output, encoder: encoder)
         }
@@ -1476,5 +1501,193 @@ final class GlobalAvgPool1DExtendedTests: XCTestCase {
         for value in result {
             XCTAssertEqual(value, 5.0, accuracy: 0.001)
         }
+    }
+}
+
+// MARK: - Softmax Tests
+
+final class SoftmaxLayerTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testSoftmaxCreation() throws {
+        let softmax = try Softmax(device: device, inputShape: [10])
+        XCTAssertEqual(softmax.inputShape, [10])
+        XCTAssertEqual(softmax.outputShape, [10])
+    }
+
+    func testSoftmax2DCreation() throws {
+        let softmax = try Softmax(device: device, inputShape: [4, 10])
+        XCTAssertEqual(softmax.inputShape, [4, 10])
+        XCTAssertEqual(softmax.outputShape, [4, 10])
+    }
+
+    func testSoftmaxForward() throws {
+        let softmax = try Softmax(device: device, inputShape: [4])
+
+        let input = try Tensor(device: device, shape: [4])
+        try input.copy(from: [1.0, 2.0, 3.0, 4.0])
+
+        let output = try Tensor(device: device, shape: [4])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try softmax.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+
+        // Verify outputs sum to 1
+        let sum = result.reduce(0, +)
+        XCTAssertEqual(sum, 1.0, accuracy: 0.001)
+
+        // Verify order is preserved (larger inputs -> larger outputs)
+        XCTAssertLessThan(result[0], result[1])
+        XCTAssertLessThan(result[1], result[2])
+        XCTAssertLessThan(result[2], result[3])
+    }
+
+    func testSoftmaxNumericalStability() throws {
+        let softmax = try Softmax(device: device, inputShape: [3])
+
+        // Large values that would overflow without max subtraction
+        let input = try Tensor(device: device, shape: [3])
+        try input.copy(from: [1000.0, 1001.0, 1002.0])
+
+        let output = try Tensor(device: device, shape: [3])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try softmax.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+
+        // Should not produce NaN or Inf
+        for val in result {
+            XCTAssertFalse(val.isNaN)
+            XCTAssertFalse(val.isInfinite)
+        }
+
+        // Should still sum to 1
+        XCTAssertEqual(result.reduce(0, +), 1.0, accuracy: 0.001)
+    }
+}
+
+// MARK: - BatchNorm1D Tests
+
+final class BatchNorm1DLayerTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testBatchNorm1DCreation() throws {
+        let bn = try BatchNorm1D(device: device, inputShape: [16, 100])
+        XCTAssertEqual(bn.inputShape, [16, 100])
+        XCTAssertEqual(bn.outputShape, [16, 100])
+    }
+
+    func testBatchNorm1DForward() throws {
+        let channels = 2
+        let length = 4
+        let bn = try BatchNorm1D(device: device, inputShape: [channels, length])
+
+        // Load identity-like weights (gamma=1, beta=0, mean=0, var=1)
+        try bn.loadWeights(
+            gamma: [1.0, 1.0],
+            beta: [0.0, 0.0],
+            runningMean: [0.0, 0.0],
+            runningVar: [1.0, 1.0]
+        )
+
+        let input = try Tensor(device: device, shape: [channels, length])
+        try input.copy(from: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+
+        let output = try Tensor(device: device, shape: [channels, length])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try bn.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+
+        // With identity params, output should equal input
+        for (i, val) in result.enumerated() {
+            let inputArr = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0] as [Float]
+            XCTAssertEqual(val, inputArr[i], accuracy: 0.01)
+        }
+    }
+
+    func testBatchNorm1DWithScaleShift() throws {
+        let bn = try BatchNorm1D(device: device, inputShape: [2, 2])
+
+        // gamma=2, beta=1, mean=0, var=1
+        // output = 2 * (x - 0) / sqrt(1) + 1 = 2x + 1
+        try bn.loadWeights(
+            gamma: [2.0, 2.0],
+            beta: [1.0, 1.0],
+            runningMean: [0.0, 0.0],
+            runningVar: [1.0, 1.0]
+        )
+
+        let input = try Tensor(device: device, shape: [2, 2])
+        try input.copy(from: [1.0, 2.0, 3.0, 4.0])
+
+        let output = try Tensor(device: device, shape: [2, 2])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try bn.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        let expected: [Float] = [3.0, 5.0, 7.0, 9.0]  // 2*x + 1
+
+        for (i, val) in result.enumerated() {
+            XCTAssertEqual(val, expected[i], accuracy: 0.01)
+        }
+    }
+}
+
+// MARK: - Dropout Tests
+
+final class DropoutLayerTests: XCTestCase {
+
+    func testDropoutCreation() {
+        let dropout = Dropout(inputShape: [64, 128], rate: 0.5)
+        XCTAssertEqual(dropout.inputShape, [64, 128])
+        XCTAssertEqual(dropout.outputShape, [64, 128])
+        XCTAssertEqual(dropout.rate, 0.5)
+    }
+
+    func testDropoutForwardIsIdentity() throws {
+        let device = try AudioDevice()
+        let dropout = Dropout(inputShape: [4], rate: 0.5)
+
+        let input = try Tensor(device: device, shape: [4])
+        try input.copy(from: [1.0, 2.0, 3.0, 4.0])
+
+        let output = try Tensor(device: device, shape: [4])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try dropout.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+
+        // During inference, dropout is identity
+        XCTAssertEqual(result[0], 1.0, accuracy: 0.001)
+        XCTAssertEqual(result[1], 2.0, accuracy: 0.001)
+        XCTAssertEqual(result[2], 3.0, accuracy: 0.001)
+        XCTAssertEqual(result[3], 4.0, accuracy: 0.001)
     }
 }

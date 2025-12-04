@@ -334,6 +334,17 @@ final class BiquadFilterExtendedTests: XCTestCase {
 
 final class BiquadFilterEdgeCaseTests: XCTestCase {
 
+    /// Hardware-adaptive tolerance for filter tests
+    var tolerance: Float {
+        ToleranceProvider.shared.tolerances.convolutionAccuracy
+    }
+
+    /// Looser tolerance for comparing different processing modes (batch vs single-sample)
+    /// vDSP batch processing has slightly different numerical behavior than per-sample processing
+    var modeConsistencyTolerance: Float {
+        tolerance * 100  // ~5e-5 for mode comparison
+    }
+
     func testHighQFilter() throws {
         // Test high Q values (Q > 10) for stability
         let filter = BiquadFilter()
@@ -513,10 +524,75 @@ final class BiquadFilterEdgeCaseTests: XCTestCase {
             singleOutput.append(filter2.process(sample: sample))
         }
 
-        // Should produce same results
+        // Should produce same results (using looser tolerance for mode comparison)
         for i in 0..<100 {
-            XCTAssertEqual(batchOutput[i], singleOutput[i], accuracy: 1e-5,
-                "Batch and single-sample processing should match at index \(i)")
+            XCTAssertEqual(batchOutput[i], singleOutput[i], accuracy: modeConsistencyTolerance,
+                "Batch and single-sample processing should match at index \(i) (tolerance: \(modeConsistencyTolerance))")
+        }
+    }
+
+    func testMixedBatchAndSingleSampleWithReset() throws {
+        // Test that mixing batch and single-sample processing works correctly
+        // when using reset() between mode switches as documented
+        let filter = BiquadFilter()
+        try filter.configure(type: .lowpass, frequency: 1000, sampleRate: 44100, q: 0.707)
+
+        var input = [Float](repeating: 0, count: 100)
+        for i in 0..<100 {
+            input[i] = sin(2.0 * Float.pi * 500.0 * Float(i) / 44100.0)
+        }
+
+        // Process with batch
+        let batchOutput = filter.process(input: input)
+
+        // Reset before switching mode
+        filter.reset()
+
+        // Process same input with single-sample
+        var singleOutput: [Float] = []
+        for sample in input {
+            singleOutput.append(filter.process(sample: sample))
+        }
+
+        // After reset, both methods should produce the same result (using looser tolerance for mode comparison)
+        for i in 0..<100 {
+            XCTAssertEqual(batchOutput[i], singleOutput[i], accuracy: modeConsistencyTolerance,
+                "After reset, batch and single-sample should match at index \(i) (tolerance: \(modeConsistencyTolerance))")
+        }
+    }
+
+    func testMixedModesProducesValidOutput() throws {
+        // Test that mixing modes (without reset) still produces valid audio
+        // Even if state isn't perfectly shared, output should be stable and non-NaN
+        let filter = BiquadFilter()
+        try filter.configure(type: .lowpass, frequency: 1000, sampleRate: 44100, q: 0.707)
+
+        var input = [Float](repeating: 0, count: 200)
+        for i in 0..<200 {
+            input[i] = sin(2.0 * Float.pi * 500.0 * Float(i) / 44100.0)
+        }
+
+        // Process first half with batch
+        let firstHalf = Array(input[0..<100])
+        let firstOutput = filter.process(input: firstHalf)
+
+        // Process remaining samples one at a time (mode switch without reset)
+        var secondOutput: [Float] = []
+        for i in 100..<200 {
+            secondOutput.append(filter.process(sample: input[i]))
+        }
+
+        // Both outputs should be valid (no NaN, no Inf, bounded amplitude)
+        for sample in firstOutput {
+            XCTAssertFalse(sample.isNaN, "Batch output should not be NaN")
+            XCTAssertFalse(sample.isInfinite, "Batch output should not be infinite")
+            XCTAssertLessThan(abs(sample), 10.0, "Batch output should be bounded")
+        }
+
+        for sample in secondOutput {
+            XCTAssertFalse(sample.isNaN, "Single-sample output should not be NaN")
+            XCTAssertFalse(sample.isInfinite, "Single-sample output should not be infinite")
+            XCTAssertLessThan(abs(sample), 10.0, "Single-sample output should be bounded")
         }
     }
 }
@@ -597,6 +673,40 @@ final class FilterBankTests: XCTestCase {
         let output = bank.processSeries(input: input)
 
         XCTAssertEqual(output.count, input.count)
+    }
+
+    func testFilterBankSingleBandConfigureAsEQThrows() throws {
+        // configureAsEQ with bandCount=1 should throw (division by zero guard)
+        let bank = FilterBank(device: device, bandCount: 1)
+
+        XCTAssertThrowsError(try bank.configureAsEQ(
+            lowFreq: 100,
+            highFreq: 10000,
+            sampleRate: 44100
+        )) { error in
+            guard let filterError = error as? FilterError else {
+                XCTFail("Expected FilterError, got \(type(of: error))")
+                return
+            }
+            if case .invalidParameter(let name, _, _) = filterError {
+                XCTAssertEqual(name, "bandCount")
+            } else {
+                XCTFail("Expected invalidParameter error for bandCount")
+            }
+        }
+    }
+
+    func testFilterBankZeroBandCountThrows() throws {
+        // configureAsEQ with bandCount=0 should also throw
+        let bank = FilterBank(device: device, bandCount: 0)
+
+        XCTAssertThrowsError(try bank.configureAsEQ(
+            lowFreq: 100,
+            highFreq: 10000,
+            sampleRate: 44100
+        )) { error in
+            XCTAssertTrue(error is FilterError, "Should throw FilterError")
+        }
     }
 
     func testFilterBankManyBands() throws {

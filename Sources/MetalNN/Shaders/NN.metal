@@ -8,6 +8,25 @@ using namespace metal;
 
 // MARK: - Helper Functions
 
+/// Flush denormal values to zero for consistent performance across devices
+/// Denormals (values with magnitude < ~1.18e-38) cause 10-100x slowdowns on
+/// older GPUs (A11 and earlier) that lack hardware DAZ (Denormals-Are-Zero).
+/// This branchless implementation uses integer bit manipulation for efficiency.
+inline float flush_denormal(float x) {
+    // Float32 denormal threshold: 2^-126 ≈ 1.175e-38
+    // Using slightly larger threshold for safety margin
+    const float threshold = 1.2e-38f;
+    // Branchless: return 0 if |x| < threshold, else x
+    return select(x, 0.0f, fabs(x) < threshold);
+}
+
+/// Half-precision denormal flush
+inline half flush_denormal_half(half x) {
+    // Half denormal threshold: 2^-14 ≈ 6.1e-5
+    const half threshold = half(6.2e-5h);
+    return select(x, half(0.0h), fabs(x) < threshold);
+}
+
 /// Numerically stable branchless sigmoid that avoids overflow and SIMD divergence
 /// Uses select() instead of if/else to ensure all threads execute the same instructions
 inline float stable_sigmoid(float x) {
@@ -39,7 +58,8 @@ kernel void relu_kernel(
     uint id [[thread_position_in_grid]]
 ) {
     if (id >= length) return;
-    output[id] = max(0.0f, input[id]);
+    // Flush denormals to prevent slowdowns on A11 and earlier devices
+    output[id] = flush_denormal(max(0.0f, input[id]));
 }
 
 kernel void leaky_relu_kernel(
@@ -51,9 +71,14 @@ kernel void leaky_relu_kernel(
 ) {
     if (id >= length) return;
     float x = input[id];
-    output[id] = x > 0.0f ? x : alpha * x;
+    // Branchless leaky ReLU with denormal flushing for A11 compatibility
+    float result = select(alpha * x, x, x > 0.0f);
+    output[id] = flush_denormal(result);
 }
 
+// GELU activation kernel (Gaussian Error Linear Unit)
+// Uses tanh approximation with input clamping for numerical stability
+// See Common.metal gelu() for detailed documentation
 kernel void gelu_kernel(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
@@ -61,7 +86,8 @@ kernel void gelu_kernel(
     uint id [[thread_position_in_grid]]
 ) {
     if (id >= length) return;
-    float x = input[id];
+    // Clamp to prevent x^3 overflow (10^3 = 1000, safely within float range)
+    float x = clamp(input[id], -10.0f, 10.0f);
     const float sqrt_2_over_pi = 0.7978845608f;
     float x3 = x * x * x;
     output[id] = 0.5f * x * (1.0f + tanh(sqrt_2_over_pi * (x + 0.044715f * x3)));
@@ -105,41 +131,6 @@ struct LayerNormParams {
     float epsilon;
 };
 
-/// DEPRECATED: Use layer_norm_simd for A12+ devices or layer_norm_parallel for older devices
-/// This legacy O(n²) implementation is 10-100x slower for large feature sizes.
-/// Retained only for A11 and earlier devices that lack SIMD reduction support.
-kernel void layer_norm(
-    device const float* input [[buffer(0)]],
-    device float* output [[buffer(1)]],
-    device const float* gamma [[buffer(2)]],
-    device const float* beta [[buffer(3)]],
-    constant LayerNormParams& params [[buffer(4)]],
-    uint id [[thread_position_in_grid]]
-) {
-    uint batchIdx = id / params.featureSize;
-    uint featureIdx = id % params.featureSize;
-    uint startIdx = batchIdx * params.featureSize;
-
-    // Compute mean
-    float mean = 0.0f;
-    for (uint i = 0; i < params.featureSize; i++) {
-        mean += input[startIdx + i];
-    }
-    mean /= float(params.featureSize);
-
-    // Compute variance
-    float variance = 0.0f;
-    for (uint i = 0; i < params.featureSize; i++) {
-        float diff = input[startIdx + i] - mean;
-        variance += diff * diff;
-    }
-    variance /= float(params.featureSize);
-
-    // Normalize
-    float normalized = (input[id] - mean) / sqrt(variance + params.epsilon);
-    output[id] = gamma[featureIdx] * normalized + beta[featureIdx];
-}
-
 // Optimized layer norm using parallel reduction
 // Dispatch: one threadgroup per batch element (row)
 // Threadgroup size: min(featureSize, 256) threads
@@ -165,44 +156,60 @@ kernel void layer_norm_parallel(
     uint batchIdx = groupId;
     uint startIdx = batchIdx * params.featureSize;
 
-    // Phase 1: Each thread computes partial sum and sum of squares
+    // Phase 1: Compute partial sum for mean (first pass for numerical stability)
     float localSum = 0.0f;
-    float localSumSq = 0.0f;
 
     // Grid-stride loop: each thread handles multiple elements
     for (uint i = localId; i < params.featureSize; i += threadsPerGroup) {
-        float val = input[startIdx + i];
-        localSum += val;
-        localSumSq += val * val;
+        localSum += input[startIdx + i];
     }
 
     sharedSum[localId] = localSum;
-    sharedSumSq[localId] = localSumSq;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Phase 2: Tree reduction for sum and sum of squares
+    // Tree reduction for sum
     for (uint stride = threadsPerGroup / 2; stride > 0; stride >>= 1) {
         if (localId < stride) {
             sharedSum[localId] += sharedSum[localId + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // Thread 0 broadcasts mean
+    if (localId == 0) {
+        sharedMean = sharedSum[0] / float(params.featureSize);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 2: Compute variance using E[(X-μ)²] (numerically stable formula)
+    // This avoids catastrophic cancellation that occurs with E[X²] - E[X]²
+    float mean = sharedMean;
+    float localSumSq = 0.0f;
+
+    for (uint i = localId; i < params.featureSize; i += threadsPerGroup) {
+        float diff = input[startIdx + i] - mean;
+        localSumSq += diff * diff;
+    }
+
+    sharedSumSq[localId] = localSumSq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Tree reduction for sum of squared differences
+    for (uint stride = threadsPerGroup / 2; stride > 0; stride >>= 1) {
+        if (localId < stride) {
             sharedSumSq[localId] += sharedSumSq[localId + stride];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    // Thread 0 computes final mean and inverse std
+    // Thread 0 computes inverse std
     if (localId == 0) {
-        float mean = sharedSum[0] / float(params.featureSize);
-        // Var(X) = E[X²] - E[X]² (computational formula)
-        float variance = sharedSumSq[0] / float(params.featureSize) - mean * mean;
-        // Clamp variance to avoid numerical issues with perfectly constant inputs
-        variance = max(variance, 0.0f);
-        sharedMean = mean;
+        float variance = sharedSumSq[0] / float(params.featureSize);
         sharedInvStd = rsqrt(variance + params.epsilon);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Phase 3: Each thread normalizes its elements
-    float mean = sharedMean;
+    // Phase 3: Each thread normalizes its elements (mean already loaded above)
     float invStd = sharedInvStd;
 
     for (uint i = localId; i < params.featureSize; i += threadsPerGroup) {
@@ -235,47 +242,65 @@ kernel void layer_norm_simd(
     uint batchIdx = groupId;
     uint startIdx = batchIdx * params.featureSize;
 
-    // Phase 1: Each thread accumulates partial sum and sum of squares
+    // Phase 1: Compute mean (first pass for numerical stability)
     float localSum = 0.0f;
-    float localSumSq = 0.0f;
 
     for (uint i = localId; i < params.featureSize; i += threadsPerGroup) {
-        float val = input[startIdx + i];
-        localSum += val;
-        localSumSq += val * val;
+        localSum += input[startIdx + i];
     }
 
-    // Phase 2: SIMD-level reduction (32 threads -> 1 value)
+    // SIMD-level reduction for sum
     localSum = simd_sum(localSum);
-    localSumSq = simd_sum(localSumSq);
 
     // Store SIMD group results
     if (simdLaneId == 0) {
         sharedSum[simdGroupId] = localSum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Final reduction for mean
+    if (simdGroupId == 0) {
+        uint numSimdGroups = (threadsPerGroup + 31) / 32;
+        localSum = (simdLaneId < numSimdGroups) ? sharedSum[simdLaneId] : 0.0f;
+        localSum = simd_sum(localSum);
+
+        if (localId == 0) {
+            sharedMean = localSum / float(params.featureSize);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 2: Compute variance using E[(X-μ)²] (numerically stable)
+    float mean = sharedMean;
+    float localSumSq = 0.0f;
+
+    for (uint i = localId; i < params.featureSize; i += threadsPerGroup) {
+        float diff = input[startIdx + i] - mean;
+        localSumSq += diff * diff;
+    }
+
+    // SIMD-level reduction for sum of squared differences
+    localSumSq = simd_sum(localSumSq);
+
+    if (simdLaneId == 0) {
         sharedSumSq[simdGroupId] = localSumSq;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Phase 3: Final reduction across SIMD groups (first SIMD group only)
+    // Final reduction for variance
     if (simdGroupId == 0) {
         uint numSimdGroups = (threadsPerGroup + 31) / 32;
-        localSum = (simdLaneId < numSimdGroups) ? sharedSum[simdLaneId] : 0.0f;
         localSumSq = (simdLaneId < numSimdGroups) ? sharedSumSq[simdLaneId] : 0.0f;
-        localSum = simd_sum(localSum);
         localSumSq = simd_sum(localSumSq);
 
         if (localId == 0) {
-            float mean = localSum / float(params.featureSize);
-            float variance = localSumSq / float(params.featureSize) - mean * mean;
-            variance = max(variance, 0.0f);
-            sharedMean = mean;
+            float variance = localSumSq / float(params.featureSize);
             sharedInvStd = rsqrt(variance + params.epsilon);
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Phase 4: Normalize
-    float mean = sharedMean;
+    // Phase 3: Normalize (mean already loaded above)
     float invStd = sharedInvStd;
 
     for (uint i = localId; i < params.featureSize; i += threadsPerGroup) {
@@ -348,6 +373,93 @@ kernel void linear_forward(
     }
 
     output[batchIdx * params.outputSize + outputIdx] = sum;
+}
+
+/// Linear layer with Kahan summation for maximum precision
+///
+/// Uses compensated summation to reduce floating-point accumulation error.
+/// Recommended for large input sizes (>256) or precision-critical applications.
+kernel void linear_forward_kahan(
+    device const float* input [[buffer(0)]],
+    device const float* weights [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    device const float* bias [[buffer(3)]],
+    constant LinearParams& params [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint batchIdx = gid.y;
+    uint outputIdx = gid.x;
+
+    if (outputIdx >= params.outputSize) return;
+
+    // Kahan summation for improved precision
+    float sum = 0.0f;
+    float c = 0.0f;  // Compensation for lost low-order bits
+
+    uint inputBase = batchIdx * params.inputSize;
+    uint weightBase = outputIdx * params.inputSize;
+
+    for (uint i = 0; i < params.inputSize; i++) {
+        float product = input[inputBase + i] * weights[weightBase + i];
+        float y = product - c;
+        float t = sum + y;
+        c = (t - sum) - y;
+        sum = t;
+    }
+
+    if (params.useBias != 0) {
+        // Add bias with compensation
+        float y = bias[outputIdx] - c;
+        sum = sum + y;
+    }
+
+    output[batchIdx * params.outputSize + outputIdx] = sum;
+}
+
+/// Linear layer with SIMD tree reduction for high-performance precision
+///
+/// Uses SIMD operations for parallel accumulation within threadgroups,
+/// combined with Kahan summation per lane for maximum precision.
+/// Best for large input sizes (>256) on modern Apple Silicon.
+kernel void linear_forward_simd(
+    device const float* input [[buffer(0)]],
+    device const float* weights [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    device const float* bias [[buffer(3)]],
+    constant LinearParams& params [[buffer(4)]],
+    uint2 groupId [[threadgroup_position_in_grid]],
+    uint simdLaneId [[thread_index_in_simdgroup]]
+) {
+    uint batchIdx = groupId.y;
+    uint outputIdx = groupId.x;
+
+    if (outputIdx >= params.outputSize) return;
+
+    uint inputBase = batchIdx * params.inputSize;
+    uint weightBase = outputIdx * params.inputSize;
+
+    // Kahan summation within each SIMD lane
+    float localSum = 0.0f;
+    float c = 0.0f;
+
+    for (uint i = simdLaneId; i < params.inputSize; i += 32) {
+        float product = input[inputBase + i] * weights[weightBase + i];
+        float y = product - c;
+        float t = localSum + y;
+        c = (t - localSum) - y;
+        localSum = t;
+    }
+
+    // SIMD tree reduction (more accurate than sequential addition)
+    float totalSum = simd_sum(localSum);
+
+    // Only lane 0 writes the result
+    if (simdLaneId == 0) {
+        if (params.useBias != 0) {
+            totalSum += bias[outputIdx];
+        }
+        output[batchIdx * params.outputSize + outputIdx] = totalSum;
+    }
 }
 
 // MARK: - Pooling
@@ -423,12 +535,14 @@ kernel void global_avg_pool_1d_parallel(
     }
 }
 
-// Vectorized global avg pool using float4 for 4x memory throughput
+/// Vectorized global avg pool using float4 for 4x memory throughput
+/// Input layout: [channels, length] as float* (reinterpreted as float4* for aligned portion)
+/// Handles both aligned and unaligned lengths correctly
 kernel void global_avg_pool_1d_vec4(
-    device const float4* input [[buffer(0)]],  // Assumes length is multiple of 4
+    device const float* inputScalar [[buffer(0)]],  // Scalar pointer for correct addressing
     device float* output [[buffer(1)]],
     constant uint& channels [[buffer(2)]],
-    constant uint& length [[buffer(3)]],        // Original length (not /4)
+    constant uint& length [[buffer(3)]],
     uint groupId [[threadgroup_position_in_grid]],
     uint localId [[thread_index_in_threadgroup]],
     uint threadsPerGroup [[threads_per_threadgroup]],
@@ -436,27 +550,44 @@ kernel void global_avg_pool_1d_vec4(
     uint simdGroupId [[simdgroup_index_in_threadgroup]]
 ) {
     threadgroup float sharedSum[POOL_THREADGROUP_SIZE / 32];
+    threadgroup float remainderSum;  // Shared storage for remainder contribution
 
     uint channelIdx = groupId;
     if (channelIdx >= channels) return;
 
+    // Calculate channel base offset in scalar terms
+    uint channelBase = channelIdx * length;
     uint vec4Length = length / 4;
-    uint offset = channelIdx * vec4Length;
+    uint remainder = length % 4;
+
+    // Reinterpret as float4 for aligned reads (4x bandwidth)
+    device const float4* input = (device const float4*)(inputScalar + channelBase);
 
     // Accumulate using float4 (4x memory bandwidth utilization)
     float localSum = 0.0f;
     for (uint i = localId; i < vec4Length; i += threadsPerGroup) {
-        float4 val = input[offset + i];
+        float4 val = input[i];
         localSum += val.x + val.y + val.z + val.w;
     }
 
-    // Handle remainder elements if length not multiple of 4
-    uint remainder = length % 4;
-    if (remainder > 0 && localId == 0) {
-        device const float* remainderPtr = (device const float*)(input + channelIdx * vec4Length + vec4Length);
-        for (uint i = 0; i < remainder; i++) {
-            localSum += remainderPtr[i];
+    // Handle remainder elements BEFORE simd_sum
+    // Only thread 0 computes remainder, stores in shared memory
+    if (localId == 0) {
+        float rSum = 0.0f;
+        if (remainder > 0) {
+            device const float* remainderPtr = inputScalar + channelBase + vec4Length * 4;
+            for (uint i = 0; i < remainder; i++) {
+                rSum += remainderPtr[i];
+            }
         }
+        remainderSum = rSum;
+    }
+    // Barrier ensures all threads see remainderSum before proceeding
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Add remainder contribution to thread 0's localSum after barrier
+    if (localId == 0) {
+        localSum += remainderSum;
     }
 
     // SIMD reduction
@@ -628,12 +759,28 @@ kernel void attention_scores_threadgroup(
 
 // Legacy softmax along last dimension - kept for compatibility with small lengths
 // Each thread handles one row sequentially
+//
+// ## Edge Cases Handled
+// - length == 0: No-op (early return)
+// - length == 1: Output is 1.0 (trivial normalization)
+// - All values -Inf: All outputs become NaN (expected mathematical behavior)
+// - All values identical: Uniform distribution 1/length
+// - sum == 0: Protected with epsilon to prevent division by zero
 kernel void softmax_1d(
     device float* data [[buffer(0)]],
     constant uint& length [[buffer(1)]],
     uint id [[thread_position_in_grid]]
 ) {
+    // Edge case: empty array
+    if (length == 0) return;
+
     uint offset = id * length;
+
+    // Edge case: single element is always 1.0
+    if (length == 1) {
+        data[offset] = 1.0f;
+        return;
+    }
 
     // Find max for numerical stability
     float maxVal = data[offset];
@@ -648,9 +795,10 @@ kernel void softmax_1d(
         sum += data[offset + i];
     }
 
-    // Normalize
+    // Normalize (protect against sum == 0 with safe division)
+    float invSum = (sum > 1e-38f) ? (1.0f / sum) : 0.0f;
     for (uint i = 0; i < length; i++) {
-        data[offset + i] /= sum;
+        data[offset + i] *= invSum;
     }
 }
 
@@ -773,6 +921,7 @@ kernel void softmax_online(
     // When combining (max_a, sum_a) with (max_b, sum_b):
     // new_max = max(max_a, max_b)
     // new_sum = sum_a * exp(max_a - new_max) + sum_b * exp(max_b - new_max)
+    // NaN guard: if max is -INFINITY, the thread saw no data, so sum contribution is 0
     for (uint stride = threadsPerGroup / 2; stride > 0; stride >>= 1) {
         if (localId < stride) {
             float maxA = sharedMax[localId];
@@ -781,7 +930,11 @@ kernel void softmax_online(
             float sumB = sharedSum[localId + stride];
 
             float newMax = max(maxA, maxB);
-            float newSum = sumA * exp(maxA - newMax) + sumB * exp(maxB - newMax);
+            // Guard against NaN: exp(-INF - (-INF)) = exp(NaN) = NaN
+            // If a max is -INFINITY, that thread saw no data, so its sum contribution is 0
+            float scaleA = isinf(maxA) && maxA < 0 ? 0.0f : exp(maxA - newMax);
+            float scaleB = isinf(maxB) && maxB < 0 ? 0.0f : exp(maxB - newMax);
+            float newSum = sumA * scaleA + sumB * scaleB;
 
             sharedMax[localId] = newMax;
             sharedSum[localId] = newSum;
@@ -797,11 +950,17 @@ kernel void softmax_online(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     float globalMax = sharedGlobalMax;
-    float invSum = 1.0f / sharedGlobalSum;
+    // Guard against division by zero - if sum is 0 (all values underflowed),
+    // output uniform distribution (each element = 1/length)
+    float globalSum = sharedGlobalSum;
+    float invSum = globalSum > 0.0f ? 1.0f / globalSum : 0.0f;
+    float uniformVal = 1.0f / float(length);
 
     // Phase 3: Compute final softmax values
     for (uint i = localId; i < length; i += threadsPerGroup) {
-        data[rowOffset + i] = exp(data[rowOffset + i] - globalMax) * invSum;
+        float expVal = exp(data[rowOffset + i] - globalMax);
+        // If sum was 0, fall back to uniform distribution
+        data[rowOffset + i] = globalSum > 0.0f ? expVal * invSum : uniformVal;
     }
 }
 
@@ -921,15 +1080,25 @@ kernel void leaky_relu_vec4(
 // MARK: - Half-Precision Kernels (2x throughput on A12+)
 // Use half precision for activations and intermediate values when full precision isn't needed
 
+/// Numerically stable branchless sigmoid for half precision
+/// Uses select() instead of if/else to ensure all threads execute the same instructions,
+/// avoiding SIMD divergence penalties on GPU
 inline half stable_sigmoid_half(half x) {
-    x = clamp(x, half(-15.0h), half(15.0h));  // Tighter clamp for half
-    if (x >= 0.0h) {
-        half z = exp(-x);
-        return 1.0h / (1.0h + z);
-    } else {
-        half z = exp(x);
-        return z / (1.0h + z);
-    }
+    // Clamp to prevent overflow (half has smaller range than float)
+    // exp(15) ≈ 3.3M which is near half max (~65504)
+    x = clamp(x, half(-15.0h), half(15.0h));
+
+    // Compute both branches (safe after clamping)
+    half exp_neg_x = exp(-x);
+    half exp_pos_x = exp(x);
+
+    // For x >= 0: 1 / (1 + exp(-x))
+    half result_pos = half(1.0h) / (half(1.0h) + exp_neg_x);
+    // For x < 0: exp(x) / (1 + exp(x))
+    half result_neg = exp_pos_x / (half(1.0h) + exp_pos_x);
+
+    // select() is branchless - all threads execute the same instruction
+    return select(result_neg, result_pos, x >= half(0.0h));
 }
 
 kernel void relu_half(
@@ -962,6 +1131,8 @@ kernel void sigmoid_half(
     output[id] = stable_sigmoid_half(input[id]);
 }
 
+// Half-precision GELU with input clamping for numerical stability
+// half max is ~65504, so clamp conservatively to avoid x^3 overflow
 kernel void gelu_half(
     device const half* input [[buffer(0)]],
     device half* output [[buffer(1)]],
@@ -969,7 +1140,8 @@ kernel void gelu_half(
     uint id [[thread_position_in_grid]]
 ) {
     if (id >= length) return;
-    half x = input[id];
+    // Clamp to prevent x^3 overflow (8^3 = 512, safely within half range)
+    half x = clamp(input[id], half(-8.0h), half(8.0h));
     const half sqrt_2_over_pi = half(0.7978845608h);
     half x3 = x * x * x;
     output[id] = half(0.5h) * x * (half(1.0h) + tanh(sqrt_2_over_pi * (x + half(0.044715h) * x3)));

@@ -115,7 +115,7 @@ for (inputLen, kernelLen) in directConvSizes {
 
     let iterations = 500
     let (totalMs, avgUs) = measureTime(iterations) {
-        conv.process(input: input, output: &output)
+        try! conv.process(input: input, output: &output)
     }
 
     let throughput = Double(iterations) / (totalMs / 1000.0)
@@ -135,7 +135,7 @@ for (inputLen, kernelLen) in fftConvSizes {
 
     let iterations = 200
     let (totalMs, avgUs) = measureTime(iterations) {
-        conv.process(input: input, output: &output)
+        try! conv.process(input: input, output: &output)
     }
 
     let throughput = Double(iterations) / (totalMs / 1000.0)
@@ -173,7 +173,7 @@ for cfg in conv1dConfigs {
     }
     try! inputTensor.copy(from: inputData)
 
-    let context = ComputeContext(device: device)
+    let context = try! ComputeContext(device: device)
 
     // Warm up
     try! context.executeSync { encoder in
@@ -224,7 +224,7 @@ for cfg in lstmConfigs {
     }
     try! inputTensor.copy(from: inputData)
 
-    let context = ComputeContext(device: device)
+    let context = try! ComputeContext(device: device)
 
     // Warm up
     try! context.executeSync { encoder in
@@ -265,7 +265,7 @@ for seq in seqLengths {
     }
     try! inputTensor.copy(from: inputData)
 
-    let context = ComputeContext(device: device)
+    let context = try! ComputeContext(device: device)
 
     // Warm up
     try! context.executeSync { encoder in
@@ -334,7 +334,7 @@ for cfg in linearConfigs {
     }
     try! inputTensor.copy(from: inputData)
 
-    let context = ComputeContext(device: device)
+    let context = try! ComputeContext(device: device)
 
     // Warm up
     try! context.executeSync { encoder in
@@ -381,7 +381,7 @@ for cfg in batchedLinearConfigs {
     }
     try! inputTensor.copy(from: inputData)
 
-    let context = ComputeContext(device: device)
+    let context = try! ComputeContext(device: device)
 
     // Warm up
     try! context.executeSync { encoder in
@@ -419,12 +419,12 @@ for cfg in partConvConfigs {
     var output = [Float](repeating: 0, count: cfg.inputLen + cfg.irLen - 1)
 
     // Warm up
-    conv.process(input: input, output: &output)
+    try! conv.process(input: input, output: &output)
     conv.reset()
 
     let iterations = 50
     let (totalMs, avgUs) = measureTime(iterations) {
-        conv.process(input: input, output: &output)
+        try! conv.process(input: input, output: &output)
     }
 
     let throughput = Double(iterations) / (totalMs / 1000.0)

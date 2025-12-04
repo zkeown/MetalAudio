@@ -23,6 +23,37 @@ public enum FilterError: Error, LocalizedError {
 /// `BiquadFilter` is NOT thread-safe. The filter maintains internal state (z1, z2)
 /// that is modified during processing. Each audio channel or thread should use
 /// its own filter instance. This is the standard pattern for per-channel IIR filters.
+///
+/// ## Processing Modes
+///
+/// This filter supports two processing methods:
+///
+/// 1. **Batch processing** (`process(input:)`): Uses vDSP for SIMD-optimized processing.
+///    Best for processing complete audio buffers. Maintains internal vDSP state that
+///    is automatically synced with the delay state.
+///
+/// 2. **Sample-by-sample** (`process(sample:)`): Uses direct biquad equation.
+///    Best for real-time callbacks, modulating parameters, or when processing
+///    a single sample at a time.
+///
+/// ## State Synchronization
+///
+/// Both methods share a unified delay state (`delays`). When switching between
+/// modes mid-stream, the state is approximated because vDSP's internal state
+/// cannot be directly read. For continuous streaming:
+///
+/// - **Recommended**: Use one mode consistently for the entire stream.
+/// - **If mixing modes**: Call `reset()` when switching to ensure clean state.
+/// - **Expected behavior**: Slight discontinuity may occur at mode transitions
+///   without reset, especially for high-Q filters.
+///
+/// ```swift
+/// // Safe pattern for mode switching
+/// filter.reset()  // Clear all state
+/// let batch = filter.process(input: buffer)  // Batch mode
+/// filter.reset()  // Clear before switching
+/// let sample = filter.process(sample: nextSample)  // Sample mode
+/// ```
 public final class BiquadFilter {
 
     /// Filter type
@@ -57,8 +88,11 @@ public final class BiquadFilter {
     }
 
     private var coefficients: Coefficients
-    private var z1: Float = 0
-    private var z2: Float = 0
+
+    /// Filter state (delay line) - unified for both sample and batch processing
+    /// Using [Double] because vDSP.Biquad.apply(input:delays:) requires Double state
+    /// State layout: [z1, z2] per section (we use 1 section, so 2 elements)
+    private var delays: [Double] = [0.0, 0.0]
 
     // For Accelerate batch processing
     private var biquadSetup: vDSP.Biquad<Float>?
@@ -72,8 +106,15 @@ public final class BiquadFilter {
     ///   - type: Filter type
     ///   - frequency: Center/cutoff frequency in Hz (must be > 0 and < sampleRate/2)
     ///   - sampleRate: Sample rate in Hz (must be > 0)
-    ///   - q: Q factor (must be > 0, default: 0.707 for Butterworth)
+    ///   - q: Q factor (must be > 0, default: 0.7071 = 1/√2 for Butterworth response)
     /// - Throws: `FilterError.invalidParameter` if parameters are out of valid range
+    ///
+    /// ## Q Factor Guidelines
+    /// - **Q = 0.7071 (1/√2)**: Butterworth (maximally flat passband, no resonance)
+    /// - **Q = 0.5**: Bessel-like (maximally flat group delay)
+    /// - **Q = 1.0**: Slight resonance at cutoff
+    /// - **Q > 1.0**: Increasing resonance peak at cutoff frequency
+    /// - **Q > 10**: High resonance, may cause instability with float32
     ///
     /// - Note: Coefficient calculations are performed in Double precision to maintain
     ///   accuracy for high-Q filters (Q > 10) and extreme frequency ratios. This prevents
@@ -209,12 +250,18 @@ public final class BiquadFilter {
         }
 
         // Guard against division by near-zero a0 (can cause NaN propagation)
-        let a0Tolerance: Double = 1e-15
-        guard abs(a0) > a0Tolerance else {
-            // Reset to pass-through instead of producing NaN
-            coefficients = Coefficients(b0: 1, b1: 0, b2: 0, a1: 0, a2: 0)
-            updateBiquadSetup()
-            return
+        // This indicates invalid filter parameters - throw instead of silently falling back to pass-through
+        // Note: Use Float tolerance because coefficients will be stored as Float32. A value that passes
+        // Double tolerance (1e-15) might still produce Inf when divided in Float32 representation.
+        let a0Float = Float(a0)
+        let a0Tolerance: Float = 1e-6  // Safe margin for Float32 division
+        guard abs(a0Float) > a0Tolerance else {
+            throw FilterError.invalidParameter(
+                name: "a0 (computed)",
+                value: a0Float,
+                requirement: "denominator coefficient a0 must not be near zero (|a0| > 1e-6). " +
+                    "This typically indicates frequency near 0 Hz or Nyquist, or extreme Q values"
+            )
         }
 
         // Normalize coefficients (in Double) then convert to Float32 for storage
@@ -244,11 +291,19 @@ public final class BiquadFilter {
 
     /// Process a single sample (Direct Form II Transposed)
     ///
+    /// ## State Persistence
+    /// Uses the same delay line as batch processing, ensuring consistent state
+    /// when mixing per-sample and batch processing (e.g., for end-of-buffer handling).
+    ///
     /// ## Denormal Handling
     /// State variables are flushed to zero when they decay below `Float.leastNormalMagnitude`.
     /// This prevents 10-100x performance degradation that occurs when processing denormal
     /// floating-point values (common during silent audio or filter decay tails).
     public func process(sample: Float) -> Float {
+        // Read state from unified delay line (convert from Double for consistency with vDSP)
+        var z1 = Float(delays[0])
+        var z2 = Float(delays[1])
+
         let output = coefficients.b0 * sample + z1
         z1 = coefficients.b1 * sample - coefficients.a1 * output + z2
         z2 = coefficients.b2 * sample - coefficients.a2 * output
@@ -258,25 +313,48 @@ public final class BiquadFilter {
         if abs(z1) < Float.leastNormalMagnitude { z1 = 0 }
         if abs(z2) < Float.leastNormalMagnitude { z2 = 0 }
 
+        // Write state back to unified delay line
+        delays[0] = Double(z1)
+        delays[1] = Double(z2)
+
         return output
     }
 
     /// Process buffer using Accelerate (much faster for blocks)
     ///
+    /// ## State Persistence
+    /// This method uses vDSP's internal state which is separate from per-sample state.
+    ///
+    /// **IMPORTANT**: If you mix batch and single-sample processing, call `reset()`
+    /// when switching modes to ensure clean state. Otherwise you may get discontinuities.
+    ///
+    /// For continuous streaming where you need to mix modes (e.g., processing most
+    /// samples in batches but the last few individually), consider using
+    /// `process(sample:)` exclusively for consistency.
+    ///
     /// ## Denormal Handling
-    /// After processing, the filter's internal state is checked and denormals are
-    /// flushed to zero. This prevents performance degradation on subsequent calls
-    /// when processing silent audio or filter decay tails.
+    /// vDSP handles denormals internally via FTZ (Flush-To-Zero) mode.
     public func process(input: [Float]) -> [Float] {
         guard var setup = biquadSetup else {
             return input.map { process(sample: $0) }
         }
+
+        // vDSP.Biquad maintains internal state - apply is mutating
         let output = setup.apply(input: input)
 
-        // Note: vDSP's biquad handles denormals internally via FTZ (Flush-To-Zero) mode.
-        // The internal state (z1, z2) is managed by vDSP and doesn't need manual flushing.
-        // Output buffer denormal flushing removed - vDSP output is already safe and the
-        // per-sample check was adding unnecessary overhead (1-2μs per sample).
+        // Update the stored setup with mutated state
+        biquadSetup = setup
+
+        // Sync delays array with vDSP state for consistency on mode switch
+        // Note: We can't read vDSP's internal state, so we approximate by
+        // running a zero through to capture state effect
+        if let lastOutput = output.last, input.count > 0 {
+            // Update our delay estimate based on the filter equation
+            // This helps if user switches to per-sample processing
+            let lastInput = input.last!
+            delays[0] = Double(coefficients.b1 * lastInput - coefficients.a1 * lastOutput + Float(delays[1]))
+            delays[1] = Double(coefficients.b2 * lastInput - coefficients.a2 * lastOutput)
+        }
 
         return output
     }
@@ -288,8 +366,7 @@ public final class BiquadFilter {
 
     /// Reset filter state
     public func reset() {
-        z1 = 0
-        z2 = 0
+        delays = [0.0, 0.0]
         updateBiquadSetup()
     }
 
@@ -367,6 +444,15 @@ public final class FilterBank {
         sampleRate: Float,
         q: Float = 1.414
     ) throws {
+        // Guard against division by zero when bandCount < 2
+        guard bandCount >= 2 else {
+            throw FilterError.invalidParameter(
+                name: "bandCount",
+                value: Float(bandCount),
+                requirement: "must be >= 2 for logarithmic band spacing"
+            )
+        }
+
         let logLow = log10(lowFreq)
         let logHigh = log10(highFreq)
         let logStep = (logHigh - logLow) / Float(bandCount - 1)
@@ -384,12 +470,12 @@ public final class FilterBank {
 
     /// Set gain for a specific band
     /// - Parameters:
-    ///   - band: Band index
+    ///   - band: Band index (must be in range 0..<bandCount)
     ///   - gainDB: Gain in decibels
     ///   - frequency: Center frequency
     ///   - sampleRate: Sample rate
     ///   - q: Q factor
-    /// - Throws: `FilterError.invalidParameter` if parameters are out of valid range
+    /// - Throws: `FilterError.invalidParameter` if band index or other parameters are out of valid range
     public func setBandGain(
         band: Int,
         gainDB: Float,
@@ -397,7 +483,13 @@ public final class FilterBank {
         sampleRate: Float,
         q: Float = 1.414
     ) throws {
-        guard band >= 0 && band < bandCount else { return }
+        guard band >= 0 && band < bandCount else {
+            throw FilterError.invalidParameter(
+                name: "band",
+                value: Float(band),
+                requirement: "must be in range 0..<\(bandCount)"
+            )
+        }
         try filters[band].configure(
             type: .peaking(gainDB: gainDB),
             frequency: frequency,

@@ -114,6 +114,8 @@ public final class AudioBuffer {
     ///   using this buffer have completed before calling. On Apple Silicon with `storageModeShared`,
     ///   the GPU and CPU share memory, so proper synchronization is essential.
     ///
+    /// For synchronized copying, use `safeCopyFromCPU(_:size:context:fenceValue:)` instead.
+    ///
     /// - Parameters:
     ///   - data: Source data pointer
     ///   - size: Number of bytes to copy (must not exceed buffer size)
@@ -122,6 +124,43 @@ public final class AudioBuffer {
         guard size <= byteSize else {
             throw MetalAudioError.bufferSizeMismatch(expected: size, actual: byteSize)
         }
+        memcpy(buffer.contents(), data, size)
+        #if os(macOS)
+        if buffer.storageMode == .managed {
+            buffer.didModifyRange(0..<size)
+        }
+        #endif
+    }
+
+    /// Copy data from CPU to GPU buffer with GPU synchronization
+    ///
+    /// This method waits for the GPU to complete any operations up to the specified
+    /// fence value before copying, ensuring safe access to the buffer.
+    ///
+    /// - Parameters:
+    ///   - data: Source data pointer
+    ///   - size: Number of bytes to copy (must not exceed buffer size)
+    ///   - context: Compute context for synchronization
+    ///   - fenceValue: GPU fence value to wait for before copying
+    ///   - timeout: Maximum time to wait for GPU (nil = use default timeout)
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if size exceeds buffer capacity,
+    ///           `MetalAudioError.gpuTimeout` if fence wait times out
+    public func safeCopyFromCPU(
+        _ data: UnsafeRawPointer,
+        size: Int,
+        context: ComputeContext,
+        fenceValue: UInt64,
+        timeout: TimeInterval? = nil
+    ) throws {
+        guard size <= byteSize else {
+            throw MetalAudioError.bufferSizeMismatch(expected: size, actual: byteSize)
+        }
+
+        // Wait for GPU to complete operations on this buffer
+        guard context.waitForGPU(fenceValue: fenceValue, timeout: timeout) else {
+            throw MetalAudioError.gpuTimeout(timeout ?? ComputeContext.defaultGPUTimeout)
+        }
+
         memcpy(buffer.contents(), data, size)
         #if os(macOS)
         if buffer.storageMode == .managed {
@@ -143,6 +182,45 @@ public final class AudioBuffer {
         }
         // Guard against empty arrays (baseAddress can be nil)
         guard !array.isEmpty else { return }
+
+        array.withUnsafeBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            memcpy(buffer.contents(), baseAddress, ptr.count)
+        }
+        #if os(macOS)
+        if buffer.storageMode == .managed {
+            buffer.didModifyRange(0..<byteSize)
+        }
+        #endif
+    }
+
+    /// Copy entire buffer from CPU to GPU with GPU synchronization
+    /// - Parameters:
+    ///   - array: Source Float array (must match buffer sample count)
+    ///   - context: Compute context for synchronization
+    ///   - fenceValue: GPU fence value to wait for before copying
+    ///   - timeout: Maximum time to wait for GPU (nil = use default timeout)
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if array size doesn't match,
+    ///           `MetalAudioError.gpuTimeout` if fence wait times out
+    public func safeCopyFromCPU(
+        _ array: [Float],
+        context: ComputeContext,
+        fenceValue: UInt64,
+        timeout: TimeInterval? = nil
+    ) throws {
+        let expectedCount = sampleCount * channelCount
+        guard array.count == expectedCount else {
+            throw MetalAudioError.bufferSizeMismatch(
+                expected: expectedCount,
+                actual: array.count
+            )
+        }
+        guard !array.isEmpty else { return }
+
+        // Wait for GPU to complete operations on this buffer
+        guard context.waitForGPU(fenceValue: fenceValue, timeout: timeout) else {
+            throw MetalAudioError.gpuTimeout(timeout ?? ComputeContext.defaultGPUTimeout)
+        }
 
         array.withUnsafeBytes { ptr in
             guard let baseAddress = ptr.baseAddress else { return }
@@ -209,11 +287,109 @@ public final class AudioBuffer {
     }
 
     /// Copy entire buffer to Float array
+    ///
+    /// - Warning: **Storage Mode**: This method requires `storageModeShared` or `storageModeManaged`.
+    ///   Calling on a `storageModePrivate` buffer will return garbage data or crash.
+    ///   All buffers created via `AudioBuffer.init(device:...)` use the device's preferred
+    ///   storage mode, which is `storageModeShared` on iOS and Apple Silicon Macs.
     public func toArray() -> [Float] {
         let count = sampleCount * channelCount
         guard count > 0 else { return [] }
 
         var result = [Float](repeating: 0, count: count)
+        result.withUnsafeMutableBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            memcpy(baseAddress, buffer.contents(), min(ptr.count, byteSize))
+        }
+        return result
+    }
+
+    // MARK: - Typed Copy Variants
+
+    /// Copy Int16 audio data from CPU to GPU buffer
+    ///
+    /// For audio formats using 16-bit integer samples (common in WAV files, Core Audio).
+    ///
+    /// - Parameter array: Source Int16 array (must match buffer sample count)
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if array size doesn't match
+    public func copyFromCPU(_ array: [Int16]) throws {
+        let expectedCount = sampleCount * channelCount
+        guard array.count == expectedCount else {
+            throw MetalAudioError.bufferSizeMismatch(
+                expected: expectedCount,
+                actual: array.count
+            )
+        }
+        guard !array.isEmpty else { return }
+
+        array.withUnsafeBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            memcpy(buffer.contents(), baseAddress, ptr.count)
+        }
+        #if os(macOS)
+        if buffer.storageMode == .managed {
+            buffer.didModifyRange(0..<byteSize)
+        }
+        #endif
+    }
+
+    /// Copy Float16 audio data from CPU to GPU buffer
+    ///
+    /// For half-precision processing pipelines. Float16 provides 2x memory bandwidth
+    /// at the cost of reduced precision (~3 decimal digits vs ~7 for Float32).
+    ///
+    /// - Parameter array: Source Float16 array (must match buffer sample count)
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if array size doesn't match
+    public func copyFromCPU(_ array: [Float16]) throws {
+        let expectedCount = sampleCount * channelCount
+        guard array.count == expectedCount else {
+            throw MetalAudioError.bufferSizeMismatch(
+                expected: expectedCount,
+                actual: array.count
+            )
+        }
+        guard !array.isEmpty else { return }
+
+        array.withUnsafeBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            memcpy(buffer.contents(), baseAddress, ptr.count)
+        }
+        #if os(macOS)
+        if buffer.storageMode == .managed {
+            buffer.didModifyRange(0..<byteSize)
+        }
+        #endif
+    }
+
+    /// Copy buffer contents to Int16 array
+    ///
+    /// For reading 16-bit integer audio data back to CPU.
+    ///
+    /// - Warning: **Storage Mode**: Requires `storageModeShared` or `storageModeManaged`.
+    /// - Returns: Array of Int16 samples
+    public func toInt16Array() -> [Int16] {
+        let count = sampleCount * channelCount
+        guard count > 0 else { return [] }
+
+        var result = [Int16](repeating: 0, count: count)
+        result.withUnsafeMutableBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            memcpy(baseAddress, buffer.contents(), min(ptr.count, byteSize))
+        }
+        return result
+    }
+
+    /// Copy buffer contents to Float16 array
+    ///
+    /// For reading half-precision audio data back to CPU.
+    ///
+    /// - Warning: **Storage Mode**: Requires `storageModeShared` or `storageModeManaged`.
+    /// - Returns: Array of Float16 samples
+    public func toFloat16Array() -> [Float16] {
+        let count = sampleCount * channelCount
+        guard count > 0 else { return [] }
+
+        var result = [Float16](repeating: 0, count: count)
         result.withUnsafeMutableBytes { ptr in
             guard let baseAddress = ptr.baseAddress else { return }
             memcpy(baseAddress, buffer.contents(), min(ptr.count, byteSize))
@@ -243,9 +419,20 @@ public final class AudioBuffer {
         buffer.contents().assumingMemoryBound(to: T.self)
     }
 
-    /// Access buffer contents as Float pointer
-    /// - Note: This assumes the buffer format is float32. Use with caution.
-    public var floatContents: UnsafeMutablePointer<Float> {
+    /// Access buffer contents as Float pointer (safe version)
+    /// - Returns: Float pointer if format is `.float32`, nil otherwise
+    /// - Note: For other formats, use `contents<T>()` or `contentsUnchecked<T>()` with appropriate type
+    public var floatContents: UnsafeMutablePointer<Float>? {
+        guard format == .float32 else { return nil }
+        return contentsUnchecked()
+    }
+
+    /// Access buffer contents as Float pointer (unchecked version for performance-critical code)
+    /// - Warning: **No format validation.** Only use when format is guaranteed to be `.float32`.
+    ///   Using with wrong format causes undefined behavior (memory reinterpretation).
+    /// - Returns: Float pointer to buffer contents
+    @inline(__always)
+    public var floatContentsUnchecked: UnsafeMutablePointer<Float> {
         contentsUnchecked()
     }
 }
@@ -298,6 +485,23 @@ public enum BufferPoolError: Error, LocalizedError {
     }
 }
 
+/// Handle for a pooled buffer that includes generation tracking
+///
+/// The generation number ensures that even if Metal reuses a GPU address for a new buffer,
+/// stale handles to old buffers at the same address can be detected and rejected.
+public struct PooledBufferHandle: Hashable, Sendable {
+    /// The GPU address of the buffer
+    public let address: UInt64
+    /// Monotonic generation number assigned at acquisition
+    public let generation: UInt64
+
+    /// Create a handle for a buffer
+    internal init(address: UInt64, generation: UInt64) {
+        self.address = address
+        self.generation = generation
+    }
+}
+
 /// A pool of reusable audio buffers to minimize allocations during real-time processing
 ///
 /// ## Thread Safety
@@ -308,6 +512,13 @@ public enum BufferPoolError: Error, LocalizedError {
 /// This pool pre-allocates all buffers at initialization. The `acquire()` method
 /// will throw `BufferPoolError.poolExhausted` if no buffers are available rather
 /// than allocating (which would block the real-time thread).
+///
+/// ## Buffer Identity and GPU Address Reuse
+/// Metal may reuse GPU addresses for newly allocated buffers after old buffers are
+/// deallocated. This pool uses generation-based tracking to distinguish between
+/// different buffer instances at the same address. Each acquisition increments a
+/// monotonic generation counter, ensuring stale buffer references cannot be released
+/// back to the pool even if their GPU address has been reused.
 public final class AudioBufferPool: @unchecked Sendable {
 
     private let sampleCount: Int
@@ -317,12 +528,31 @@ public final class AudioBufferPool: @unchecked Sendable {
     private var unfairLock = os_unfair_lock()
     private let poolSize: Int
 
+    /// Monotonic generation counter for buffer handle tracking
+    /// Incremented on each acquire() to create unique handles
+    private var generationCounter: UInt64 = 0
+
+    /// Maps GPU address -> current valid generation for that address
+    /// Only the most recent generation for each address is valid for release
+    private var addressGenerations: [UInt64: UInt64] = [:]
+
     /// Set of GPU addresses belonging to this pool (for validation)
     /// Using UInt64 (GPU address) as Set lookup is O(1) and doesn't require allocation
-    private let poolBufferAddresses: Set<UInt64>
+    private var poolBufferAddresses: Set<UInt64>
 
     /// Set of GPU addresses currently in the available pool (to detect duplicate releases)
     private var availableAddresses: Set<UInt64>
+
+    /// Set of GPU addresses that were retired via shrinkAvailable
+    /// Retired addresses are no longer valid for release back to the pool.
+    /// Limited to prevent unbounded memory growth in long-running applications.
+    private var retiredAddresses: Set<UInt64> = []
+
+    /// Maximum number of retired addresses to track before clearing old entries.
+    /// After a GPU address is retired, the memory may be reused by Metal for new buffers.
+    /// We track retired addresses to reject stale release attempts, but must bound the set
+    /// to prevent memory leaks. 1000 entries is sufficient for typical audio use cases.
+    private static let maxRetiredAddresses = 1000
 
     /// Initialize a buffer pool with pre-allocated buffers
     /// - Parameters:
@@ -377,10 +607,103 @@ public final class AudioBufferPool: @unchecked Sendable {
             throw BufferPoolError.poolExhausted(poolSize: poolSize)
         }
 
+        let address = buffer.buffer.gpuAddress
+
         // Remove from available set (O(1) for Set)
-        availableAddresses.remove(buffer.buffer.gpuAddress)
+        availableAddresses.remove(address)
+
+        // Update generation for this address (for handle-based validation)
+        generationCounter += 1
+        addressGenerations[address] = generationCounter
 
         return buffer
+    }
+
+    /// Acquire a buffer from the pool (non-throwing version for real-time safety)
+    ///
+    /// Use this in audio render callbacks where throwing exceptions is unsafe.
+    /// Exception unwinding can cause memory allocations which violate real-time
+    /// constraints. This method returns `nil` if no buffers are available instead.
+    ///
+    /// - Returns: An available buffer, or `nil` if pool is exhausted
+    /// - Note: **Real-time safe** - no allocations, no exceptions, no blocking
+    public func acquireIfAvailable() -> AudioBuffer? {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+
+        guard let buffer = available.popLast() else {
+            return nil  // Pool exhausted - return nil instead of throwing
+        }
+
+        let address = buffer.buffer.gpuAddress
+
+        // Remove from available set (O(1) for Set)
+        availableAddresses.remove(address)
+
+        // Update generation for this address (for handle-based validation)
+        generationCounter += 1
+        addressGenerations[address] = generationCounter
+
+        return buffer
+    }
+
+    /// Acquire a buffer from the pool with a handle (non-throwing version)
+    ///
+    /// Use this in audio render callbacks where throwing exceptions is unsafe.
+    /// The returned handle enables generation-validated release.
+    ///
+    /// - Returns: Tuple of (buffer, handle), or `nil` if pool is exhausted
+    /// - Note: **Real-time safe** - no allocations, no exceptions, no blocking
+    public func acquireWithHandleIfAvailable() -> (buffer: AudioBuffer, handle: PooledBufferHandle)? {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+
+        guard let buffer = available.popLast() else {
+            return nil  // Pool exhausted
+        }
+
+        let address = buffer.buffer.gpuAddress
+
+        // Remove from available set (O(1) for Set)
+        availableAddresses.remove(address)
+
+        // Update generation for this address
+        generationCounter += 1
+        let generation = generationCounter
+        addressGenerations[address] = generation
+
+        let handle = PooledBufferHandle(address: address, generation: generation)
+        return (buffer, handle)
+    }
+
+    /// Acquire a buffer from the pool with a handle for validated release
+    ///
+    /// The returned handle contains a generation number that ensures safe release
+    /// even in the presence of GPU address reuse by Metal.
+    ///
+    /// - Returns: Tuple of (buffer, handle)
+    /// - Throws: `BufferPoolError.poolExhausted` if no buffers available
+    /// - Note: This is real-time safe - no allocations occur
+    public func acquireWithHandle() throws -> (buffer: AudioBuffer, handle: PooledBufferHandle) {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+
+        guard let buffer = available.popLast() else {
+            throw BufferPoolError.poolExhausted(poolSize: poolSize)
+        }
+
+        let address = buffer.buffer.gpuAddress
+
+        // Remove from available set (O(1) for Set)
+        availableAddresses.remove(address)
+
+        // Update generation for this address
+        generationCounter += 1
+        let generation = generationCounter
+        addressGenerations[address] = generation
+
+        let handle = PooledBufferHandle(address: address, generation: generation)
+        return (buffer, handle)
     }
 
     /// Return a buffer to the pool
@@ -392,6 +715,56 @@ public final class AudioBufferPool: @unchecked Sendable {
 
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
+
+        // Validate buffer belongs to this pool and wasn't retired
+        guard poolBufferAddresses.contains(address) else {
+            throw BufferPoolError.foreignBuffer
+        }
+
+        // Reject buffers that were retired via shrinkAvailable
+        // Their GPU addresses may have been reused by new allocations
+        guard !retiredAddresses.contains(address) else {
+            throw BufferPoolError.foreignBuffer
+        }
+
+        // Check for duplicate release
+        guard !availableAddresses.contains(address) else {
+            throw BufferPoolError.duplicateRelease
+        }
+
+        // Return to pool
+        available.append(buffer)
+        availableAddresses.insert(address)
+    }
+
+    /// Return a buffer to the pool with handle validation
+    ///
+    /// This method validates that the handle's generation matches the current valid
+    /// generation for the buffer's address. This prevents stale buffer references
+    /// from being released back to the pool, even if Metal has reused the GPU address.
+    ///
+    /// - Parameters:
+    ///   - buffer: The buffer to release
+    ///   - handle: The handle obtained from `acquireWithHandle()`
+    /// - Throws: `BufferPoolError.foreignBuffer` if handle is stale or doesn't match,
+    ///           `BufferPoolError.duplicateRelease` if buffer is already in the pool
+    /// - Note: This is real-time safe - no allocations occur
+    public func release(_ buffer: AudioBuffer, handle: PooledBufferHandle) throws {
+        let address = buffer.buffer.gpuAddress
+
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+
+        // Validate handle address matches buffer
+        guard handle.address == address else {
+            throw BufferPoolError.foreignBuffer
+        }
+
+        // Validate generation matches (detects stale handles after address reuse)
+        guard let validGeneration = addressGenerations[address],
+              handle.generation == validGeneration else {
+            throw BufferPoolError.foreignBuffer
+        }
 
         // Validate buffer belongs to this pool
         guard poolBufferAddresses.contains(address) else {
@@ -420,6 +793,40 @@ public final class AudioBufferPool: @unchecked Sendable {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
 
+        // Validate buffer belongs to this pool, isn't retired, and isn't already available
+        guard poolBufferAddresses.contains(address),
+              !retiredAddresses.contains(address),
+              !availableAddresses.contains(address) else {
+            return false
+        }
+
+        available.append(buffer)
+        availableAddresses.insert(address)
+        return true
+    }
+
+    /// Return a buffer to the pool with handle validation (non-throwing version)
+    ///
+    /// Use this in audio callbacks where throwing is not desirable.
+    /// Invalid buffers or stale handles are silently ignored.
+    /// - Parameters:
+    ///   - buffer: The buffer to release
+    ///   - handle: The handle obtained from `acquireWithHandle()`
+    /// - Returns: `true` if buffer was successfully released, `false` if invalid
+    @discardableResult
+    public func releaseIfValid(_ buffer: AudioBuffer, handle: PooledBufferHandle) -> Bool {
+        let address = buffer.buffer.gpuAddress
+
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+
+        // Validate handle matches buffer address
+        guard handle.address == address else { return false }
+
+        // Validate generation matches
+        guard let validGeneration = addressGenerations[address],
+              handle.generation == validGeneration else { return false }
+
         // Validate buffer belongs to this pool and isn't already available
         guard poolBufferAddresses.contains(address),
               !availableAddresses.contains(address) else {
@@ -444,7 +851,12 @@ public final class AudioBufferPool: @unchecked Sendable {
     }
 
     /// Shrink the available pool by releasing buffers
-    /// Only affects buffers that are currently available (not in use)
+    ///
+    /// Only affects buffers that are currently available (not in use).
+    /// Retired buffers cannot be returned to the pool - any attempt to release
+    /// a retired buffer will be rejected to prevent memory safety issues
+    /// (the underlying MTLBuffer may have been deallocated).
+    ///
     /// - Parameter targetCount: Target number of available buffers to keep
     /// - Returns: Number of buffers released
     @discardableResult
@@ -457,9 +869,26 @@ public final class AudioBufferPool: @unchecked Sendable {
             // Remove from the end (most recently released)
             let removed = available.suffix(toRemove)
             for buffer in removed {
-                availableAddresses.remove(buffer.buffer.gpuAddress)
+                let address = buffer.buffer.gpuAddress
+                availableAddresses.remove(address)
+                // Mark as retired so future release attempts are rejected
+                // This prevents memory safety issues if the GPU address is reused
+                retiredAddresses.insert(address)
+                poolBufferAddresses.remove(address)
+                // Clear generation tracking for retired address
+                // Generation-based release will fail because addressGenerations won't contain the address
+                addressGenerations.removeValue(forKey: address)
             }
             available.removeLast(toRemove)
+
+            // Bound retired addresses set to prevent unbounded memory growth
+            // If we exceed the limit, clear all retired addresses since they're
+            // likely very old and their GPU addresses have been reused anyway
+            // Note: This is safe because generation-based validation also checks addressGenerations,
+            // which was cleared above for retired addresses
+            if retiredAddresses.count > Self.maxRetiredAddresses {
+                retiredAddresses.removeAll()
+            }
         }
         return toRemove
     }

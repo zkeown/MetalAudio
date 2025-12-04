@@ -430,7 +430,7 @@ final class COLAValidationTests: XCTestCase {
         XCTAssertEqual(colaConfig.colaCompliance, .perfect, "Hann with 75% overlap should be perfect COLA")
 
         let colaFFT = try FFT(device: device, config: colaConfig)
-        let colaSTFT = colaFFT.stft(input: input)
+        let colaSTFT = try colaFFT.stft(input: input)
         let colaOutput = colaFFT.istft(stft: colaSTFT)
 
         // Non-COLA configuration (arbitrary hop with Hann)
@@ -438,7 +438,7 @@ final class COLAValidationTests: XCTestCase {
         XCTAssertEqual(nonColaConfig.colaCompliance, .nonCompliant, "Arbitrary hop should be non-compliant")
 
         let nonColaFFT = try FFT(device: device, config: nonColaConfig)
-        let nonColaSTFT = nonColaFFT.stft(input: input)
+        let nonColaSTFT = try nonColaFFT.stft(input: input)
         let nonColaOutput = nonColaFFT.istft(stft: nonColaSTFT)
 
         // Both should produce output
@@ -905,7 +905,7 @@ final class STFTTests: XCTestCase {
         }
 
         // Forward STFT
-        let stft = fft.stft(input: input)
+        let stft = try fft.stft(input: input)
 
         // Verify basic structure
         XCTAssertGreaterThan(stft.frameCount, 0, "STFT should produce frames")
@@ -933,12 +933,19 @@ final class STFTTests: XCTestCase {
         // Input shorter than FFT size
         let shortInput = [Float](repeating: 0.5, count: 100)
 
-        let stft = fft.stft(input: shortInput)
-
-        // Should return empty result
-        XCTAssertEqual(stft.frameCount, 0, "STFT with short input should produce no frames")
-        XCTAssertTrue(stft.real.isEmpty, "STFT real should be empty for short input")
-        XCTAssertTrue(stft.imag.isEmpty, "STFT imag should be empty for short input")
+        // STFT now throws on input shorter than FFT size
+        XCTAssertThrowsError(try fft.stft(input: shortInput)) { error in
+            guard let fftError = error as? FFTError else {
+                XCTFail("Expected FFTError, got \(type(of: error))")
+                return
+            }
+            if case .inputTooShort(let inputSize, let requiredSize) = fftError {
+                XCTAssertEqual(inputSize, 100)
+                XCTAssertEqual(requiredSize, fftSize)
+            } else {
+                XCTFail("Expected inputTooShort error, got \(fftError)")
+            }
+        }
     }
 
     func testSTFTSingleFrame() throws {
@@ -952,7 +959,7 @@ final class STFTTests: XCTestCase {
             input[i] = sin(2.0 * Float.pi * 10.0 * Float(i) / Float(fftSize))
         }
 
-        let stft = fft.stft(input: input)
+        let stft = try fft.stft(input: input)
 
         XCTAssertEqual(stft.frameCount, 1, "Input matching FFT size should produce exactly 1 frame")
         XCTAssertEqual(stft.binCount, fftSize, "Bin count should match FFT size")
@@ -973,7 +980,7 @@ final class STFTTests: XCTestCase {
             input[i] = sin(2.0 * Float.pi * 8.0 * Float(i) / Float(fftSize))
         }
 
-        let stft = fft.stft(input: input)
+        let stft = try fft.stft(input: input)
 
         // With input = fftSize and hopSize < fftSize, we get exactly 1 frame
         // frameCount = (input.count - fftSize) / hopSize + 1 = (512 - 512) / 128 + 1 = 1
@@ -996,7 +1003,7 @@ final class STFTTests: XCTestCase {
             input[i] = sin(2.0 * Float.pi * 440.0 * Float(i) / 44100.0)
         }
 
-        let stft = fft.stft(input: input)
+        let stft = try fft.stft(input: input)
 
         // Calculate expected frame count: (signalLength - fftSize) / hopSize + 1
         let expectedFrames = (signalLength - fftSize) / hopSize + 1
@@ -1025,7 +1032,7 @@ final class STFTTests: XCTestCase {
         }
 
         // Forward STFT
-        let stft = fft.stft(input: input)
+        let stft = try fft.stft(input: input)
 
         // Inverse STFT
         let output = fft.istft(stft: stft)
@@ -1616,11 +1623,20 @@ final class FFTEdgeCaseTests: XCTestCase {
         let fft = try FFT(device: device, config: .init(size: 512))
 
         let emptyInput: [Float] = []
-        let stft = fft.stft(input: emptyInput)
 
-        XCTAssertEqual(stft.frameCount, 0)
-        XCTAssertTrue(stft.real.isEmpty)
-        XCTAssertTrue(stft.imag.isEmpty)
+        // STFT now throws on input shorter than FFT size
+        XCTAssertThrowsError(try fft.stft(input: emptyInput)) { error in
+            guard let fftError = error as? FFTError else {
+                XCTFail("Expected FFTError, got \(type(of: error))")
+                return
+            }
+            if case .inputTooShort(let inputSize, let requiredSize) = fftError {
+                XCTAssertEqual(inputSize, 0)
+                XCTAssertEqual(requiredSize, 512)
+            } else {
+                XCTFail("Expected inputTooShort error, got \(fftError)")
+            }
+        }
     }
 
     func testISTFTWithEmptyResult() throws {

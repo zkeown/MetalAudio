@@ -37,8 +37,13 @@ public final class Tensor {
         count * dataType.size
     }
 
-    /// Reference to creating device (weak to avoid cycles)
-    public weak var device: AudioDevice?
+    /// Reference to Metal device for buffer creation (strong ref to MTLDevice is safe)
+    /// We store MTLDevice directly rather than AudioDevice to ensure buffer operations
+    /// remain valid even if the AudioDevice wrapper is deallocated
+    private let metalDevice: MTLDevice
+
+    /// Preferred storage mode for this tensor's device
+    private let preferredStorageMode: MTLResourceOptions
 
     /// Initialize a tensor with given shape
     /// - Parameters:
@@ -50,7 +55,8 @@ public final class Tensor {
         shape: [Int],
         dataType: TensorDataType = .float32
     ) throws {
-        self.device = device
+        self.metalDevice = device.device
+        self.preferredStorageMode = device.preferredStorageMode
         self.shape = shape
         self.dataType = dataType
 
@@ -78,14 +84,33 @@ public final class Tensor {
         }
 
         // Check against device maximum buffer size
-        let maxBufferLength = device.device.maxBufferLength
+        let maxBufferLength = metalDevice.maxBufferLength
         guard byteSize <= maxBufferLength else {
             throw MetalAudioError.bufferTooLarge(requested: byteSize, maxAllowed: maxBufferLength)
         }
 
-        guard let buffer = device.device.makeBuffer(
+        // Check against available system memory (iOS memory pressure prevention)
+        // This helps prevent allocation failures and jetsam kills on iOS
+        #if os(iOS) || os(tvOS) || os(watchOS)
+        let availableMemory = os_proc_available_memory()
+        // Leave 40% headroom to avoid memory pressure and jetsam
+        // iOS is aggressive about killing apps that use too much memory, especially
+        // when other apps are backgrounded. 60% threshold provides safety margin for:
+        // - Memory spikes during GPU operations
+        // - System services allocating memory
+        // - Background app memory reclamation
+        let safeAllocationLimit = Int(Double(availableMemory) * 0.6)
+        guard byteSize <= safeAllocationLimit else {
+            throw MetalAudioError.bufferTooLarge(
+                requested: byteSize,
+                maxAllowed: safeAllocationLimit
+            )
+        }
+        #endif
+
+        guard let buffer = metalDevice.makeBuffer(
             length: max(byteSize, 1),
-            options: device.preferredStorageMode
+            options: preferredStorageMode
         ) else {
             throw MetalAudioError.bufferAllocationFailed(byteSize)
         }
@@ -108,6 +133,13 @@ public final class Tensor {
         }
 
         self.buffer = buffer
+        self.metalDevice = buffer.device
+        // Extract storage mode bits (bits 4-7) from resource options
+        // Storage modes: shared=0x00, managed=0x10, private=0x20, memoryless=0x30
+        // The old code ANDed with storageModePrivate (0x20), which incorrectly
+        // mapped storageModeShared and storageModeManaged to 0x00
+        let storageModeMask: UInt = 0xF0
+        self.preferredStorageMode = MTLResourceOptions(rawValue: buffer.resourceOptions.rawValue & storageModeMask)
         self.shape = shape
         self.dataType = dataType
 
@@ -116,6 +148,36 @@ public final class Tensor {
             strides[i] = strides[i + 1] * shape[i + 1]
         }
         self.strides = strides
+    }
+
+    /// Create a new tensor with the same device configuration
+    /// Used internally for operations like toHalf()/toFloat() that need to create
+    /// new tensors without requiring an AudioDevice reference
+    private func createSiblingTensor(shape: [Int], dataType: TensorDataType) throws -> Tensor {
+        // Calculate element count with overflow checking
+        var elementCount = 1
+        for dim in shape {
+            let (newCount, overflow) = elementCount.multipliedReportingOverflow(by: dim)
+            guard !overflow else {
+                throw MetalAudioError.integerOverflow(operation: "tensor shape multiplication")
+            }
+            elementCount = newCount
+        }
+
+        // Calculate byte size with overflow checking
+        let (byteSize, byteSizeOverflow) = elementCount.multipliedReportingOverflow(by: dataType.size)
+        guard !byteSizeOverflow else {
+            throw MetalAudioError.integerOverflow(operation: "tensor byte size calculation")
+        }
+
+        guard let buffer = metalDevice.makeBuffer(
+            length: max(byteSize, 1),
+            options: preferredStorageMode
+        ) else {
+            throw MetalAudioError.bufferAllocationFailed(byteSize)
+        }
+
+        return try Tensor(buffer: buffer, shape: shape, dataType: dataType)
     }
 
     /// Access data as Float pointer
@@ -159,7 +221,11 @@ public final class Tensor {
     /// Fill tensor with a constant value
     public func fill(_ value: Float) {
         let ptr = floatPointer
-        vDSP_vfill([value], ptr, 1, vDSP_Length(count))
+        // Use withUnsafePointer to avoid heap allocation from array literal
+        var val = value
+        withUnsafePointer(to: &val) { valuePtr in
+            vDSP_vfill(valuePtr, ptr, 1, vDSP_Length(count))
+        }
         #if os(macOS)
         if buffer.storageMode == .managed {
             buffer.didModifyRange(0..<byteSize)
@@ -212,9 +278,19 @@ extension Tensor {
     /// Create a reshaped view (must have same total elements)
     /// - Note: This creates a view sharing the same buffer - modifications affect both tensors
     /// - Throws: `MetalAudioError.invalidConfiguration` if element counts don't match,
+    ///           `MetalAudioError.integerOverflow` if shape calculation overflows,
     ///           `MetalAudioError.bufferSizeMismatch` if buffer validation fails
     public func reshaped(_ newShape: [Int]) throws -> Tensor {
-        let newCount = newShape.reduce(1, *)
+        // Calculate element count with overflow checking to prevent security issues
+        var newCount = 1
+        for dim in newShape {
+            let (result, overflow) = newCount.multipliedReportingOverflow(by: dim)
+            guard !overflow else {
+                throw MetalAudioError.integerOverflow(operation: "reshape element count")
+            }
+            newCount = result
+        }
+
         guard newCount == count else {
             throw MetalAudioError.invalidConfiguration(
                 "Cannot reshape \(shape) to \(newShape): element count mismatch"
@@ -300,18 +376,61 @@ extension Tensor {
         #endif
     }
 
-    /// Get element at indices (unchecked subscript for performance)
-    /// - Warning: No bounds checking. Use `get(_:)` for safe access.
+    /// Get element at indices with runtime validation
+    /// - Warning: Validates rank and bounds in all builds. For performance-critical inner loops,
+    ///   use `getUnchecked(_:)` and `setUnchecked(_:to:)` after validating indices externally.
+    /// - Returns: Element value, or 0.0 if indices are invalid (logs warning in DEBUG)
     public subscript(indices: Int...) -> Float {
         get {
-            // Validate rank at minimum to prevent completely wrong access
-            assert(indices.count == rank, "Index rank mismatch: expected \(rank), got \(indices.count)")
+            // Runtime validation in all builds (not just DEBUG)
+            guard indices.count == rank else {
+                #if DEBUG
+                print("[Tensor] Warning: subscript rank mismatch - expected \(rank), got \(indices.count)")
+                #endif
+                return 0.0
+            }
+            // Bounds check each index
+            for i in 0..<rank {
+                guard indices[i] >= 0 && indices[i] < shape[i] else {
+                    #if DEBUG
+                    print("[Tensor] Warning: subscript index \(indices[i]) out of bounds for dimension \(i) (size \(shape[i]))")
+                    #endif
+                    return 0.0
+                }
+            }
             return floatPointer[linearIndexUnchecked(indices)]
         }
         set {
-            assert(indices.count == rank, "Index rank mismatch: expected \(rank), got \(indices.count)")
+            guard indices.count == rank else {
+                #if DEBUG
+                print("[Tensor] Warning: subscript rank mismatch - expected \(rank), got \(indices.count)")
+                #endif
+                return
+            }
+            for i in 0..<rank {
+                guard indices[i] >= 0 && indices[i] < shape[i] else {
+                    #if DEBUG
+                    print("[Tensor] Warning: subscript index \(indices[i]) out of bounds for dimension \(i) (size \(shape[i]))")
+                    #endif
+                    return
+                }
+            }
             floatPointer[linearIndexUnchecked(indices)] = newValue
         }
+    }
+
+    /// Get element at indices without validation (for performance-critical code)
+    /// - Warning: **No bounds checking.** Caller must ensure indices are valid.
+    @inline(__always)
+    public func getUnchecked(_ indices: [Int]) -> Float {
+        floatPointer[linearIndexUnchecked(indices)]
+    }
+
+    /// Set element at indices without validation (for performance-critical code)
+    /// - Warning: **No bounds checking.** Caller must ensure indices are valid.
+    @inline(__always)
+    public func setUnchecked(_ indices: [Int], to value: Float) {
+        floatPointer[linearIndexUnchecked(indices)] = value
     }
 }
 
@@ -325,6 +444,7 @@ extension Tensor {
 
     /// Copy Float data to half-precision tensor with conversion
     /// - Throws: `MetalAudioError.bufferSizeMismatch` if sizes don't match
+    /// - Note: Uses vImage for optimized SIMD conversion on Apple Silicon
     public func copyFromFloat(_ array: [Float]) throws {
         guard array.count == count else {
             throw MetalAudioError.bufferSizeMismatch(expected: count, actual: array.count)
@@ -335,10 +455,27 @@ extension Tensor {
             return
         }
 
-        // Convert float32 to float16
-        let ptr = float16Pointer
-        for i in 0..<count {
-            ptr[i] = Float16(array[i])
+        // Convert float32 to float16 using vImage (SIMD optimized)
+        let dstPtr = float16Pointer
+        array.withUnsafeBufferPointer { srcBuffer in
+            guard let srcPtr = srcBuffer.baseAddress else { return }
+
+            // vImage buffers for conversion
+            var srcVImage = vImage_Buffer(
+                data: UnsafeMutableRawPointer(mutating: srcPtr),
+                height: 1,
+                width: vImagePixelCount(count),
+                rowBytes: count * MemoryLayout<Float>.stride
+            )
+            var dstVImage = vImage_Buffer(
+                data: UnsafeMutableRawPointer(dstPtr),
+                height: 1,
+                width: vImagePixelCount(count),
+                rowBytes: count * MemoryLayout<Float16>.stride
+            )
+
+            // Convert float32 -> float16 (uses NEON/AVX SIMD)
+            vImageConvert_PlanarFtoPlanar16F(&srcVImage, &dstVImage, vImage_Flags(kvImageNoFlags))
         }
 
         #if os(macOS)
@@ -349,6 +486,7 @@ extension Tensor {
     }
 
     /// Copy half-precision tensor to Float array with conversion
+    /// - Note: Uses vImage for optimized SIMD conversion on Apple Silicon
     public func toFloatArray() -> [Float] {
         guard count > 0 else { return [] }
 
@@ -356,31 +494,58 @@ extension Tensor {
             return toArray()
         }
 
-        // Convert float16 to float32
+        // Convert float16 to float32 using vImage (SIMD optimized)
         var result = [Float](repeating: 0, count: count)
-        let ptr = float16Pointer
-        for i in 0..<count {
-            result[i] = Float(ptr[i])
+        let srcPtr = float16Pointer
+
+        result.withUnsafeMutableBufferPointer { dstBuffer in
+            guard let dstPtr = dstBuffer.baseAddress else { return }
+
+            var srcVImage = vImage_Buffer(
+                data: UnsafeMutableRawPointer(srcPtr),
+                height: 1,
+                width: vImagePixelCount(count),
+                rowBytes: count * MemoryLayout<Float16>.stride
+            )
+            var dstVImage = vImage_Buffer(
+                data: UnsafeMutableRawPointer(dstPtr),
+                height: 1,
+                width: vImagePixelCount(count),
+                rowBytes: count * MemoryLayout<Float>.stride
+            )
+
+            // Convert float16 -> float32 (uses NEON/AVX SIMD)
+            vImageConvert_Planar16FtoPlanarF(&srcVImage, &dstVImage, vImage_Flags(kvImageNoFlags))
         }
+
         return result
     }
 
     /// Create a half-precision copy of this tensor
     /// - Returns: New tensor with float16 data type containing converted values
+    /// - Note: Uses vImage for optimized SIMD conversion on Apple Silicon
     public func toHalf() throws -> Tensor {
-        guard let device = device else {
-            throw MetalAudioError.deviceNotFound
-        }
-
-        let halfTensor = try Tensor(device: device, shape: shape, dataType: .float16)
+        let halfTensor = try createSiblingTensor(shape: shape, dataType: .float16)
 
         if dataType == .float32 {
-            // Convert float32 -> float16
+            // Convert float32 -> float16 using vImage (SIMD optimized)
             let srcPtr = floatPointer
             let dstPtr = halfTensor.float16Pointer
-            for i in 0..<count {
-                dstPtr[i] = Float16(srcPtr[i])
-            }
+
+            var srcVImage = vImage_Buffer(
+                data: UnsafeMutableRawPointer(srcPtr),
+                height: 1,
+                width: vImagePixelCount(count),
+                rowBytes: count * MemoryLayout<Float>.stride
+            )
+            var dstVImage = vImage_Buffer(
+                data: UnsafeMutableRawPointer(dstPtr),
+                height: 1,
+                width: vImagePixelCount(count),
+                rowBytes: count * MemoryLayout<Float16>.stride
+            )
+
+            vImageConvert_PlanarFtoPlanar16F(&srcVImage, &dstVImage, vImage_Flags(kvImageNoFlags))
         } else if dataType == .float16 {
             // Just copy
             memcpy(halfTensor.buffer.contents(), buffer.contents(), byteSize)
@@ -397,20 +562,29 @@ extension Tensor {
 
     /// Create a float32 copy from this tensor
     /// - Returns: New tensor with float32 data type containing converted values
+    /// - Note: Uses vImage for optimized SIMD conversion on Apple Silicon
     public func toFloat() throws -> Tensor {
-        guard let device = device else {
-            throw MetalAudioError.deviceNotFound
-        }
-
-        let floatTensor = try Tensor(device: device, shape: shape, dataType: .float32)
+        let floatTensor = try createSiblingTensor(shape: shape, dataType: .float32)
 
         if dataType == .float16 {
-            // Convert float16 -> float32
+            // Convert float16 -> float32 using vImage (SIMD optimized)
             let srcPtr = float16Pointer
             let dstPtr = floatTensor.floatPointer
-            for i in 0..<count {
-                dstPtr[i] = Float(srcPtr[i])
-            }
+
+            var srcVImage = vImage_Buffer(
+                data: UnsafeMutableRawPointer(srcPtr),
+                height: 1,
+                width: vImagePixelCount(count),
+                rowBytes: count * MemoryLayout<Float16>.stride
+            )
+            var dstVImage = vImage_Buffer(
+                data: UnsafeMutableRawPointer(dstPtr),
+                height: 1,
+                width: vImagePixelCount(count),
+                rowBytes: count * MemoryLayout<Float>.stride
+            )
+
+            vImageConvert_Planar16FtoPlanarF(&srcVImage, &dstVImage, vImage_Flags(kvImageNoFlags))
         } else if dataType == .float32 {
             // Just copy
             memcpy(floatTensor.buffer.contents(), buffer.contents(), byteSize)
@@ -426,6 +600,9 @@ extension Tensor {
     }
 
     /// Fill half-precision tensor with a constant value
+    ///
+    /// Uses a simple loop that the Swift compiler auto-vectorizes on Apple Silicon,
+    /// achieving near-optimal NEON SIMD performance.
     public func fillHalf(_ value: Float) {
         guard dataType == .float16 else {
             fill(value)
@@ -434,6 +611,9 @@ extension Tensor {
 
         let halfValue = Float16(value)
         let ptr = float16Pointer
+        let count = self.count
+
+        // Simple loop - Swift compiler auto-vectorizes on Apple Silicon
         for i in 0..<count {
             ptr[i] = halfValue
         }

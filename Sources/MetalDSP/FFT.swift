@@ -4,13 +4,53 @@ import MetalPerformanceShadersGraph
 import Accelerate
 import MetalAudioKit
 
+/// Errors specific to FFT operations
+public enum FFTError: Error, LocalizedError {
+    /// Input is shorter than the FFT size, which would produce an incomplete or invalid transform
+    case inputTooShort(inputSize: Int, requiredSize: Int)
+
+    /// FFT size exceeds the maximum supported size
+    case sizeTooLarge(requestedSize: Int, maxSize: Int)
+
+    /// FFT size is not a power of 2
+    case sizeNotPowerOf2(size: Int)
+
+    /// Hop size is invalid (must be > 0 and <= size)
+    case invalidHopSize(hopSize: Int, fftSize: Int)
+
+    /// Batch operation would overflow buffer size limits
+    case batchSizeOverflow(batchSize: Int, fftSize: Int)
+
+    public var errorDescription: String? {
+        switch self {
+        case .inputTooShort(let inputSize, let requiredSize):
+            return "Input size \(inputSize) is shorter than the required FFT size \(requiredSize). " +
+                "Provide at least \(requiredSize) samples, or use a smaller FFT size."
+        case .sizeTooLarge(let requestedSize, let maxSize):
+            return "FFT size \(requestedSize) exceeds maximum supported size \(maxSize)."
+        case .sizeNotPowerOf2(let size):
+            return "FFT size \(size) is not a power of 2. Use sizes like 256, 512, 1024, 2048, etc."
+        case .invalidHopSize(let hopSize, let fftSize):
+            return "Hop size \(hopSize) is invalid. Must be > 0 and <= FFT size (\(fftSize))."
+        case .batchSizeOverflow(let batchSize, let fftSize):
+            return "Batch size \(batchSize) with FFT size \(fftSize) would overflow buffer limits."
+        }
+    }
+}
+
 /// GPU-accelerated Fast Fourier Transform for audio processing
 /// Uses MPSGraph for large transforms, falls back to Accelerate for small buffers
 ///
 /// ## Thread Safety
-/// `FFT` is NOT thread-safe. The underlying vDSP FFT setup is shared and the
-/// window buffer is accessed during forward/inverse calls. For concurrent FFT
-/// operations, create separate FFT instances per thread.
+/// `FFT` is NOT thread-safe for concurrent `forward()` or `inverse()` calls from multiple
+/// threads on the same instance. These methods use shared instance buffers (`workInputImag`,
+/// `windowBuffer`) that would cause data races.
+///
+/// For concurrent single FFT operations, create separate FFT instances per thread.
+///
+/// **Exception:** `forwardBatch()` IS internally thread-safe. It uses `DispatchQueue.concurrentPerform`
+/// with thread-local buffers to parallelize batch processing. The underlying `vDSP_DFT_Setup`
+/// is read-only during execution and safe to share across threads.
 public final class FFT {
 
     /// FFT configuration
@@ -28,18 +68,18 @@ public final class FFT {
             windowType: WindowType = .hann,
             hopSize: Int? = nil
         ) {
-            // FFT size should be power of 2
-            precondition(size > 0 && (size & (size - 1)) == 0, "FFT size must be power of 2")
+            // FFT size should be power of 2 - assertion for debug, throws in FFT.init for production
+            assert(size > 0 && (size & (size - 1)) == 0, "FFT size must be power of 2")
             self.size = size
             self.inverse = inverse
             self.windowType = windowType
 
             // Default hop size is size/4 (75% overlap, good for most windows)
             // Ensure minimum of 1 for small FFT sizes (e.g., size=2 would give 0)
-            // Validate hop size is reasonable (> 0 and <= size)
             let computedHopSize = hopSize ?? max(1, size / 4)
-            precondition(computedHopSize > 0, "Hop size must be > 0")
-            precondition(computedHopSize <= size, "Hop size must be <= FFT size for valid STFT")
+            // Assertions for debug - actual validation happens in FFT.init which throws
+            assert(computedHopSize > 0, "Hop size must be > 0")
+            assert(computedHopSize <= size, "Hop size must be <= FFT size for valid STFT")
             self.hopSize = computedHopSize
         }
 
@@ -122,21 +162,33 @@ public final class FFT {
         case hamming
         case blackman
 
+        /// Compute window coefficient at given index
+        /// Uses Float64 internally to prevent precision loss for large FFT sizes (N > 16384)
         func coefficient(at index: Int, length: Int) -> Float {
-            let n = Float(index)
-            let N = Float(length)
+            // Guard against length=1 (would cause division by zero)
+            guard length > 1 else { return 1.0 }
+
+            // Use Double precision for intermediate calculations to prevent
+            // asymmetric windows at large N due to Float32 precision limits
+            let n = Double(index)
+            let N = Double(length)
+            let denom = N - 1.0
+
             switch self {
             case .none:
                 return 1.0
             case .hann:
-                return 0.5 * (1.0 - cos(2.0 * .pi * n / (N - 1)))
+                let result = 0.5 * (1.0 - cos(2.0 * .pi * n / denom))
+                return Float(result)
             case .hamming:
-                return 0.54 - 0.46 * cos(2.0 * .pi * n / (N - 1))
+                let result = 0.54 - 0.46 * cos(2.0 * .pi * n / denom)
+                return Float(result)
             case .blackman:
-                let a0: Float = 0.42
-                let a1: Float = 0.5
-                let a2: Float = 0.08
-                return a0 - a1 * cos(2.0 * .pi * n / (N - 1)) + a2 * cos(4.0 * .pi * n / (N - 1))
+                let a0 = 0.42
+                let a1 = 0.5
+                let a2 = 0.08
+                let result = a0 - a1 * cos(2.0 * .pi * n / denom) + a2 * cos(4.0 * .pi * n / denom)
+                return Float(result)
             }
         }
 
@@ -214,6 +266,8 @@ public final class FFT {
     private var gpuButterflyOptimizedPipeline: MTLComputePipelineState? // Optimized (pre-computed twiddles)
     private var gpuButterflyRadix4Pipeline: MTLComputePipelineState?    // Radix-4 butterfly (20-40% faster for power-of-4)
     private var gpuButterflyTiledPipeline: MTLComputePipelineState?     // Tiled butterfly (threadgroup memory)
+    private var gpuInverseButterflyPipeline: MTLComputePipelineState?   // Inverse butterfly (conjugate twiddles)
+    private var gpuScalePipeline: MTLComputePipelineState?              // Scale kernel for 1/N normalization
     private var gpuWindowPrecomputedPipeline: MTLComputePipelineState?  // Pre-computed window application
     private var gpuEnabled: Bool = false
     private var useRadix4: Bool = false  // Whether this FFT size supports radix-4
@@ -224,6 +278,8 @@ public final class FFT {
     private var gpuContext: ComputeContext? // Reusable compute context
     private var gpuBatchBuffer: MTLBuffer?  // Pre-allocated batch buffer (avoids per-call allocation)
     private var gpuBatchBufferCapacity: Int = 0  // Current batch capacity (in number of FFTs)
+    private var batchBufferLock = os_unfair_lock() // Protects gpuBatchBuffer reallocation
+    private var gpuResourceLock = os_unfair_lock() // Protects GPU resources from concurrent release during use
 
     /// Default batch buffer capacity (pre-allocated for common batch sizes)
     private static let defaultBatchCapacity: Int = 16
@@ -253,6 +309,13 @@ public final class FFT {
     /// Higher threshold for MPSGraph (has more setup overhead than custom kernels)
     private static let mpsGraphThreshold: Int = 2048
 
+    /// Maximum supported FFT size (2^24 = 16M samples)
+    /// Beyond this:
+    /// - Memory requirements become extreme (~128MB for working buffers)
+    /// - Processing time exceeds practical real-time constraints
+    /// - Integer overflow risk in twiddle factor computations
+    public static let maxFFTSize: Int = 1 << 24
+
     /// Check if FFT size is a power of 4 (4, 16, 64, 256, 1024, 4096, ...)
     /// These sizes can use radix-4 butterfly for 2x fewer kernel launches.
     private static func isPowerOf4(_ n: Int) -> Bool {
@@ -266,7 +329,25 @@ public final class FFT {
     /// - Parameters:
     ///   - device: Metal audio device
     ///   - config: FFT configuration
+    /// - Throws: `FFTError.sizeTooLarge` if config.size exceeds `maxFFTSize`,
+    ///           `FFTError.sizeNotPowerOf2` if size is not a power of 2,
+    ///           `FFTError.invalidHopSize` if hop size is invalid
     public init(device: AudioDevice, config: Config) throws {
+        // Validate FFT size is power of 2 (required for Cooley-Tukey algorithm)
+        guard config.size > 0 && (config.size & (config.size - 1)) == 0 else {
+            throw FFTError.sizeNotPowerOf2(size: config.size)
+        }
+
+        // Validate FFT size doesn't exceed maximum
+        guard config.size <= Self.maxFFTSize else {
+            throw FFTError.sizeTooLarge(requestedSize: config.size, maxSize: Self.maxFFTSize)
+        }
+
+        // Validate hop size
+        guard config.hopSize > 0 && config.hopSize <= config.size else {
+            throw FFTError.invalidHopSize(hopSize: config.hopSize, fftSize: config.size)
+        }
+
         self.device = device
         self.config = config
 
@@ -307,6 +388,17 @@ public final class FFT {
 
     /// Setup MPSGraph-based FFT (iOS 17+, macOS 14+)
     /// MPSGraph FFT is highly optimized and faster than custom kernels for large sizes
+    ///
+    /// ## First-Call Latency Warning
+    /// MPSGraph compilation is deferred until the first `graph.run()` call.
+    /// The first call to `forwardMPSGraph()` or `inverseMPSGraph()` may block
+    /// for **50-200ms** while Metal compiles the graph kernels. Subsequent calls
+    /// execute in microseconds.
+    ///
+    /// **Mitigation strategies:**
+    /// - Call `warmup()` during app initialization to trigger compilation
+    /// - Pre-warm during splash screen or loading phase
+    /// - Use vDSP for the first few frames, then switch to MPSGraph
     private func setupMPSGraphFFT() {
         // MPSGraph FFT requires macOS 14.0+ / iOS 17.0+
         guard #available(macOS 14.0, iOS 17.0, *) else {
@@ -382,9 +474,11 @@ public final class FFT {
         )
 
         // Perform inverse FFT with 1/N scaling
+        // Using .size mode directly applies 1/N scaling, avoiding the precision loss
+        // that would occur with .unitary (1/sqrt(N)) + manual 1/sqrt(N) multiplication
         let ifftDescriptor = MPSGraphFFTDescriptor()
         ifftDescriptor.inverse = true
-        ifftDescriptor.scalingMode = .unitary  // Applies 1/sqrt(N), we'll adjust below
+        ifftDescriptor.scalingMode = .size  // Applies 1/N directly for proper reconstruction
 
         let ifftResult = inverseGraph.fastFourierTransform(
             complexInputIFFT,
@@ -396,14 +490,9 @@ public final class FFT {
         // Extract real part (for real-valued signals, imaginary should be ~0)
         let ifftOutputReal = inverseGraph.realPartOfTensor(tensor: ifftResult, name: "ifftOutput")
 
-        // Apply additional scaling to get 1/N total (unitary gives 1/sqrt(N))
-        let sqrtN = Float(sqrt(Double(fftSize)))
-        let scaleFactor = inverseGraph.constant(Double(1.0 / sqrtN), shape: [1], dataType: .float32)
-        let scaledOutput = inverseGraph.multiplication(ifftOutputReal, scaleFactor, name: "scaledOutput")
-
         // Store the inverse graph and cached output tensor
         self.mpsGraphIFFT = inverseGraph
-        self.mpsIFFTOutput = scaledOutput
+        self.mpsIFFTOutput = ifftOutputReal
 
         // Pre-allocate buffers for MPSGraph to avoid per-call allocation
         let bufferSize = fftSize * MemoryLayout<Float>.stride
@@ -432,6 +521,12 @@ public final class FFT {
             // Try to load tiled butterfly kernel (better for large FFTs due to threadgroup memory)
             gpuButterflyTiledPipeline = try? device.makeComputePipeline(functionName: "fft_butterfly_tiled")
 
+            // Load inverse butterfly kernel (uses conjugate twiddles for IFFT)
+            gpuInverseButterflyPipeline = try? device.makeComputePipeline(functionName: "ifft_butterfly_optimized")
+
+            // Load scale kernel for 1/N normalization in IFFT
+            gpuScalePipeline = try? device.makeComputePipeline(functionName: "fft_scale")
+
             // Pre-allocate GPU buffer for real-time safety
             let bufferSize = config.size * MemoryLayout<Float>.stride * 2  // float2 per element
             gpuDataBuffer = device.device.makeBuffer(
@@ -441,19 +536,23 @@ public final class FFT {
 
             // Pre-compute twiddle factors: W_N^k = exp(-2*pi*i*k/N) for k = 0 to N/2-1
             // Stored as [cos, sin] pairs (float2)
+            // Use Float64 for angle calculation to prevent precision loss at high frequencies
             let twiddleCount = config.size / 2
             var twiddleData = [Float](repeating: 0, count: twiddleCount * 2)
-            let twoPiOverN = -2.0 * Float.pi / Float(config.size)
+            let twoPiOverN = -2.0 * Double.pi / Double(config.size)
             for k in 0..<twiddleCount {
-                let angle = twoPiOverN * Float(k)
-                twiddleData[k * 2] = cos(angle)      // Real part
-                twiddleData[k * 2 + 1] = sin(angle)  // Imaginary part
+                // Compute angle in Double to prevent accumulated precision error
+                // For k near N/2, the angle should be near -pi; Float32 loses precision
+                let angle = twoPiOverN * Double(k)
+                twiddleData[k * 2] = Float(cos(angle))      // Real part
+                twiddleData[k * 2 + 1] = Float(sin(angle))  // Imaginary part
             }
 
             // Create twiddle buffer
             gpuTwiddleBuffer = twiddleData.withUnsafeBytes { ptr in
-                device.device.makeBuffer(
-                    bytes: ptr.baseAddress!,
+                guard let baseAddress = ptr.baseAddress else { return nil }
+                return device.device.makeBuffer(
+                    bytes: baseAddress,
                     length: twiddleCount * MemoryLayout<Float>.stride * 2,
                     options: device.preferredStorageMode
                 )
@@ -474,8 +573,9 @@ public final class FFT {
                     bitReversalIndices[i] = rev
                 }
                 gpuBitReversalLUT = bitReversalIndices.withUnsafeBytes { ptr in
-                    device.device.makeBuffer(
-                        bytes: ptr.baseAddress!,
+                    guard let baseAddress = ptr.baseAddress else { return nil }
+                    return device.device.makeBuffer(
+                        bytes: baseAddress,
                         length: config.size * MemoryLayout<UInt32>.stride,
                         options: device.preferredStorageMode
                     )
@@ -486,8 +586,9 @@ public final class FFT {
             gpuWindowPrecomputedPipeline = try? device.makeComputePipeline(functionName: "apply_window_precomputed")
             if config.windowType != .none {
                 gpuWindowBuffer = windowBuffer.withUnsafeBytes { ptr in
-                    device.device.makeBuffer(
-                        bytes: ptr.baseAddress!,
+                    guard let baseAddress = ptr.baseAddress else { return nil }
+                    return device.device.makeBuffer(
+                        bytes: baseAddress,
                         length: config.size * MemoryLayout<Float>.stride,
                         options: device.preferredStorageMode
                     )
@@ -495,7 +596,7 @@ public final class FFT {
             }
 
             // Create reusable compute context
-            gpuContext = ComputeContext(device: device)
+            gpuContext = try ComputeContext(device: device)
 
             // Pre-allocate batch buffer for common batch sizes (avoids per-call allocation)
             let batchElementSize = config.size * MemoryLayout<Float>.stride * 2  // float2 per element
@@ -530,10 +631,32 @@ public final class FFT {
     /// This method uses pre-allocated buffers and performs no heap allocations,
     /// making it safe to call from audio render callbacks.
     ///
+    /// ## Buffer Size Requirements (CRITICAL - UNSAFE API)
+    /// **⚠️ WARNING: This is an unsafe API with no runtime bounds checking.**
+    ///
+    /// **All buffers must have at least `config.size` elements.** No runtime validation
+    /// is performed for real-time safety. Passing undersized buffers causes undefined
+    /// behavior (memory corruption, crashes, security vulnerabilities).
+    ///
+    /// Required buffer sizes:
+    /// - `input`: Must point to at least `config.size` Float values
+    /// - `outputReal`: Must point to at least `config.size` Float values
+    /// - `outputImag`: Must point to at least `config.size` Float values
+    ///
+    /// **Recommendation**: Wrap calls with debug assertions in your code:
+    /// ```swift
+    /// assert(inputBuffer.count >= fft.config.size, "Input buffer too small")
+    /// input.withUnsafeBufferPointer { ptr in
+    ///     fft.forward(input: ptr.baseAddress!, ...)
+    /// }
+    /// ```
+    ///
+    /// For safer array-based processing, prefer `forward(input:outputReal:outputImag:)` with arrays.
+    ///
     /// - Parameters:
-    ///   - input: Real input samples
-    ///   - outputReal: Real part of output
-    ///   - outputImag: Imaginary part of output
+    ///   - input: Real input samples (must have `config.size` elements)
+    ///   - outputReal: Real part of output (must have `config.size` elements)
+    ///   - outputImag: Imaginary part of output (must have `config.size` elements)
     public func forward(
         input: UnsafePointer<Float>,
         outputReal: UnsafeMutablePointer<Float>,
@@ -543,7 +666,9 @@ public final class FFT {
 
         // Use pre-allocated buffer (zeroed at init, and vDSP doesn't modify it for real input)
         // Reset to zero for safety in case of prior use
-        memset(&workInputImag, 0, config.size * MemoryLayout<Float>.stride)
+        // Using vDSP.fill instead of memset for type safety and Swift array compatibility
+        var zero: Float = 0
+        vDSP_vfill(&zero, &workInputImag, 1, vDSP_Length(config.size))
 
         vDSP_DFT_Execute(
             setup,
@@ -561,10 +686,32 @@ public final class FFT {
     /// This method uses pre-allocated buffers and performs no heap allocations,
     /// making it safe to call from audio render callbacks.
     ///
+    /// ## Buffer Size Requirements (CRITICAL - UNSAFE API)
+    /// **⚠️ WARNING: This is an unsafe API with no runtime bounds checking.**
+    ///
+    /// **All buffers must have at least `config.size` elements.** No runtime validation
+    /// is performed for real-time safety. Passing undersized buffers causes undefined
+    /// behavior (memory corruption, crashes, security vulnerabilities).
+    ///
+    /// Required buffer sizes:
+    /// - `inputReal`: Must point to at least `config.size` Float values
+    /// - `inputImag`: Must point to at least `config.size` Float values
+    /// - `output`: Must point to at least `config.size` Float values
+    ///
+    /// **Recommendation**: Wrap calls with debug assertions in your code:
+    /// ```swift
+    /// assert(outputBuffer.count >= fft.config.size, "Output buffer too small")
+    /// output.withUnsafeMutableBufferPointer { ptr in
+    ///     fft.inverse(inputReal: real, inputImag: imag, output: ptr.baseAddress!)
+    /// }
+    /// ```
+    ///
+    /// For safer array-based processing, prefer `inverse(inputReal:inputImag:output:)` with arrays.
+    ///
     /// - Parameters:
-    ///   - inputReal: Real part of frequency domain
-    ///   - inputImag: Imaginary part of frequency domain
-    ///   - output: Time domain output
+    ///   - inputReal: Real part of frequency domain (must have `config.size` elements)
+    ///   - inputImag: Imaginary part of frequency domain (must have `config.size` elements)
+    ///   - output: Time domain output (must have `config.size` elements)
     public func inverse(
         inputReal: UnsafePointer<Float>,
         inputImag: UnsafePointer<Float>,
@@ -593,22 +740,36 @@ public final class FFT {
     /// All butterfly stages are executed in a single command buffer with memory barriers
     /// between stages. GPU buffers and context are pre-allocated at init time.
     ///
+    /// ## Backend Selection
+    /// This method explicitly requests GPU execution. If GPU resources are unavailable,
+    /// it falls back to CPU (Accelerate) and returns `.vdsp` to indicate the actual backend used.
+    /// Check the return value if you need to confirm GPU execution occurred.
+    ///
     /// - Parameters:
     ///   - input: Complex input as interleaved [real, imag] pairs (float2 array)
     ///   - output: Complex output as interleaved [real, imag] pairs (must be pre-sized)
+    /// - Returns: The backend that was actually used (`.gpu` if GPU succeeded, `.vdsp` if fallback occurred)
+    @discardableResult
     public func forwardGPU(
         input: [Float],
         output: inout [Float]
-    ) throws {
+    ) throws -> Backend {
+        // Acquire lock to prevent concurrent release of GPU resources
+        os_unfair_lock_lock(&gpuResourceLock)
+
         guard gpuEnabled,
               let bitReversalPipeline = gpuBitReversalPipeline,
               let butterflyPipeline = gpuButterflyPipeline,
               let dataBuffer = gpuDataBuffer,
               let context = gpuContext else {
-            // Fall back to Accelerate
+            os_unfair_lock_unlock(&gpuResourceLock)
+            // Fall back to Accelerate - return backend indicator so caller knows
             try forwardGPUFallback(input: input, output: &output)
-            return
+            return .vdsp
         }
+
+        // Lock held throughout GPU execution to prevent resource release
+        defer { os_unfair_lock_unlock(&gpuResourceLock) }
 
         let bufferSize = config.size * MemoryLayout<Float>.stride * 2
 
@@ -730,6 +891,8 @@ public final class FFT {
             guard let baseAddress = ptr.baseAddress else { return }
             memcpy(baseAddress, dataBuffer.contents(), bufferSize)
         }
+
+        return .gpu
     }
 
     /// Fallback to Accelerate when GPU is unavailable
@@ -781,10 +944,191 @@ public final class FFT {
         }
     }
 
+    /// Perform inverse FFT on GPU
+    /// Uses same Cooley-Tukey algorithm as forward but with conjugate twiddle factors
+    /// Includes 1/N normalization to match Accelerate/numpy conventions
+    ///
+    /// ## Backend Selection
+    /// This method explicitly requests GPU execution. If GPU resources are unavailable,
+    /// it falls back to CPU (Accelerate) and returns `.vdsp` to indicate the actual backend used.
+    ///
+    /// - Parameters:
+    ///   - input: Complex input as interleaved [real, imag] pairs (float2 array)
+    ///   - output: Complex output as interleaved [real, imag] pairs (must be pre-sized)
+    /// - Returns: The backend that was actually used (`.gpu` if GPU succeeded, `.vdsp` if fallback occurred)
+    @discardableResult
+    public func inverseGPU(
+        input: [Float],
+        output: inout [Float]
+    ) throws -> Backend {
+        // Acquire lock to prevent concurrent release of GPU resources
+        os_unfair_lock_lock(&gpuResourceLock)
+
+        guard gpuEnabled,
+              let bitReversalPipeline = gpuBitReversalPipeline,
+              let inverseButterflyPipeline = gpuInverseButterflyPipeline,
+              let scalePipeline = gpuScalePipeline,
+              let dataBuffer = gpuDataBuffer,
+              let twiddleBuffer = gpuTwiddleBuffer,
+              let context = gpuContext else {
+            os_unfair_lock_unlock(&gpuResourceLock)
+            // Fall back to Accelerate - return backend indicator so caller knows
+            try inverseGPUFallback(input: input, output: &output)
+            return .vdsp
+        }
+
+        // Lock held throughout GPU execution to prevent resource release
+        defer { os_unfair_lock_unlock(&gpuResourceLock) }
+
+        let bufferSize = config.size * MemoryLayout<Float>.stride * 2
+
+        // Copy input to pre-allocated GPU buffer
+        input.withUnsafeBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            memcpy(dataBuffer.contents(), baseAddress, min(ptr.count, bufferSize))
+        }
+
+        #if os(macOS)
+        if dataBuffer.storageMode == .managed {
+            dataBuffer.didModifyRange(0..<bufferSize)
+        }
+        #endif
+
+        var n = UInt32(config.size)
+        var logN = UInt32(log2(Double(config.size)))
+
+        // Determine which bit reversal pipeline to use (LUT is 5-15% faster)
+        let useLUTBitReversal = gpuBitReversalLUTPipeline != nil && gpuBitReversalLUT != nil
+        let activeBitReversalPipeline = useLUTBitReversal ? gpuBitReversalLUTPipeline! : bitReversalPipeline
+
+        // Execute all stages in a single command buffer with memory barriers
+        try context.executeSync { encoder in
+            // Step 1: Bit reversal permutation (same as forward)
+            encoder.setComputePipelineState(activeBitReversalPipeline)
+            encoder.setBuffer(dataBuffer, offset: 0, index: 0)
+            encoder.setBytes(&n, length: MemoryLayout<UInt32>.stride, index: 1)
+
+            if useLUTBitReversal, let lut = gpuBitReversalLUT {
+                encoder.setBuffer(lut, offset: 0, index: 2)
+            } else {
+                encoder.setBytes(&logN, length: MemoryLayout<UInt32>.stride, index: 2)
+            }
+
+            let (threadgroupSize, gridSize) = ComputeContext.calculate1DDispatch(
+                pipeline: activeBitReversalPipeline,
+                dataLength: config.size
+            )
+            encoder.dispatchThreadgroups(gridSize, threadsPerThreadgroup: threadgroupSize)
+
+            // Memory barrier between bit reversal and butterfly stages
+            encoder.memoryBarrier(scope: .buffers)
+
+            // Step 2: Inverse butterfly stages (with conjugate twiddles)
+            let numStages = Int(logN)
+
+            for stage in 0..<numStages {
+                var stageVal = UInt32(stage)
+
+                encoder.setComputePipelineState(inverseButterflyPipeline)
+                encoder.setBuffer(dataBuffer, offset: 0, index: 0)
+                encoder.setBytes(&n, length: MemoryLayout<UInt32>.stride, index: 1)
+                encoder.setBytes(&stageVal, length: MemoryLayout<UInt32>.stride, index: 2)
+                encoder.setBuffer(twiddleBuffer, offset: 0, index: 3)
+
+                let numButterflies = config.size / 2
+                let (bfThreadgroupSize, bfGridSize) = ComputeContext.calculate1DDispatch(
+                    pipeline: inverseButterflyPipeline,
+                    dataLength: numButterflies
+                )
+                encoder.dispatchThreadgroups(bfGridSize, threadsPerThreadgroup: bfThreadgroupSize)
+
+                // Memory barrier between stages (except after last)
+                if stage < numStages - 1 {
+                    encoder.memoryBarrier(scope: .buffers)
+                }
+            }
+
+            // Memory barrier before scaling
+            encoder.memoryBarrier(scope: .buffers)
+
+            // Step 3: Scale by 1/N for normalization
+            var scale = Float(1.0 / Float(config.size))
+            encoder.setComputePipelineState(scalePipeline)
+            encoder.setBuffer(dataBuffer, offset: 0, index: 0)
+            encoder.setBytes(&n, length: MemoryLayout<UInt32>.stride, index: 1)
+            encoder.setBytes(&scale, length: MemoryLayout<Float>.stride, index: 2)
+
+            let (scaleThreadgroupSize, scaleGridSize) = ComputeContext.calculate1DDispatch(
+                pipeline: scalePipeline,
+                dataLength: config.size
+            )
+            encoder.dispatchThreadgroups(scaleGridSize, threadsPerThreadgroup: scaleThreadgroupSize)
+        }
+
+        // Ensure output is properly sized
+        if output.count != config.size * 2 {
+            output = [Float](repeating: 0, count: config.size * 2)
+        }
+
+        // Copy result back
+        output.withUnsafeMutableBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            memcpy(baseAddress, dataBuffer.contents(), bufferSize)
+        }
+
+        return .gpu
+    }
+
+    /// Fallback to Accelerate when GPU inverse is unavailable
+    private func inverseGPUFallback(input: [Float], output: inout [Float]) throws {
+        // Validate input: must be interleaved [real, imag] pairs
+        let expectedInputSize = config.size * 2
+        guard input.count >= expectedInputSize else {
+            throw MetalAudioError.bufferSizeMismatch(
+                expected: expectedInputSize,
+                actual: input.count
+            )
+        }
+
+        // Extract real and imaginary components from interleaved input
+        var realInput = [Float](repeating: 0, count: config.size)
+        var imagInput = [Float](repeating: 0, count: config.size)
+        for i in 0..<config.size {
+            realInput[i] = input[i * 2]
+            imagInput[i] = input[i * 2 + 1]
+        }
+
+        // Ensure output is properly sized
+        if output.count != config.size * 2 {
+            output = [Float](repeating: 0, count: config.size * 2)
+        }
+
+        // Use Accelerate inverse
+        realInput.withUnsafeBufferPointer { realPtr in
+            imagInput.withUnsafeBufferPointer { imagPtr in
+                guard let realBase = realPtr.baseAddress,
+                      let imagBase = imagPtr.baseAddress else { return }
+                // De-interleave output into separate arrays first
+                var realOutput = [Float](repeating: 0, count: config.size)
+                inverse(inputReal: realBase, inputImag: imagBase, output: &realOutput)
+                // Output from Accelerate inverse is real-only, copy to interleaved format
+                for i in 0..<config.size {
+                    output[i * 2] = realOutput[i]
+                    output[i * 2 + 1] = 0  // Imaginary should be ~0 for real signals
+                }
+            }
+        }
+    }
+
     // MARK: - MPSGraph FFT
 
     /// Perform forward FFT using MPSGraph (highly optimized for large sizes)
     /// Requires macOS 14.0+ / iOS 17.0+
+    ///
+    /// - Warning: **First-call latency.** The first invocation triggers MPSGraph
+    ///   kernel compilation, which may block for 50-200ms. Use `warmup()` during
+    ///   app initialization to avoid audio glitches.
+    ///
     /// - Parameters:
     ///   - input: Real input samples
     ///   - outputReal: Real part of output
@@ -853,6 +1197,11 @@ public final class FFT {
 
     /// Perform inverse FFT using MPSGraph
     /// Requires macOS 14.0+ / iOS 17.0+
+    ///
+    /// - Warning: **First-call latency.** The first invocation triggers MPSGraph
+    ///   kernel compilation, which may block for 50-200ms. Use `warmup()` during
+    ///   app initialization to avoid audio glitches.
+    ///
     /// - Parameters:
     ///   - inputReal: Real part of frequency domain
     ///   - inputImag: Imaginary part of frequency domain
@@ -941,6 +1290,40 @@ public final class FFT {
     /// Check if GPU FFT is available and should be used for the current size
     public var shouldUseGPU: Bool {
         (gpuEnabled || mpsGraphEnabled) && config.size >= gpuThreshold
+    }
+
+    /// Warm up the FFT by triggering all deferred compilation
+    ///
+    /// Call this during app initialization (splash screen, loading phase) to avoid
+    /// first-call latency during real-time audio processing. This triggers:
+    /// - MPSGraph kernel compilation (50-200ms on first call)
+    /// - GPU shader compilation (if not already cached)
+    /// - vDSP FFT plan creation
+    ///
+    /// ## Usage
+    /// ```swift
+    /// let fft = try FFT(size: 4096)
+    /// fft.warmup()  // Call during app launch
+    /// // Later, real-time calls will be fast
+    /// ```
+    public func warmup() {
+        // Trigger vDSP plan execution (usually already fast)
+        var dummyInput = [Float](repeating: 0, count: config.size)
+        var dummyReal = [Float](repeating: 0, count: config.size)
+        var dummyImag = [Float](repeating: 0, count: config.size)
+
+        dummyInput.withUnsafeBufferPointer { inputPtr in
+            guard let base = inputPtr.baseAddress else { return }
+            forward(input: base, outputReal: &dummyReal, outputImag: &dummyImag)
+        }
+
+        // Trigger MPSGraph compilation if available
+        if #available(macOS 14.0, iOS 17.0, *) {
+            if mpsGraphEnabled {
+                try? forwardMPSGraph(input: dummyInput, outputReal: &dummyReal, outputImag: &dummyImag)
+                try? inverseMPSGraph(inputReal: dummyReal, inputImag: dummyImag, output: &dummyInput)
+            }
+        }
     }
 
     // MARK: - Smart Auto-Selection API
@@ -1089,13 +1472,21 @@ public final class FFT {
             }
 
         case .gpu:
-            // GPU inverse not yet implemented, fallback to vDSP
-            inputReal.withUnsafeBufferPointer { realPtr in
-                inputImag.withUnsafeBufferPointer { imagPtr in
-                    guard let realBase = realPtr.baseAddress,
-                          let imagBase = imagPtr.baseAddress else { return }
-                    inverse(inputReal: realBase, inputImag: imagBase, output: &output)
-                }
+            // Convert to interleaved format for GPU inverse FFT
+            var interleaved = [Float](repeating: 0, count: config.size * 2)
+            for i in 0..<min(inputReal.count, config.size) {
+                interleaved[i * 2] = inputReal[i]
+                interleaved[i * 2 + 1] = i < inputImag.count ? inputImag[i] : 0
+            }
+            var interleavedOutput = [Float](repeating: 0, count: config.size * 2)
+            try inverseGPU(input: interleaved, output: &interleavedOutput)
+
+            // De-interleave - for IFFT of real signals, output should be mostly real
+            if output.count != config.size {
+                output = [Float](repeating: 0, count: config.size)
+            }
+            for i in 0..<config.size {
+                output[i] = interleavedOutput[i * 2]  // Take real part
             }
         }
 
@@ -1123,10 +1514,16 @@ public final class FFT {
     }
 
     /// Compute magnitude spectrum
+    ///
+    /// ## Buffer Size Requirements (CRITICAL)
+    /// - `real`: Must point to at least `config.size` Float values
+    /// - `imag`: Must point to at least `config.size` Float values
+    /// - `magnitude`: Must point to at least `config.size / 2 + 1` Float values
+    ///
     /// - Parameters:
-    ///   - real: Real part of FFT output
-    ///   - imag: Imaginary part of FFT output
-    ///   - magnitude: Output magnitude buffer (size/2 + 1 for real FFT)
+    ///   - real: Real part of FFT output (must have `config.size` elements)
+    ///   - imag: Imaginary part of FFT output (must have `config.size` elements)
+    ///   - magnitude: Output magnitude buffer (must have `config.size / 2 + 1` elements)
     public func magnitude(
         real: UnsafePointer<Float>,
         imag: UnsafePointer<Float>,
@@ -1141,6 +1538,16 @@ public final class FFT {
     }
 
     /// Compute power spectrum (magnitude squared)
+    ///
+    /// ## Buffer Size Requirements (CRITICAL)
+    /// - `real`: Must point to at least `config.size` Float values
+    /// - `imag`: Must point to at least `config.size` Float values
+    /// - `power`: Must point to at least `config.size / 2 + 1` Float values
+    ///
+    /// - Parameters:
+    ///   - real: Real part of FFT output (must have `config.size` elements)
+    ///   - imag: Imaginary part of FFT output (must have `config.size` elements)
+    ///   - power: Output power buffer (must have `config.size / 2 + 1` elements)
     public func power(
         real: UnsafePointer<Float>,
         imag: UnsafePointer<Float>,
@@ -1159,6 +1566,17 @@ public final class FFT {
     /// ## Real-Time Safety
     /// This method uses pre-allocated buffers and performs no heap allocations,
     /// making it safe to call from audio render callbacks.
+    ///
+    /// ## Buffer Size Requirements (CRITICAL)
+    /// - `real`: Must point to at least `config.size` Float values
+    /// - `imag`: Must point to at least `config.size` Float values
+    /// - `magnitudeDB`: Must point to at least `config.size / 2 + 1` Float values
+    ///
+    /// - Parameters:
+    ///   - real: Real part of FFT output (must have `config.size` elements)
+    ///   - imag: Imaginary part of FFT output (must have `config.size` elements)
+    ///   - magnitudeDB: Output magnitude in dB (must have `config.size / 2 + 1` elements)
+    ///   - reference: Reference value for dB calculation (default: 1.0)
     public func magnitudeDB(
         real: UnsafePointer<Float>,
         imag: UnsafePointer<Float>,
@@ -1204,14 +1622,15 @@ extension FFT {
     /// become part of the returned result. For streaming real-time STFT, consider using
     /// the lower-level `forward()` method with caller-managed buffers.
     ///
-    /// - Parameter input: Audio samples
+    /// - Parameter input: Audio samples (must have at least `config.size` samples)
     /// - Returns: STFT result with real and imaginary parts
-    public func stft(input: [Float]) -> STFTResult {
+    /// - Throws: `FFTError.inputTooShort` if input has fewer than `config.size` samples
+    public func stft(input: [Float]) throws -> STFTResult {
         let hopSize = config.hopSize
 
-        // Guard against input shorter than FFT size
+        // Throw error for input shorter than FFT size - silent empty return is misleading
         guard input.count >= config.size else {
-            return STFTResult(real: [], imag: [])
+            throw FFTError.inputTooShort(inputSize: input.count, requiredSize: config.size)
         }
 
         let frameCount = (input.count - config.size) / hopSize + 1
@@ -1351,7 +1770,11 @@ extension FFT {
 
         // Use pre-allocated batch buffer when capacity is sufficient (avoids 1-5ms allocation overhead)
         // For larger batches, allocate a new buffer (rare case)
+        // Lock protects buffer reallocation AND buffer use from concurrent batch calls
+        // IMPORTANT: Lock must be held until buffer copy is complete to prevent race conditions
+        // where another thread could reallocate the buffer while we're still writing to it
         let batchBuffer: MTLBuffer
+        os_unfair_lock_lock(&batchBufferLock)
         if batchSize <= gpuBatchBufferCapacity, let preallocated = gpuBatchBuffer {
             batchBuffer = preallocated
         } else {
@@ -1361,6 +1784,7 @@ extension FFT {
                 length: totalBufferSize,
                 options: device.preferredStorageMode
             ) else {
+                os_unfair_lock_unlock(&batchBufferLock)
                 try forwardBatchCPU(inputs: inputs, outputsReal: &outputsReal, outputsImag: &outputsImag)
                 return
             }
@@ -1370,6 +1794,12 @@ extension FFT {
         }
 
         // Copy all inputs to batch buffer (interleaved format)
+        // Lock is held throughout entire operation (copy, GPU execution, read-back)
+        // to prevent another thread from overwriting the buffer during GPU execution.
+        // This serializes concurrent batch GPU calls, which is acceptable since:
+        // 1. Batch GPU FFT is already a heavy operation
+        // 2. Concurrent batch calls are rare in typical audio pipelines
+        // 3. Correctness is more important than concurrent throughput
         let batchPtr = batchBuffer.contents().assumingMemoryBound(to: Float.self)
         for (idx, input) in inputs.enumerated() {
             let offset = idx * fftSize * 2
@@ -1378,6 +1808,9 @@ extension FFT {
                 batchPtr[offset + i * 2 + 1] = 0.0       // Imag (input is real)
             }
         }
+
+        // Ensure lock is released on all exit paths
+        defer { os_unfair_lock_unlock(&batchBufferLock) }
 
         #if os(macOS)
         if batchBuffer.storageMode == .managed {
@@ -1393,6 +1826,7 @@ extension FFT {
         let activeButterflyPipeline = useOptimized ? gpuButterflyOptimizedPipeline! : butterflyPipeline
 
         // Execute all FFTs in a single command buffer
+        // Lock remains held to prevent concurrent access to shared batch buffer
         try context.executeSync { encoder in
             for batchIdx in 0..<batchSize {
                 let bufferOffset = batchIdx * perFFTBufferSize
@@ -1437,7 +1871,7 @@ extension FFT {
             }
         }
 
-        // Copy results back (de-interleave)
+        // Copy results back (de-interleave) - still holding lock
         for idx in 0..<batchSize {
             let offset = idx * fftSize * 2
             for i in 0..<fftSize {
@@ -1445,6 +1879,7 @@ extension FFT {
                 outputsImag[idx][i] = batchPtr[offset + i * 2 + 1]
             }
         }
+        // Lock released by defer
     }
 
     /// Inverse Short-Time Fourier Transform
@@ -1489,7 +1924,11 @@ extension FFT {
         // Instead of hard-zeroing samples where window sum is small (which causes clicks),
         // we use regularization: divide by max(windowSum, floor) to smoothly attenuate
         // rather than abruptly zero samples at frame boundaries.
-        let windowFloor = ToleranceProvider.shared.tolerances.windowFloorEpsilon
+        //
+        // Validate windowFloorEpsilon: must be positive to prevent division by zero
+        // If misconfigured (zero or negative), fall back to a safe default
+        let configuredFloor = ToleranceProvider.shared.tolerances.windowFloorEpsilon
+        let windowFloor = configuredFloor > 0 ? configuredFloor : Float(1e-6)
         for i in 0..<outputLength {
             // Use regularization instead of hard threshold to prevent click artifacts
             // This smoothly attenuates samples where window coverage is poor
@@ -1498,5 +1937,48 @@ extension FFT {
         }
 
         return output
+    }
+
+    /// Release GPU resources to reduce memory footprint
+    ///
+    /// Call this when the FFT won't be used for a while, or in response to memory pressure.
+    /// GPU resources will be lazily recreated on the next forward/inverse call.
+    ///
+    /// Thread-safe: Uses internal locking to prevent release during active GPU operations.
+    public func releaseGPUResources() {
+        // Acquire lock to prevent release during GPU execution
+        os_unfair_lock_lock(&gpuResourceLock)
+        defer { os_unfair_lock_unlock(&gpuResourceLock) }
+
+        gpuDataBuffer = nil
+        gpuBatchBuffer = nil
+        gpuBatchBufferCapacity = 0
+        mpsInputBuffer = nil
+        mpsRealBuffer = nil
+        mpsImagBuffer = nil
+        // Keep pipeline states and twiddle factors - they're relatively small
+        // and expensive to recreate
+    }
+}
+
+// MARK: - Memory Pressure Integration
+
+extension FFT: MemoryPressureResponder {
+    public func didReceiveMemoryPressure(level: MemoryPressureLevel) {
+        switch level {
+        case .critical:
+            // Release all GPU buffers under critical pressure
+            releaseGPUResources()
+        case .warning:
+            // Release batch buffers (often large) but keep single-FFT buffers
+            os_unfair_lock_lock(&batchBufferLock)
+            gpuBatchBuffer = nil
+            gpuBatchBufferCapacity = 0
+            os_unfair_lock_unlock(&batchBufferLock)
+        case .normal:
+            // Pressure relieved - no action needed
+            // Buffers will be lazily recreated as needed
+            break
+        }
     }
 }
