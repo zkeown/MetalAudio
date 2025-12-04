@@ -1,6 +1,7 @@
 import Metal
 import Foundation
 import Accelerate
+import os.log
 
 /// A multi-dimensional tensor backed by Metal buffer for GPU compute
 ///
@@ -186,7 +187,11 @@ public final class Tensor {
     }
 
     /// Copy data from Swift array
+    ///
     /// - Throws: `MetalAudioError.bufferSizeMismatch` if array size doesn't match tensor
+    ///
+    /// - Note: In DEBUG builds, validates that input contains no NaN or Inf values.
+    ///   This helps catch numerical issues early during development.
     public func copy(from array: [Float]) throws {
         guard array.count == count else {
             throw MetalAudioError.bufferSizeMismatch(
@@ -196,6 +201,21 @@ public final class Tensor {
         }
         // Handle empty arrays safely (no-op, but consistent with size check above)
         guard !array.isEmpty else { return }
+
+        #if DEBUG
+        // Validate for NaN/Inf in debug builds to catch numerical issues early
+        for (index, value) in array.enumerated() {
+            if value.isNaN {
+                print("[Tensor] Warning: NaN detected at index \(index) in copy(from:)")
+                break
+            }
+            if value.isInfinite {
+                print("[Tensor] Warning: Inf detected at index \(index) in copy(from:)")
+                break
+            }
+        }
+        #endif
+
         array.withUnsafeBufferPointer { ptr in
             guard let baseAddress = ptr.baseAddress else { return }
             memcpy(buffer.contents(), baseAddress, byteSize)
@@ -422,25 +442,24 @@ extension Tensor {
         #endif
     }
 
+    /// Logger for tensor bounds violations
+    private static let logger = Logger(subsystem: "com.metalaudio", category: "Tensor")
+
     /// Get element at indices with runtime validation
     /// - Warning: Validates rank and bounds in all builds. For performance-critical inner loops,
     ///   use `getUnchecked(_:)` and `setUnchecked(_:to:)` after validating indices externally.
-    /// - Returns: Element value, or 0.0 if indices are invalid (logs warning in DEBUG)
+    /// - Returns: Element value, or 0.0 if indices are invalid (logs warning)
     public subscript(indices: Int...) -> Float {
         get {
             // Runtime validation in all builds (not just DEBUG)
             guard indices.count == rank else {
-                #if DEBUG
-                print("[Tensor] Warning: subscript rank mismatch - expected \(rank), got \(indices.count)")
-                #endif
+                Self.logger.warning("Tensor subscript rank mismatch - expected \(self.rank), got \(indices.count)")
                 return 0.0
             }
             // Bounds check each index
             for i in 0..<rank {
                 guard indices[i] >= 0 && indices[i] < shape[i] else {
-                    #if DEBUG
-                    print("[Tensor] Warning: subscript index \(indices[i]) out of bounds for dimension \(i) (size \(shape[i]))")
-                    #endif
+                    Self.logger.warning("Tensor subscript index \(indices[i]) out of bounds for dimension \(i) (size \(self.shape[i]))")
                     return 0.0
                 }
             }
@@ -448,16 +467,12 @@ extension Tensor {
         }
         set {
             guard indices.count == rank else {
-                #if DEBUG
-                print("[Tensor] Warning: subscript rank mismatch - expected \(rank), got \(indices.count)")
-                #endif
+                Self.logger.warning("Tensor subscript rank mismatch - expected \(self.rank), got \(indices.count)")
                 return
             }
             for i in 0..<rank {
                 guard indices[i] >= 0 && indices[i] < shape[i] else {
-                    #if DEBUG
-                    print("[Tensor] Warning: subscript index \(indices[i]) out of bounds for dimension \(i) (size \(shape[i]))")
-                    #endif
+                    Self.logger.warning("Tensor subscript index \(indices[i]) out of bounds for dimension \(i) (size \(self.shape[i]))")
                     return
                 }
             }

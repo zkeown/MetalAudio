@@ -1,4 +1,5 @@
 import XCTest
+import Accelerate
 @testable import MetalDSP
 @testable import MetalAudioKit
 
@@ -2319,5 +2320,503 @@ final class FFTSizeValidationTests: XCTestCase {
         }
 
         XCTAssertFalse(real[0].isNaN)
+    }
+}
+
+// MARK: - vDSP Ground Truth Tests
+
+/// Tests that validate FFT implementation against Apple's Accelerate vDSP as ground truth.
+/// vDSP is the authoritative reference implementation for signal processing on Apple platforms.
+final class FFTvDSPComparisonTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    /// Cross-implementation tolerance - looser than round-trip tolerance because:
+    /// 1. Different implementations may use different accumulation order
+    /// 2. Twiddle factors may have slight precision differences
+    /// 3. Floating point errors accumulate differently
+    ///
+    /// Error typically scales as O(sqrt(N) * epsilon) for FFT implementations.
+    func crossImplementationTolerance(forSize size: Int) -> Float {
+        // Base tolerance calibrated from empirical measurements
+        // Scale with sqrt(N) for FFT error accumulation
+        let baseTolerance: Float = 2.5e-5
+        return baseTolerance * sqrt(Float(size) / 256.0)
+    }
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    // MARK: - vDSP Reference Implementation
+
+    /// Perform FFT using vDSP directly as ground truth reference
+    private func vDSPForwardFFT(input: [Float]) -> (real: [Float], imag: [Float]) {
+        let size = input.count
+        let log2n = vDSP_Length(log2(Float(size)))
+
+        guard let setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
+            fatalError("Failed to create vDSP FFT setup")
+        }
+        defer { vDSP_destroy_fftsetup(setup) }
+
+        // vDSP requires split complex format
+        var real = [Float](repeating: 0, count: size / 2)
+        var imag = [Float](repeating: 0, count: size / 2)
+
+        // Pack input into split complex (even indices -> real, odd -> imag)
+        var splitComplex = DSPSplitComplex(realp: &real, imagp: &imag)
+        input.withUnsafeBufferPointer { ptr in
+            ptr.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: size / 2) { complexPtr in
+                vDSP_ctoz(complexPtr, 2, &splitComplex, 1, vDSP_Length(size / 2))
+            }
+        }
+
+        // Perform in-place FFT
+        vDSP_fft_zrip(setup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
+
+        // vDSP_fft_zrip scales output by 2.0 - divide to match standard DFT convention
+        var scale: Float = 0.5
+        vDSP_vsmul(real, 1, &scale, &real, 1, vDSP_Length(size / 2))
+        vDSP_vsmul(imag, 1, &scale, &imag, 1, vDSP_Length(size / 2))
+
+        // Expand from packed format to full size for comparison
+        // vDSP_fft_zrip packs DC in real[0] and Nyquist in imag[0]
+        var fullReal = [Float](repeating: 0, count: size)
+        var fullImag = [Float](repeating: 0, count: size)
+
+        // DC component (index 0)
+        fullReal[0] = real[0]
+        fullImag[0] = 0
+
+        // Nyquist (index size/2)
+        fullReal[size / 2] = imag[0]
+        fullImag[size / 2] = 0
+
+        // Positive frequencies
+        for i in 1..<(size / 2) {
+            fullReal[i] = real[i]
+            fullImag[i] = imag[i]
+        }
+
+        // Negative frequencies (conjugate symmetry for real input)
+        for i in 1..<(size / 2) {
+            fullReal[size - i] = real[i]
+            fullImag[size - i] = -imag[i]
+        }
+
+        return (fullReal, fullImag)
+    }
+
+    // MARK: - Comparison Tests
+
+    func testFFTMatchesVDSP_SineWave() throws {
+        let sizes = [256, 512, 1024, 2048]
+
+        for size in sizes {
+            // Create sine wave at bin 4
+            var input = [Float](repeating: 0, count: size)
+            for i in 0..<size {
+                input[i] = sin(2.0 * Float.pi * 4.0 * Float(i) / Float(size))
+            }
+
+            // Get vDSP reference result
+            let (vdspReal, vdspImag) = vDSPForwardFFT(input: input)
+
+            // Get our implementation's result
+            let fft = try FFT(device: device, config: .init(size: size, windowType: .none))
+            var ourReal = [Float](repeating: 0, count: size)
+            var ourImag = [Float](repeating: 0, count: size)
+
+            input.withUnsafeBufferPointer { ptr in
+                fft.forward(input: ptr.baseAddress!, outputReal: &ourReal, outputImag: &ourImag)
+            }
+
+            // Compare results with size-appropriate tolerance
+            let tolerance = crossImplementationTolerance(forSize: size)
+            var maxRealError: Float = 0
+            var maxImagError: Float = 0
+
+            for i in 0..<size {
+                let realError = abs(ourReal[i] - vdspReal[i])
+                let imagError = abs(ourImag[i] - vdspImag[i])
+                maxRealError = max(maxRealError, realError)
+                maxImagError = max(maxImagError, imagError)
+            }
+
+            XCTAssertLessThan(maxRealError, tolerance,
+                "FFT real part max error \(maxRealError) exceeds tolerance \(tolerance) for size \(size)")
+            XCTAssertLessThan(maxImagError, tolerance,
+                "FFT imag part max error \(maxImagError) exceeds tolerance \(tolerance) for size \(size)")
+        }
+    }
+
+    func testFFTMatchesVDSP_MultipleFrequencies() throws {
+        let size = 1024
+
+        // Create signal with multiple frequencies: bins 10, 50, 100
+        var input = [Float](repeating: 0, count: size)
+        for i in 0..<size {
+            let t = Float(i) / Float(size)
+            input[i] = sin(2.0 * Float.pi * 10.0 * t) +
+                       0.5 * sin(2.0 * Float.pi * 50.0 * t) +
+                       0.25 * sin(2.0 * Float.pi * 100.0 * t)
+        }
+
+        // Get vDSP reference
+        let (vdspReal, vdspImag) = vDSPForwardFFT(input: input)
+
+        // Get our result
+        let fft = try FFT(device: device, config: .init(size: size, windowType: .none))
+        var ourReal = [Float](repeating: 0, count: size)
+        var ourImag = [Float](repeating: 0, count: size)
+
+        input.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &ourReal, outputImag: &ourImag)
+        }
+
+        // Compare magnitude at key bins (more robust than comparing complex values)
+        let keyBins = [10, 50, 100]
+        for bin in keyBins {
+            let vdspMag = sqrt(vdspReal[bin] * vdspReal[bin] + vdspImag[bin] * vdspImag[bin])
+            let ourMag = sqrt(ourReal[bin] * ourReal[bin] + ourImag[bin] * ourImag[bin])
+
+            let relError = abs(ourMag - vdspMag) / max(vdspMag, 1e-10)
+            XCTAssertLessThan(relError, 0.01,
+                "Magnitude at bin \(bin) differs by \(relError * 100)% from vDSP reference")
+        }
+    }
+
+    func testFFTMatchesVDSP_DC() throws {
+        let size = 512
+
+        // DC signal (constant value)
+        let dcValue: Float = 2.5
+        let input = [Float](repeating: dcValue, count: size)
+
+        // Get vDSP reference
+        let (vdspReal, _) = vDSPForwardFFT(input: input)
+
+        // Get our result
+        let fft = try FFT(device: device, config: .init(size: size, windowType: .none))
+        var ourReal = [Float](repeating: 0, count: size)
+        var ourImag = [Float](repeating: 0, count: size)
+
+        input.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &ourReal, outputImag: &ourImag)
+        }
+
+        // DC component should match
+        let relError = abs(ourReal[0] - vdspReal[0]) / abs(vdspReal[0])
+        XCTAssertLessThan(relError, 0.01,
+            "DC component differs by \(relError * 100)% from vDSP reference")
+
+        // All other bins should be near zero
+        let tolerance = crossImplementationTolerance(forSize: size)
+        for i in 1..<size {
+            XCTAssertEqual(ourReal[i], vdspReal[i], accuracy: tolerance,
+                "Non-DC bin \(i) should match vDSP")
+        }
+    }
+
+    func testFFTMatchesVDSP_Impulse() throws {
+        let size = 256
+
+        // Impulse at sample 0
+        var input = [Float](repeating: 0, count: size)
+        input[0] = 1.0
+
+        // Get vDSP reference
+        let (vdspReal, vdspImag) = vDSPForwardFFT(input: input)
+
+        // Get our result
+        let fft = try FFT(device: device, config: .init(size: size, windowType: .none))
+        var ourReal = [Float](repeating: 0, count: size)
+        var ourImag = [Float](repeating: 0, count: size)
+
+        input.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &ourReal, outputImag: &ourImag)
+        }
+
+        // For impulse, all FFT bins should have equal magnitude
+        // Compare against vDSP
+        let tolerance = crossImplementationTolerance(forSize: size)
+        for i in 0..<size {
+            XCTAssertEqual(ourReal[i], vdspReal[i], accuracy: tolerance,
+                "Impulse FFT real[\(i)] differs from vDSP")
+            XCTAssertEqual(ourImag[i], vdspImag[i], accuracy: tolerance,
+                "Impulse FFT imag[\(i)] differs from vDSP")
+        }
+    }
+
+    func testFFTMatchesVDSP_RandomSignal() throws {
+        let size = 512
+
+        // Random signal for comprehensive test
+        var input = [Float](repeating: 0, count: size)
+        srand48(42)  // Fixed seed for reproducibility
+        for i in 0..<size {
+            input[i] = Float(drand48()) * 2.0 - 1.0
+        }
+
+        // Get vDSP reference
+        let (vdspReal, vdspImag) = vDSPForwardFFT(input: input)
+
+        // Get our result
+        let fft = try FFT(device: device, config: .init(size: size, windowType: .none))
+        var ourReal = [Float](repeating: 0, count: size)
+        var ourImag = [Float](repeating: 0, count: size)
+
+        input.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &ourReal, outputImag: &ourImag)
+        }
+
+        // Compute RMS error across all bins
+        var sumSqError: Float = 0
+        var sumSqRef: Float = 0
+
+        for i in 0..<size {
+            let realErr = ourReal[i] - vdspReal[i]
+            let imagErr = ourImag[i] - vdspImag[i]
+            sumSqError += realErr * realErr + imagErr * imagErr
+            sumSqRef += vdspReal[i] * vdspReal[i] + vdspImag[i] * vdspImag[i]
+        }
+
+        let relRMSError = sqrt(sumSqError / max(sumSqRef, 1e-10))
+        XCTAssertLessThan(relRMSError, 0.01,
+            "Random signal FFT relative RMS error \(relRMSError) vs vDSP is too high")
+    }
+}
+
+// MARK: - FFT Mathematical Property Tests
+
+/// Tests that validate mathematical properties that must hold for any correct FFT implementation.
+/// These are invariant-based tests that don't require a reference implementation.
+final class FFTMathematicalPropertyTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    /// Tolerance for property tests - slightly looser than hardware tolerance
+    /// to account for numerical precision limits when testing mathematical properties
+    let propertyTolerance: Float = 1e-5
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    /// Parseval's theorem: energy in time domain = energy in frequency domain
+    func testParsevalTheorem() throws {
+        let size = 1024
+        let fft = try FFT(device: device, config: .init(size: size, windowType: .none))
+
+        // Create random signal
+        var input = [Float](repeating: 0, count: size)
+        srand48(123)
+        for i in 0..<size {
+            input[i] = Float(drand48()) * 2.0 - 1.0
+        }
+
+        // Time domain energy
+        let timeEnergy = input.map { $0 * $0 }.reduce(0, +)
+
+        // Get FFT
+        var real = [Float](repeating: 0, count: size)
+        var imag = [Float](repeating: 0, count: size)
+
+        input.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &real, outputImag: &imag)
+        }
+
+        // Frequency domain energy (scaled by 1/N for DFT)
+        var freqEnergy: Float = 0
+        for i in 0..<size {
+            freqEnergy += real[i] * real[i] + imag[i] * imag[i]
+        }
+        freqEnergy /= Float(size)
+
+        let relError = abs(timeEnergy - freqEnergy) / timeEnergy
+        XCTAssertLessThan(relError, 0.01,
+            "Parseval's theorem violated: time energy \(timeEnergy) != freq energy \(freqEnergy), error \(relError * 100)%")
+    }
+
+    /// Linearity: FFT(a + b) = FFT(a) + FFT(b)
+    func testFFTLinearity() throws {
+        let size = 512
+        let fft = try FFT(device: device, config: .init(size: size, windowType: .none))
+
+        // Create two signals
+        var a = [Float](repeating: 0, count: size)
+        var b = [Float](repeating: 0, count: size)
+        var sum = [Float](repeating: 0, count: size)
+
+        for i in 0..<size {
+            a[i] = sin(2.0 * Float.pi * 5.0 * Float(i) / Float(size))
+            b[i] = sin(2.0 * Float.pi * 20.0 * Float(i) / Float(size))
+            sum[i] = a[i] + b[i]
+        }
+
+        // FFT of a
+        var realA = [Float](repeating: 0, count: size)
+        var imagA = [Float](repeating: 0, count: size)
+        a.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &realA, outputImag: &imagA)
+        }
+
+        // FFT of b
+        var realB = [Float](repeating: 0, count: size)
+        var imagB = [Float](repeating: 0, count: size)
+        b.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &realB, outputImag: &imagB)
+        }
+
+        // FFT of sum
+        var realSum = [Float](repeating: 0, count: size)
+        var imagSum = [Float](repeating: 0, count: size)
+        sum.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &realSum, outputImag: &imagSum)
+        }
+
+        // FFT(a) + FFT(b) should equal FFT(a + b)
+        // Use relative tolerance for large values, skip noise floor comparisons
+        // Noise floor values (< 1e-4) don't sum linearly due to FP precision limits
+        for i in 0..<size {
+            let expectedReal = realA[i] + realB[i]
+            let expectedImag = imagA[i] + imagB[i]
+
+            // Skip noise floor bins where values are too small for meaningful comparison
+            let noiseThreshold: Float = 1e-4
+            let realTol = max(propertyTolerance, abs(expectedReal) * 1e-5)
+            let imagTol = max(propertyTolerance, abs(expectedImag) * 1e-5)
+
+            if abs(expectedReal) > noiseThreshold || abs(realSum[i]) > noiseThreshold {
+                XCTAssertEqual(realSum[i], expectedReal, accuracy: realTol,
+                    "Linearity violated at bin \(i) real")
+            }
+            if abs(expectedImag) > noiseThreshold || abs(imagSum[i]) > noiseThreshold {
+                XCTAssertEqual(imagSum[i], expectedImag, accuracy: imagTol,
+                    "Linearity violated at bin \(i) imag")
+            }
+        }
+    }
+
+    /// Scaling: FFT(c * x) = c * FFT(x)
+    func testFFTScaling() throws {
+        let size = 256
+        let fft = try FFT(device: device, config: .init(size: size, windowType: .none))
+        let scale: Float = 3.5
+
+        // Create signal
+        var x = [Float](repeating: 0, count: size)
+        var scaledX = [Float](repeating: 0, count: size)
+
+        for i in 0..<size {
+            x[i] = sin(2.0 * Float.pi * 10.0 * Float(i) / Float(size))
+            scaledX[i] = scale * x[i]
+        }
+
+        // FFT of x
+        var realX = [Float](repeating: 0, count: size)
+        var imagX = [Float](repeating: 0, count: size)
+        x.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &realX, outputImag: &imagX)
+        }
+
+        // FFT of scaled x
+        var realScaled = [Float](repeating: 0, count: size)
+        var imagScaled = [Float](repeating: 0, count: size)
+        scaledX.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &realScaled, outputImag: &imagScaled)
+        }
+
+        // c * FFT(x) should equal FFT(c * x)
+        // Scale tolerance proportionally
+        let scaledTolerance = propertyTolerance * scale
+        for i in 0..<size {
+            let expectedReal = scale * realX[i]
+            let expectedImag = scale * imagX[i]
+
+            XCTAssertEqual(realScaled[i], expectedReal, accuracy: scaledTolerance,
+                "Scaling violated at bin \(i) real")
+            XCTAssertEqual(imagScaled[i], expectedImag, accuracy: scaledTolerance,
+                "Scaling violated at bin \(i) imag")
+        }
+    }
+
+    /// Time shift property: shifting input by k samples multiplies FFT by e^(-j*2*pi*k*n/N)
+    func testFFTTimeShift() throws {
+        let size = 256
+        let fft = try FFT(device: device, config: .init(size: size, windowType: .none))
+        let shift = 10  // Shift by 10 samples
+
+        // Create signal
+        var original = [Float](repeating: 0, count: size)
+        var shifted = [Float](repeating: 0, count: size)
+
+        for i in 0..<size {
+            original[i] = sin(2.0 * Float.pi * 8.0 * Float(i) / Float(size))
+        }
+
+        // Circular shift
+        for i in 0..<size {
+            shifted[i] = original[(i - shift + size) % size]
+        }
+
+        // FFT of original
+        var realOrig = [Float](repeating: 0, count: size)
+        var imagOrig = [Float](repeating: 0, count: size)
+        original.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &realOrig, outputImag: &imagOrig)
+        }
+
+        // FFT of shifted
+        var realShifted = [Float](repeating: 0, count: size)
+        var imagShifted = [Float](repeating: 0, count: size)
+        shifted.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &realShifted, outputImag: &imagShifted)
+        }
+
+        // Magnitudes should be identical (shift only affects phase)
+        for i in 0..<size {
+            let origMag = sqrt(realOrig[i] * realOrig[i] + imagOrig[i] * imagOrig[i])
+            let shiftedMag = sqrt(realShifted[i] * realShifted[i] + imagShifted[i] * imagShifted[i])
+
+            XCTAssertEqual(shiftedMag, origMag, accuracy: propertyTolerance,
+                "Time shift should not change magnitude at bin \(i)")
+        }
+    }
+
+    /// Conjugate symmetry for real input: X[k] = X*[N-k]
+    func testConjugateSymmetry() throws {
+        let size = 256
+        let fft = try FFT(device: device, config: .init(size: size, windowType: .none))
+
+        // Create real signal
+        var input = [Float](repeating: 0, count: size)
+        srand48(456)
+        for i in 0..<size {
+            input[i] = Float(drand48()) * 2.0 - 1.0
+        }
+
+        var real = [Float](repeating: 0, count: size)
+        var imag = [Float](repeating: 0, count: size)
+
+        input.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &real, outputImag: &imag)
+        }
+
+        // Check conjugate symmetry: X[k] = X*[N-k]
+        // This means real[k] = real[N-k] and imag[k] = -imag[N-k]
+        for k in 1..<(size / 2) {
+            XCTAssertEqual(real[k], real[size - k], accuracy: propertyTolerance,
+                "Conjugate symmetry violated for real at k=\(k)")
+            XCTAssertEqual(imag[k], -imag[size - k], accuracy: propertyTolerance,
+                "Conjugate symmetry violated for imag at k=\(k)")
+        }
+
+        // DC and Nyquist should have zero imaginary part
+        XCTAssertEqual(imag[0], 0, accuracy: propertyTolerance,
+            "DC bin should have zero imaginary part")
+        XCTAssertEqual(imag[size / 2], 0, accuracy: propertyTolerance,
+            "Nyquist bin should have zero imaginary part")
     }
 }

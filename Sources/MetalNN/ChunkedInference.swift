@@ -178,13 +178,16 @@ public final class ChunkedInference {
     /// - Parameters:
     ///   - streamingInference: The streaming BNNS inference instance
     ///   - config: Chunking configuration
+    ///
+    /// - Note: This initializer is not yet implemented. Use `init(inference:config:)` with
+    ///   a `BNNSInference` instance instead. For streaming models, call `BNNSStreamingInference.predict()`
+    ///   directly without the chunked wrapper.
+    @available(*, unavailable, message: "Streaming inference wrapper not yet implemented. Use init(inference:config:) with BNNSInference, or call BNNSStreamingInference.predict() directly.")
     public convenience init(
         streamingInference: BNNSStreamingInference,
         config: Configuration = Configuration()
     ) {
-        // Note: We need a BNNSInference-compatible interface
-        // For now, this requires the streaming inference to be wrapped
-        fatalError("Streaming inference wrapper not yet implemented - use BNNSInference")
+        fatalError("Unavailable")
     }
 
     // MARK: - Processing

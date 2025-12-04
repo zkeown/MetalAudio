@@ -148,11 +148,11 @@ public final class ComputeContext: @unchecked Sendable {
         _ encode: (MTLComputeCommandEncoder) throws -> T
     ) throws -> T {
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalAudioError.commandQueueCreationFailed
+            throw MetalAudioError.commandBufferCreationFailed
         }
 
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalAudioError.commandQueueCreationFailed
+            throw MetalAudioError.commandEncoderCreationFailed
         }
 
         let result = try encode(encoder)
@@ -214,11 +214,11 @@ public final class ComputeContext: @unchecked Sendable {
         let wallStart = CFAbsoluteTimeGetCurrent()
 
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalAudioError.commandQueueCreationFailed
+            throw MetalAudioError.commandBufferCreationFailed
         }
 
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalAudioError.commandQueueCreationFailed
+            throw MetalAudioError.commandEncoderCreationFailed
         }
 
         let result = try encode(encoder)
@@ -301,13 +301,13 @@ public final class ComputeContext: @unchecked Sendable {
 
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             inFlightSemaphore.signal()
-            completion(MetalAudioError.commandQueueCreationFailed)
+            completion(MetalAudioError.commandBufferCreationFailed)
             return
         }
 
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             inFlightSemaphore.signal()
-            completion(MetalAudioError.commandQueueCreationFailed)
+            completion(MetalAudioError.commandEncoderCreationFailed)
             return
         }
 
@@ -350,13 +350,13 @@ public final class ComputeContext: @unchecked Sendable {
 
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             inFlightSemaphore.signal()
-            completion(MetalAudioError.commandQueueCreationFailed)
+            completion(MetalAudioError.commandBufferCreationFailed)
             return true // We did attempt execution, just failed
         }
 
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             inFlightSemaphore.signal()
-            completion(MetalAudioError.commandQueueCreationFailed)
+            completion(MetalAudioError.commandEncoderCreationFailed)
             return true
         }
 
@@ -399,11 +399,11 @@ public final class ComputeContext: @unchecked Sendable {
         defer { inFlightSemaphore.signal() }
 
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalAudioError.commandQueueCreationFailed
+            throw MetalAudioError.commandBufferCreationFailed
         }
 
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalAudioError.commandQueueCreationFailed
+            throw MetalAudioError.commandEncoderCreationFailed
         }
 
         let result = try encode(encoder)
@@ -438,12 +438,12 @@ public final class ComputeContext: @unchecked Sendable {
         timeout: TimeInterval? = nil
     ) throws {
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            throw MetalAudioError.commandQueueCreationFailed
+            throw MetalAudioError.commandBufferCreationFailed
         }
 
         for pass in passes {
             guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-                throw MetalAudioError.commandQueueCreationFailed
+                throw MetalAudioError.commandEncoderCreationFailed
             }
             try pass(encoder)
             encoder.endEncoding()
@@ -663,13 +663,13 @@ extension ComputeContext {
 
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             inFlightSemaphore.signal()
-            completion(.failure(MetalAudioError.commandQueueCreationFailed))
+            completion(.failure(MetalAudioError.commandBufferCreationFailed))
             return
         }
 
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             inFlightSemaphore.signal()
-            completion(.failure(MetalAudioError.commandQueueCreationFailed))
+            completion(.failure(MetalAudioError.commandEncoderCreationFailed))
             return
         }
 

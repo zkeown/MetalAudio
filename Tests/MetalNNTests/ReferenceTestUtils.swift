@@ -214,6 +214,129 @@ public struct ReferenceTestUtils {
 /// Dummy class for bundle lookup
 private class DummyBundleClass {}
 
+// MARK: - PyTorch Reference Loading
+
+extension ReferenceTestUtils {
+
+    /// Load PyTorch references JSON file
+    /// - Returns: Dictionary containing all reference data
+    public static func loadPyTorchReferences() throws -> [String: Any] {
+        // Use Bundle.module which SPM generates for test targets with resources
+        let bundle = Bundle.module
+
+        // Try finding the file in Resources subdirectory (SPM copies directory structure)
+        var url = bundle.url(forResource: "pytorch_references", withExtension: "json", subdirectory: "Resources")
+        if url == nil {
+            // Fallback to direct path
+            url = bundle.url(forResource: "pytorch_references", withExtension: "json")
+        }
+        if url == nil {
+            // Try with class-based bundle lookup as fallback
+            let classBundle = Bundle(for: DummyBundleClass.self)
+            url = classBundle.url(forResource: "pytorch_references", withExtension: "json", subdirectory: "Resources")
+        }
+
+        guard let finalUrl = url else {
+            throw ReferenceError.fileNotFound("pytorch_references")
+        }
+
+        let data = try Data(contentsOf: finalUrl)
+        guard let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ReferenceError.invalidFormat("Expected dictionary at root")
+        }
+        return dict
+    }
+
+    /// Get activation references for a specific test case
+    public static func getActivationReferences(testCase: String) throws -> [String: [Float]] {
+        let refs = try loadPyTorchReferences()
+        guard let activations = refs["activations"] as? [String: Any],
+              let testCaseData = activations[testCase] as? [String: Any] else {
+            throw ReferenceError.invalidFormat("Activation test case '\(testCase)' not found")
+        }
+
+        var result: [String: [Float]] = [:]
+        for (key, value) in testCaseData {
+            if let doubleArray = value as? [Double] {
+                result[key] = doubleArray.map { Float($0) }
+            } else if let floatArray = value as? [Float] {
+                result[key] = floatArray
+            }
+        }
+        return result
+    }
+
+    /// Get linear layer references
+    public static func getLinearReferences() throws -> (weights: (weight: [[Float]], bias: [Float], inFeatures: Int, outFeatures: Int), testCases: [(name: String, input: [[Float]], output: [[Float]])]) {
+        let refs = try loadPyTorchReferences()
+        guard let linear = refs["linear"] as? [String: Any],
+              let weightsDict = linear["weights"] as? [String: Any] else {
+            throw ReferenceError.invalidFormat("Linear references not found")
+        }
+
+        // Parse weights
+        let weightMatrix = (weightsDict["weight"] as! [[Double]]).map { $0.map { Float($0) } }
+        let biasVector = (weightsDict["bias"] as! [Double]).map { Float($0) }
+        let inFeatures = weightsDict["in_features"] as! Int
+        let outFeatures = weightsDict["out_features"] as! Int
+
+        // Parse test cases
+        var testCases: [(String, [[Float]], [[Float]])] = []
+        for (key, value) in linear {
+            if key.hasPrefix("batch_"), let caseData = value as? [String: Any] {
+                let input = (caseData["input"] as! [[Double]]).map { $0.map { Float($0) } }
+                let output = (caseData["output"] as! [[Double]]).map { $0.map { Float($0) } }
+                testCases.append((key, input, output))
+            }
+        }
+
+        return ((weightMatrix, biasVector, inFeatures, outFeatures), testCases)
+    }
+
+    /// Get softmax references with edge cases
+    public static func getSoftmaxReferences() throws -> [(name: String, input: [Float], output: [Float], sum: Float)] {
+        let refs = try loadPyTorchReferences()
+        guard let softmax = refs["softmax"] as? [String: Any] else {
+            throw ReferenceError.invalidFormat("Softmax references not found")
+        }
+
+        var results: [(String, [Float], [Float], Float)] = []
+        for (name, value) in softmax {
+            guard let caseData = value as? [String: Any] else { continue }
+            let input = (caseData["input"] as! [Double]).map { Float($0) }
+            let output = (caseData["output"] as! [Double]).map { Float($0) }
+            let sum = Float(caseData["sum"] as! Double)
+            results.append((name, input, output, sum))
+        }
+        return results
+    }
+
+    /// Get LayerNorm references
+    public static func getLayerNormReferences() throws -> (params: (weight: [Float], bias: [Float], normalizedShape: Int, eps: Float), testCases: [(name: String, input: [Float], output: [Float])]) {
+        let refs = try loadPyTorchReferences()
+        guard let layernorm = refs["layernorm"] as? [String: Any],
+              let params = layernorm["params"] as? [String: Any] else {
+            throw ReferenceError.invalidFormat("LayerNorm references not found")
+        }
+
+        let weight = (params["weight"] as! [Double]).map { Float($0) }
+        let bias = (params["bias"] as! [Double]).map { Float($0) }
+        let normalizedShape = params["normalized_shape"] as! Int
+        let eps = Float(params["eps"] as! Double)
+
+        var testCases: [(String, [Float], [Float])] = []
+        for (key, value) in layernorm {
+            if key != "params", let caseData = value as? [String: Any] {
+                let input = (caseData["input"] as! [Double]).map { Float($0) }
+                let output = (caseData["output"] as! [Double]).map { Float($0) }
+                testCases.append((key, input, output))
+            }
+        }
+
+        return ((weight, bias, normalizedShape, eps), testCases)
+    }
+}
+
 // MARK: - XCTest Extensions
 
 extension XCTestCase {

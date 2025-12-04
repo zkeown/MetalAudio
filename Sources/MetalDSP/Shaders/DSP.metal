@@ -8,9 +8,11 @@ using namespace metal;
 
 // MARK: - Constants
 // Use Metal's built-in M_PI_F from <metal_math>
-// Note: TWO_PI is also defined in Common.metal. In Metal, file-scope constants
-// have internal linkage (like C++ static), so there's no symbol conflict.
-// Consider moving to a shared DSPConstants.h header for DRY compliance.
+//
+// NOTE: TWO_PI, DENORMAL_THRESHOLD, flush_denormal(), and Complex are intentionally
+// duplicated from Common.metal. Metal shaders are compiled at runtime from source
+// strings, so #include headers don't work. File-scope constants have internal linkage
+// (like C++ static), so there's no symbol conflict. KEEP THESE DEFINITIONS IN SYNC.
 constant float TWO_PI = 2.0f * M_PI_F;
 
 // Denormal threshold - values below this are flushed to zero to prevent

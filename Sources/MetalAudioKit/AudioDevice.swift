@@ -16,6 +16,8 @@ public enum MetalAudioError: Error, LocalizedError {
     case bufferTooLarge(requested: Int, maxAllowed: Int)
     case integerOverflow(operation: String)
     case commandQueueCreationFailed
+    case commandBufferCreationFailed
+    case commandEncoderCreationFailed
     case invalidConfiguration(String)
     case indexOutOfBounds(index: [Int], shape: [Int])
     case typeSizeMismatch(requestedBytes: Int, bufferBytes: Int)
@@ -45,6 +47,10 @@ public enum MetalAudioError: Error, LocalizedError {
             return "Integer overflow during \(operation)"
         case .commandQueueCreationFailed:
             return "Failed to create command queue"
+        case .commandBufferCreationFailed:
+            return "Failed to create command buffer"
+        case .commandEncoderCreationFailed:
+            return "Failed to create compute command encoder"
         case .invalidConfiguration(let reason):
             return "Invalid configuration: \(reason)"
         case .indexOutOfBounds(let index, let shape):

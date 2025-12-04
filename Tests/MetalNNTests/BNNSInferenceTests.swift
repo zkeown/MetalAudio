@@ -423,6 +423,516 @@ final class BNNSInferenceFunctionalTests: XCTestCase {
     }
 }
 
+// MARK: - BNNSStreamingInference Functional Tests
+
+@available(macOS 15.0, iOS 18.0, *)
+final class BNNSStreamingInferenceFunctionalTests: XCTestCase {
+
+    /// Path to the streaming test model (uses streaming_lstm for stateful context)
+    static var testModelPath: URL {
+        URL(fileURLWithPath: #file)
+            .deletingLastPathComponent()  // MetalNNTests
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // MetalAudio
+            .appendingPathComponent("TestModels")
+            .appendingPathComponent("streaming_lstm.mlmodelc")
+    }
+
+    // MARK: - Helper Methods
+
+    /// Try to create streaming inference, skip test if model doesn't support streaming
+    ///
+    /// Note: BNNSGraphContextMakeStreaming requires models compiled with the internal
+    /// BNNSOption attribute `StateMode=Streaming`, which is not publicly exposed through
+    /// CoreML tools. Tests skip gracefully until Apple provides public access to this feature.
+    func createStreamingInference() throws -> BNNSStreamingInference {
+        let path = Self.testModelPath
+        guard FileManager.default.fileExists(atPath: path.path) else {
+            throw XCTSkip("Test model not found at \(path.path)")
+        }
+
+        do {
+            return try BNNSStreamingInference(modelPath: path)
+        } catch BNNSInferenceError.contextCreationFailed {
+            throw XCTSkip("""
+                BNNSGraphContextMakeStreaming requires StateMode=Streaming attribute \
+                (internal BNNS option not exposed via CoreML tools). \
+                Tests will pass once Apple provides public API access.
+                """)
+        }
+    }
+
+    /// Run a single prediction and return output array
+    func runPrediction(_ inference: BNNSStreamingInference, input: [Float]) -> [Float] {
+        var inputCopy = input
+        var output = [Float](repeating: 0.0, count: inference.outputElementCount)
+
+        inputCopy.withUnsafeMutableBufferPointer { inputPtr in
+            output.withUnsafeMutableBufferPointer { outputPtr in
+                _ = inference.predict(
+                    input: inputPtr.baseAddress!,
+                    output: outputPtr.baseAddress!
+                )
+            }
+        }
+        return output
+    }
+
+    /// Generate test input data
+    func generateTestInput(count: Int, seed: Float = 0.5) -> [Float] {
+        return (0..<count).map { Float($0) * 0.001 + seed }
+    }
+
+    // MARK: - 1. Initialization & Shape Tests
+
+    func testInitWithValidModel() throws {
+        let inference = try createStreamingInference()
+
+        // Verify shapes were queried correctly
+        XCTAssertFalse(inference.inputShape.isEmpty, "Input shape should be queried")
+        XCTAssertFalse(inference.outputShape.isEmpty, "Output shape should be queried")
+        XCTAssertGreaterThan(inference.inputElementCount, 0)
+        XCTAssertGreaterThan(inference.outputElementCount, 0)
+    }
+
+    func testInitWithSingleThreaded() throws {
+        // Skip test if streaming context not supported
+        _ = try createStreamingInference()
+
+        // If we get here, test both options
+        let path = Self.testModelPath
+        let inference1 = try BNNSStreamingInference(modelPath: path, singleThreaded: true)
+        let inference2 = try BNNSStreamingInference(modelPath: path, singleThreaded: false)
+
+        XCTAssertNotNil(inference1)
+        XCTAssertNotNil(inference2)
+    }
+
+    func testInputOutputShapesMatchExpected() throws {
+        let inference = try createStreamingInference()
+
+        // Model: input [1, 100, 128], output [1, 100, 256]
+        XCTAssertEqual(inference.inputShape, [1, 100, 128], "Input shape should match model spec")
+        XCTAssertEqual(inference.outputShape, [1, 100, 256], "Output shape should match model spec")
+    }
+
+    func testElementCountsAreCorrect() throws {
+        let inference = try createStreamingInference()
+
+        // input [1, 100, 128] = 12800, output [1, 100, 256] = 25600
+        XCTAssertEqual(inference.inputElementCount, 1 * 100 * 128, "Input element count should be 12800")
+        XCTAssertEqual(inference.outputElementCount, 1 * 100 * 256, "Output element count should be 25600")
+    }
+
+    // MARK: - 2. Prediction Tests
+
+    func testSinglePrediction() throws {
+        let inference = try createStreamingInference()
+
+        var input = [Float](repeating: 0.0, count: inference.inputElementCount)
+        var output = [Float](repeating: 0.0, count: inference.outputElementCount)
+
+        let success = input.withUnsafeMutableBufferPointer { inputPtr in
+            output.withUnsafeMutableBufferPointer { outputPtr in
+                inference.predict(input: inputPtr.baseAddress!, output: outputPtr.baseAddress!)
+            }
+        }
+
+        XCTAssertTrue(success, "predict() should return true on success")
+        XCTAssertFalse(output.contains(where: { $0.isNaN }), "Output should not contain NaN")
+    }
+
+    func testPredictWithVaryingInput() throws {
+        let inference = try createStreamingInference()
+
+        // First: zeros input
+        let zerosInput = [Float](repeating: 0.0, count: inference.inputElementCount)
+        let zerosOutput = runPrediction(inference, input: zerosInput)
+
+        // Reset state for fair comparison
+        inference.resetState()
+
+        // Second: non-zero input (sine wave pattern)
+        let nonZeroInput = (0..<inference.inputElementCount).map { Float(sin(Double($0) * 0.1)) }
+        let nonZeroOutput = runPrediction(inference, input: nonZeroInput)
+
+        // Outputs should differ
+        let difference = zip(zerosOutput, nonZeroOutput).map { abs($0 - $1) }.reduce(0, +)
+        XCTAssertGreaterThan(difference, 0.001, "Different inputs should produce different outputs")
+    }
+
+    func testPredictReturnsTrueOnSuccess() throws {
+        let inference = try createStreamingInference()
+
+        var input = [Float](repeating: 0.5, count: inference.inputElementCount)
+        var output = [Float](repeating: 0.0, count: inference.outputElementCount)
+
+        let result = input.withUnsafeMutableBufferPointer { inputPtr in
+            output.withUnsafeMutableBufferPointer { outputPtr in
+                inference.predict(input: inputPtr.baseAddress!, output: outputPtr.baseAddress!)
+            }
+        }
+
+        XCTAssertTrue(result, "predict() should return true")
+    }
+
+    func testPredictWithExplicitSizes() throws {
+        let inference = try createStreamingInference()
+
+        var input = [Float](repeating: 0.5, count: inference.inputElementCount)
+        var output = [Float](repeating: 0.0, count: inference.outputElementCount)
+
+        let result = input.withUnsafeMutableBufferPointer { inputPtr in
+            output.withUnsafeMutableBufferPointer { outputPtr in
+                inference.predict(
+                    input: inputPtr.baseAddress!,
+                    output: outputPtr.baseAddress!,
+                    inputSize: inference.inputElementCount,
+                    outputSize: inference.outputElementCount
+                )
+            }
+        }
+
+        XCTAssertTrue(result, "predict with explicit sizes should return true")
+        XCTAssertFalse(output.contains(where: { $0.isNaN }), "Output should not contain NaN")
+    }
+
+    // MARK: - 3. State Persistence Tests (Core Streaming Feature)
+
+    func testSequentialPredictionsProduceDifferentOutputs() throws {
+        let inference = try createStreamingInference()
+
+        let input = [Float](repeating: 0.5, count: inference.inputElementCount)
+
+        // Run same input multiple times - outputs should differ due to hidden state
+        let output1 = runPrediction(inference, input: input)
+        let output2 = runPrediction(inference, input: input)
+        let output3 = runPrediction(inference, input: input)
+
+        // Check that outputs evolve (LSTM hidden state accumulates)
+        let diff12 = zip(output1, output2).map { abs($0 - $1) }.reduce(0, +)
+        let diff23 = zip(output2, output3).map { abs($0 - $1) }.reduce(0, +)
+
+        XCTAssertGreaterThan(diff12, 0.0001, "Output should change between calls due to hidden state")
+        XCTAssertGreaterThan(diff23, 0.0001, "Output should continue evolving")
+    }
+
+    func testStatePersistsBetweenCalls() throws {
+        // Instance A: fresh, single prediction
+        let inferenceA = try createStreamingInference()
+        let input = [Float](repeating: 0.5, count: inferenceA.inputElementCount)
+        let outputAFresh = runPrediction(inferenceA, input: input)
+
+        // Instance B: run multiple predictions first
+        let inferenceB = try createStreamingInference()
+        _ = runPrediction(inferenceB, input: input)  // Build up state
+        _ = runPrediction(inferenceB, input: input)
+        let outputBWithState = runPrediction(inferenceB, input: input)
+
+        // Output B should differ from fresh A due to accumulated state
+        let difference = zip(outputAFresh, outputBWithState).map { abs($0 - $1) }.reduce(0, +)
+        XCTAssertGreaterThan(difference, 0.0001, "Instance with accumulated state should produce different output")
+    }
+
+    func testOutputEvolvesOverSequence() throws {
+        let inference = try createStreamingInference()
+        let input = [Float](repeating: 0.5, count: inference.inputElementCount)
+
+        // Collect 10 outputs
+        var outputs: [[Float]] = []
+        for _ in 0..<10 {
+            outputs.append(runPrediction(inference, input: input))
+        }
+
+        // Check that not all outputs are identical
+        var allIdentical = true
+        for i in 1..<outputs.count {
+            let diff = zip(outputs[0], outputs[i]).map { abs($0 - $1) }.reduce(0, +)
+            if diff > 0.0001 {
+                allIdentical = false
+                break
+            }
+        }
+
+        XCTAssertFalse(allIdentical, "Outputs should evolve over sequence due to hidden state")
+    }
+
+    // MARK: - 4. State Reset Tests
+
+    func testResetStateClearsHiddenState() throws {
+        // Instance A: fresh
+        let inferenceA = try createStreamingInference()
+        let input = [Float](repeating: 0.5, count: inferenceA.inputElementCount)
+        let outputAFresh = runPrediction(inferenceA, input: input)
+
+        // Instance B: run predictions, then reset
+        let inferenceB = try createStreamingInference()
+        for _ in 0..<5 {
+            _ = runPrediction(inferenceB, input: input)  // Build up state
+        }
+        inferenceB.resetState()  // Clear state
+        let outputBAfterReset = runPrediction(inferenceB, input: input)
+
+        // After reset, B should produce same output as fresh A
+        let difference = zip(outputAFresh, outputBAfterReset).map { abs($0 - $1) }.reduce(0, +)
+        let avgDiff = difference / Float(outputAFresh.count)
+        XCTAssertLessThan(avgDiff, 1e-5, "After reset, output should match fresh instance")
+    }
+
+    func testResetStateMultipleTimes() throws {
+        let inference = try createStreamingInference()
+        let input = [Float](repeating: 0.5, count: inference.inputElementCount)
+
+        // Reset multiple times without crash
+        for i in 0..<5 {
+            _ = runPrediction(inference, input: input)
+            inference.resetState()
+            let output = runPrediction(inference, input: input)
+            XCTAssertFalse(output.contains(where: { $0.isNaN }), "Output after reset \(i) should not be NaN")
+        }
+    }
+
+    func testPredictAfterResetProducesFreshOutput() throws {
+        // Fresh instance for reference
+        let fresh = try createStreamingInference()
+        let input = [Float](repeating: 0.5, count: fresh.inputElementCount)
+
+        var freshOutputs: [[Float]] = []
+        for _ in 0..<3 {
+            freshOutputs.append(runPrediction(fresh, input: input))
+        }
+
+        // Used instance: run sequence, reset, run same sequence
+        let used = try createStreamingInference()
+        for _ in 0..<10 {
+            _ = runPrediction(used, input: input)
+        }
+        used.resetState()
+
+        var usedOutputs: [[Float]] = []
+        for _ in 0..<3 {
+            usedOutputs.append(runPrediction(used, input: input))
+        }
+
+        // Outputs should match
+        for i in 0..<3 {
+            let diff = zip(freshOutputs[i], usedOutputs[i]).map { abs($0 - $1) }.reduce(0, +)
+            let avgDiff = diff / Float(freshOutputs[i].count)
+            XCTAssertLessThan(avgDiff, 1e-5, "Output \(i) after reset should match fresh instance")
+        }
+    }
+
+    // MARK: - 5. Multi-Sequence Processing
+
+    func testProcessMultipleSequences() throws {
+        let inference = try createStreamingInference()
+
+        // Sequence 1: input pattern A
+        let inputA = (0..<inference.inputElementCount).map { Float($0 % 100) * 0.01 }
+        for _ in 0..<5 {
+            _ = runPrediction(inference, input: inputA)
+        }
+
+        inference.resetState()
+
+        // Sequence 2: input pattern B (should start fresh)
+        let inputB = (0..<inference.inputElementCount).map { Float(99 - ($0 % 100)) * 0.01 }
+
+        // Compare with fresh instance
+        let fresh = try createStreamingInference()
+        let outputFresh = runPrediction(fresh, input: inputB)
+        let outputAfterReset = runPrediction(inference, input: inputB)
+
+        let diff = zip(outputFresh, outputAfterReset).map { abs($0 - $1) }.reduce(0, +)
+        let avgDiff = diff / Float(outputFresh.count)
+        XCTAssertLessThan(avgDiff, 1e-5, "After reset, sequence 2 should start fresh")
+    }
+
+    func testResetBetweenDifferentLengthSequences() throws {
+        let inference = try createStreamingInference()
+        let input = [Float](repeating: 0.5, count: inference.inputElementCount)
+
+        // Short sequence (2 steps)
+        _ = runPrediction(inference, input: input)
+        _ = runPrediction(inference, input: input)
+
+        inference.resetState()
+
+        // Long sequence (10 steps) - should work correctly
+        for i in 0..<10 {
+            let output = runPrediction(inference, input: input)
+            XCTAssertFalse(output.contains(where: { $0.isNaN }), "Output at step \(i) should not be NaN")
+        }
+    }
+
+    // MARK: - 6. Memory Pressure Tests
+
+    func testInitialMemoryPressureLevelIsNormal() throws {
+        let inference = try createStreamingInference()
+        XCTAssertEqual(inference.currentMemoryPressureLevel, .normal)
+    }
+
+    func testRegisterUnregisterMemoryPressure() throws {
+        let inference = try createStreamingInference()
+
+        // Should not crash
+        inference.registerForMemoryPressureNotifications()
+        inference.unregisterFromMemoryPressureNotifications()
+
+        // Double register/unregister should be safe
+        inference.registerForMemoryPressureNotifications()
+        inference.registerForMemoryPressureNotifications()
+        inference.unregisterFromMemoryPressureNotifications()
+        inference.unregisterFromMemoryPressureNotifications()
+    }
+
+    func testMemoryPressureDelegateReceivesNotification() throws {
+        let inference = try createStreamingInference()
+
+        class MockDelegate: BNNSStreamingMemoryPressureDelegate {
+            var receivedLevels: [MemoryPressureLevel] = []
+            func bnnsStreamingInference(_ inference: BNNSStreamingInference, didReceiveMemoryPressure level: MemoryPressureLevel) {
+                receivedLevels.append(level)
+            }
+        }
+
+        let delegate = MockDelegate()
+        inference.memoryPressureDelegate = delegate
+        inference.registerForMemoryPressureNotifications()
+
+        // Simulate memory pressure
+        MemoryPressureObserver.shared.simulatePressure(level: .warning)
+
+        // Small delay for notification dispatch
+        let expectation = expectation(description: "Memory pressure notification")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 1.0)
+
+        XCTAssertTrue(delegate.receivedLevels.contains(.warning), "Delegate should receive warning level")
+
+        // Cleanup
+        inference.unregisterFromMemoryPressureNotifications()
+        MemoryPressureObserver.shared.simulatePressure(level: .normal)
+    }
+
+    func testMemoryPressureDelegateWeakReference() throws {
+        let inference = try createStreamingInference()
+
+        // Create delegate in local scope
+        autoreleasepool {
+            class MockDelegate: BNNSStreamingMemoryPressureDelegate {
+                func bnnsStreamingInference(_ inference: BNNSStreamingInference, didReceiveMemoryPressure level: MemoryPressureLevel) {}
+            }
+            let delegate = MockDelegate()
+            inference.memoryPressureDelegate = delegate
+        }
+
+        // Delegate should be nil now (weak reference)
+        XCTAssertNil(inference.memoryPressureDelegate, "Delegate should be nil (weak reference)")
+
+        // Should not crash when simulating pressure with nil delegate
+        inference.registerForMemoryPressureNotifications()
+        MemoryPressureObserver.shared.simulatePressure(level: .warning)
+
+        let expectation = expectation(description: "No crash")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 1.0)
+
+        inference.unregisterFromMemoryPressureNotifications()
+        MemoryPressureObserver.shared.simulatePressure(level: .normal)
+    }
+
+    // MARK: - 7. Real-Time Safety Tests
+
+    func testPredictTimingConsistency() throws {
+        let inference = try createStreamingInference()
+
+        var input = [Float](repeating: 0.5, count: inference.inputElementCount)
+        var output = [Float](repeating: 0.0, count: inference.outputElementCount)
+
+        // Warmup
+        for _ in 0..<5 {
+            input.withUnsafeMutableBufferPointer { inputPtr in
+                output.withUnsafeMutableBufferPointer { outputPtr in
+                    _ = inference.predict(input: inputPtr.baseAddress!, output: outputPtr.baseAddress!)
+                }
+            }
+        }
+
+        // Measure
+        let iterations = 100
+        var executionTimes = [TimeInterval]()
+
+        for _ in 0..<iterations {
+            let start = CACurrentMediaTime()
+            input.withUnsafeMutableBufferPointer { inputPtr in
+                output.withUnsafeMutableBufferPointer { outputPtr in
+                    _ = inference.predict(input: inputPtr.baseAddress!, output: outputPtr.baseAddress!)
+                }
+            }
+            executionTimes.append(CACurrentMediaTime() - start)
+        }
+
+        let avgTime = executionTimes.reduce(0, +) / Double(iterations)
+        let maxTime = executionTimes.max() ?? 0
+
+        // Check for reasonable timing (not too slow for real-time use)
+        XCTAssertLessThan(avgTime, 0.050, "Average inference should be < 50ms")
+        XCTAssertLessThan(maxTime, 0.100, "Max inference should be < 100ms")
+
+        // Check for outliers (less than 10% should exceed 10x average)
+        let outlierThreshold = avgTime * 10
+        let outliers = executionTimes.filter { $0 > outlierThreshold }
+        XCTAssertLessThan(outliers.count, iterations / 10, "Less than 10% outliers expected")
+    }
+
+    func testPredictFromHighPriorityQueue() throws {
+        let inference = try createStreamingInference()
+
+        var input = [Float](repeating: 0.5, count: inference.inputElementCount)
+        var output = [Float](repeating: 0.0, count: inference.outputElementCount)
+
+        let audioQueue = DispatchQueue(label: "test.audio", qos: .userInteractive)
+        let expectation = expectation(description: "High priority execution")
+
+        var success = false
+        var executionTime: TimeInterval = 0
+
+        audioQueue.async {
+            let start = CACurrentMediaTime()
+            input.withUnsafeMutableBufferPointer { inputPtr in
+                output.withUnsafeMutableBufferPointer { outputPtr in
+                    success = inference.predict(input: inputPtr.baseAddress!, output: outputPtr.baseAddress!)
+                }
+            }
+            executionTime = CACurrentMediaTime() - start
+            expectation.fulfill()
+        }
+
+        wait(for: [expectation], timeout: 5.0)
+
+        XCTAssertTrue(success, "predict() should succeed from high-priority queue")
+        XCTAssertLessThan(executionTime, 0.100, "Should complete quickly from high-priority queue")
+    }
+
+    func testMaximumConsecutivePredictions() throws {
+        let inference = try createStreamingInference()
+        let input = [Float](repeating: 0.5, count: inference.inputElementCount)
+
+        // Run 1000 predictions without crash or memory growth
+        for i in 0..<1000 {
+            let output = runPrediction(inference, input: input)
+            if i % 100 == 0 {
+                XCTAssertFalse(output.contains(where: { $0.isNaN }), "Output at \(i) should not contain NaN")
+            }
+        }
+    }
+}
+
 // MARK: - HybridPipeline Functional Tests
 
 @available(macOS 15.0, iOS 18.0, *)

@@ -30,6 +30,7 @@ MetalAudio is a GPU-accelerated audio processing framework with three modules:
 - **Sequential**: Model container with ping-pong buffer optimization (up to 50% memory reduction for deep networks).
 - **Layers**: Linear (hybrid CPU/GPU based on batch size), Conv1D, ConvTranspose1D, LSTM, GRU.
 - **BNNSInference** (macOS 15+/iOS 18+): Zero-allocation inference using Apple BNNS Graph. Essential for Audio Unit render callbacks - no allocations after init, single-threaded execution option.
+- **BNNSStreamingInference** (macOS 15+/iOS 18+): Stateful inference for LSTM/GRU models that maintains hidden state across predictions. **Note:** Requires models compiled with `BNNSOption` attribute `StateMode=Streaming`, which is not currently exposed through public CoreML tools. Implementation is ready but awaiting Apple API access.
 
 ## Key Design Patterns
 
@@ -45,6 +46,32 @@ MetalAudio is a GPU-accelerated audio processing framework with three modules:
 - FFT uses vDSP for sizes ≤ 2048, GPU for larger transforms
 
 ### Thread Safety
+
+#### Thread Safety Matrix
+
+| Class | Thread-Safe | Notes |
+|-------|-------------|-------|
+| `AudioDevice` | ✅ Yes | After initialization. Pipeline caching uses double-checked locking. |
+| `ComputeContext` | ✅ Yes | Triple buffering uses `os_unfair_lock`. Use `tryExecuteAsync` for audio callbacks. |
+| `Tensor` | ⚠️ Partial | Concurrent reads safe. Concurrent writes or read/write require external sync. |
+| `FFT` | ❌ No | `forward()`/`inverse()` share mutable work buffers. **Exception:** `forwardBatch()` IS thread-safe. |
+| `Convolution` | ❌ No | Partitioned mode has ring buffer state. Create one instance per thread. |
+| `LSTM`/`GRU` | ❌ No | Hidden/cell state is shared mutable. One instance per thread. |
+| `BNNSInference` | ✅ Yes | After initialization. `predict()` is safe from audio thread. |
+| `Sequential` | ✅ Yes | After `build()`. Forward pass is read-only. |
+
+#### Audio Unit Render Callback Safety
+
+For real-time audio callbacks:
+
+- ✅ `BNNSInference.predict()` — zero allocations after init
+- ✅ `FFT.forward()` — pre-allocated buffers, but NOT thread-safe
+- ✅ `ComputeContext.tryExecuteAsync()` — non-blocking
+- ❌ `BNNSStreamingInference.resetState()` — allocates memory
+- ❌ FFT/Convolution/LSTM — NOT thread-safe for concurrent calls
+
+#### Locking Patterns
+
 - `os_unfair_lock` for hot paths (triple buffer access)
 - `NSLock` for cold paths (shader compilation, ~100-500ms)
 - All public Metal pipeline methods are thread-safe with double-checked locking

@@ -1157,6 +1157,226 @@ if #available(macOS 15.0, iOS 18.0, *) {
     }
 }
 
+// MARK: - BNNSStreamingInference Benchmarks
+
+if #available(macOS 15.0, iOS 18.0, *) {
+    if verboseOutput { print("\n--- BNNSStreamingInference Benchmarks ---") }
+
+    // Check for test model
+    let possibleStreamingPaths = [
+        "TestModels/simple_lstm.mlmodelc",
+        "../../../TestModels/simple_lstm.mlmodelc",
+        "simple_lstm.mlmodelc"
+    ]
+    let streamingModelPath = possibleStreamingPaths.map { URL(fileURLWithPath: $0) }
+        .first { FileManager.default.fileExists(atPath: $0.path) }
+        ?? URL(fileURLWithPath: "TestModels/simple_lstm.mlmodelc")
+    let streamingModelExists = FileManager.default.fileExists(atPath: streamingModelPath.path)
+
+    if streamingModelExists {
+        do {
+            let streaming = try BNNSStreamingInference(modelPath: streamingModelPath, singleThreaded: true)
+
+            // Allocate buffers once (pre-allocated for real-time)
+            var input = [Float](repeating: 0, count: streaming.inputElementCount)
+            var output = [Float](repeating: 0, count: streaming.outputElementCount)
+
+            // Fill input with test data
+            for i in 0..<input.count { input[i] = Float.random(in: -1...1) }
+
+            // Warmup
+            for _ in 0..<5 {
+                input.withUnsafeMutableBufferPointer { inPtr in
+                    output.withUnsafeMutableBufferPointer { outPtr in
+                        _ = streaming.predict(input: inPtr.baseAddress!, output: outPtr.baseAddress!)
+                    }
+                }
+            }
+
+            // 1. Throughput benchmark
+            let throughputIterations = adjustedIterations(100)
+            let (throughputTotalMs, throughputAvgUs) = measureTime(throughputIterations) {
+                input.withUnsafeMutableBufferPointer { inPtr in
+                    output.withUnsafeMutableBufferPointer { outPtr in
+                        _ = streaming.predict(input: inPtr.baseAddress!, output: outPtr.baseAddress!)
+                    }
+                }
+            }
+
+            let throughput = Double(throughputIterations) / (throughputTotalMs / 1000.0)
+            recordResult(category: "BNNS-Streaming", operation: "Throughput",
+                        iterations: throughputIterations, totalMs: throughputTotalMs,
+                        avgUs: throughputAvgUs, throughput: throughput)
+
+            if verboseOutput {
+                print("  Throughput: \(String(format: "%.0f", throughput)) pred/sec, \(String(format: "%.1f", throughputAvgUs)) µs/pred")
+            }
+
+            // 2. Latency distribution benchmark
+            var latencies = [Double]()
+            let latencyIterations = adjustedIterations(100)
+            for _ in 0..<latencyIterations {
+                let start = DispatchTime.now()
+                input.withUnsafeMutableBufferPointer { inPtr in
+                    output.withUnsafeMutableBufferPointer { outPtr in
+                        _ = streaming.predict(input: inPtr.baseAddress!, output: outPtr.baseAddress!)
+                    }
+                }
+                let end = DispatchTime.now()
+                let ns = Double(end.uptimeNanoseconds - start.uptimeNanoseconds)
+                latencies.append(ns / 1000.0)  // µs
+            }
+
+            latencies.sort()
+            let p50 = latencies[latencies.count / 2]
+            let p95 = latencies[Int(Double(latencies.count) * 0.95)]
+            let p99 = latencies[Int(Double(latencies.count) * 0.99)]
+
+            recordResult(category: "BNNS-Streaming-Latency", operation: "p50",
+                        iterations: latencyIterations, totalMs: 0, avgUs: p50)
+            recordResult(category: "BNNS-Streaming-Latency", operation: "p95",
+                        iterations: latencyIterations, totalMs: 0, avgUs: p95)
+            recordResult(category: "BNNS-Streaming-Latency", operation: "p99",
+                        iterations: latencyIterations, totalMs: 0, avgUs: p99)
+
+            if verboseOutput {
+                print("  Latency: p50=\(String(format: "%.1f", p50)) µs, p95=\(String(format: "%.1f", p95)) µs, p99=\(String(format: "%.1f", p99)) µs")
+            }
+
+            // 3. State reset latency (measures allocation overhead)
+            let resetIterations = adjustedIterations(20)
+            let (resetTotalMs, resetAvgUs) = measureTime(resetIterations) {
+                streaming.resetState()
+            }
+
+            recordResult(category: "BNNS-Streaming-Reset", operation: "resetState()",
+                        iterations: resetIterations, totalMs: resetTotalMs,
+                        avgUs: resetAvgUs, extra: "NOT real-time safe")
+
+            if verboseOutput {
+                print("  resetState(): \(String(format: "%.1f", resetAvgUs)) µs (allocates memory)")
+            }
+
+            // 4. Audio callback simulation (real-time budget test)
+            let bufferSizes = [128, 256, 512, 1024]
+            let sampleRate = 48000
+
+            if verboseOutput {
+                print("  Audio callback simulation (@\(sampleRate) Hz):")
+            }
+
+            for bufSize in bufferSizes {
+                // Budget in µs for this buffer size
+                let budgetUs = Double(bufSize) / Double(sampleRate) * 1_000_000.0
+
+                // Measure actual latency
+                var callbackLatencies = [Double]()
+                let callbackIterations = adjustedIterations(50)
+
+                // Reset state before each test
+                streaming.resetState()
+
+                for _ in 0..<callbackIterations {
+                    let start = DispatchTime.now()
+                    input.withUnsafeMutableBufferPointer { inPtr in
+                        output.withUnsafeMutableBufferPointer { outPtr in
+                            _ = streaming.predict(input: inPtr.baseAddress!, output: outPtr.baseAddress!)
+                        }
+                    }
+                    let end = DispatchTime.now()
+                    callbackLatencies.append(Double(end.uptimeNanoseconds - start.uptimeNanoseconds) / 1000.0)
+                }
+
+                let avgLatency = callbackLatencies.reduce(0, +) / Double(callbackIterations)
+                let maxLatency = callbackLatencies.max() ?? 0
+                let utilization = avgLatency / budgetUs * 100.0
+                let glitches = callbackLatencies.filter { $0 > budgetUs }.count
+                let meetsRealTime = maxLatency < budgetUs
+
+                recordResult(category: "BNNS-Streaming-RT", operation: "buf=\(bufSize)@48kHz",
+                            iterations: callbackIterations, totalMs: 0,
+                            avgUs: avgLatency, throughput: utilization,
+                            extra: meetsRealTime ? "PASS" : "FAIL(\(glitches) glitches)")
+
+                if verboseOutput {
+                    let status = meetsRealTime ? "✓" : "✗"
+                    print("    buf=\(bufSize): \(String(format: "%.1f", avgLatency)) µs avg, \(String(format: "%.0f", utilization))% util, \(status)")
+                }
+            }
+
+            // 5. Memory stability check (extended mode only)
+            if !quickMode {
+                if verboseOutput {
+                    print("  Memory stability (1000 predictions)...")
+                }
+
+                // Use task_info to get memory footprint
+                var info = mach_task_basic_info()
+                var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
+                let initialResult = withUnsafeMutablePointer(to: &info) {
+                    $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
+                        task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+                    }
+                }
+                let initialMemory = initialResult == KERN_SUCCESS ? info.resident_size : 0
+
+                let stabilityIterations = 1000
+
+                for _ in 0..<stabilityIterations {
+                    input.withUnsafeMutableBufferPointer { inPtr in
+                        output.withUnsafeMutableBufferPointer { outPtr in
+                            _ = streaming.predict(input: inPtr.baseAddress!, output: outPtr.baseAddress!)
+                        }
+                    }
+                }
+
+                var finalInfo = mach_task_basic_info()
+                let finalResult = withUnsafeMutablePointer(to: &finalInfo) {
+                    $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
+                        task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+                    }
+                }
+                let finalMemory = finalResult == KERN_SUCCESS ? finalInfo.resident_size : 0
+
+                let deltaMB = Double(Int64(finalMemory) - Int64(initialMemory)) / 1_000_000.0
+
+                recordResult(category: "BNNS-Streaming-Memory", operation: "Stability 1K",
+                            iterations: stabilityIterations, totalMs: 0,
+                            avgUs: 0, extra: String(format: "%.2f MB delta", deltaMB))
+
+                if verboseOutput {
+                    print("    Memory delta: \(String(format: "%.2f", deltaMB)) MB")
+                }
+            }
+
+        } catch BNNSInferenceError.contextCreationFailed {
+            if verboseOutput {
+                print("  Model does not support streaming context (BNNSGraphContextMakeStreaming failed)")
+                print("  This is expected for models without explicit state handling")
+            }
+            recordResult(category: "BNNS-Streaming", operation: "Not supported",
+                        iterations: 0, totalMs: 0, avgUs: 0, extra: "Model lacks streaming support")
+        } catch {
+            if verboseOutput {
+                print("  BNNSStreamingInference error: \(error)")
+            }
+            recordResult(category: "BNNS-Streaming", operation: "Error",
+                        iterations: 0, totalMs: 0, avgUs: 0, extra: "\(error)")
+        }
+    } else {
+        if verboseOutput {
+            print("  No test model found at: \(streamingModelPath.path)")
+        }
+        recordResult(category: "BNNS-Streaming", operation: "No model",
+                    iterations: 0, totalMs: 0, avgUs: 0, extra: "See TestModels/")
+    }
+} else {
+    if verboseOutput {
+        print("\n--- BNNSStreamingInference ---")
+        print("  Requires macOS 15+ / iOS 18+")
+    }
+}
+
 // MARK: - STFT Benchmarks
 
 if verboseOutput { print("\n--- STFT (Short-Time Fourier Transform) ---") }

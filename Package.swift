@@ -78,7 +78,10 @@ let package = Package(
         .testTarget(
             name: "MetalNNTests",
             dependencies: ["MetalNN"],
-            path: "Tests/MetalNNTests"
+            path: "Tests/MetalNNTests",
+            resources: [
+                .copy("Resources"),
+            ]
         ),
 
         // MARK: - Benchmark

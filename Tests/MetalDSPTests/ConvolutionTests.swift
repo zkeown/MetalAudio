@@ -443,3 +443,165 @@ final class ConvolutionTests: XCTestCase {
         XCTAssertEqual(partConv.maxInputSize, 0)
     }
 }
+
+// MARK: - Cross-Implementation Validation Tests
+
+/// Tests that compare different convolution implementations against each other
+/// to catch implementation-specific bugs.
+final class ConvolutionCrossValidationTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    /// Hardware-adaptive tolerance
+    var tolerance: Float {
+        ToleranceProvider.shared.tolerances.convolutionAccuracy
+    }
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    // MARK: - vDSP Ground Truth Comparison
+    //
+    // Note: The Convolution class uses vDSP_conv semantics (cross-correlation),
+    // which computes C[n] = sum_{p=0}^{P-1} A[n+p] * F[p].
+    // This is NOT true convolution (which would reverse the kernel).
+    // FFT mode, in contrast, implements true convolution.
+    // See testFFTConvolutionImpulseResponse in ConvolutionTests for this distinction.
+
+    func testDirectMatchesVDSP() throws {
+        // Compare direct convolution against vDSP_conv (same semantics)
+        let kernel: [Float] = [0.5, 0.3, 0.2]
+        let signal: [Float] = [1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 3.0, 2.0, 1.0]
+        let outputSize = signal.count + kernel.count - 1
+
+        // Our direct convolution
+        let conv = Convolution(device: device, mode: .direct)
+        try conv.setKernel(kernel)
+        var ourOutput = [Float](repeating: 0, count: outputSize)
+        try conv.process(input: signal, output: &ourOutput)
+
+        // vDSP reference - uses same kernel orientation as our implementation
+        var vdspOutput = [Float](repeating: 0, count: outputSize)
+        vDSP_conv(signal, 1, kernel, 1, &vdspOutput, 1,
+                  vDSP_Length(outputSize), vDSP_Length(kernel.count))
+
+        // Compare
+        for i in 0..<outputSize {
+            XCTAssertEqual(ourOutput[i], vdspOutput[i], accuracy: tolerance,
+                "Direct convolution differs from vDSP at index \(i)")
+        }
+    }
+
+    func testDirectMatchesVDSP_RandomSignal() throws {
+        let kernelSize = 16
+        let signalSize = 128
+
+        // Fixed seed for reproducibility
+        srand48(789)
+        let kernel = (0..<kernelSize).map { _ in Float(drand48()) - 0.5 }
+        let signal = (0..<signalSize).map { _ in Float(drand48()) * 2.0 - 1.0 }
+
+        let outputSize = signalSize + kernelSize - 1
+
+        // Our convolution
+        let conv = Convolution(device: device, mode: .direct)
+        try conv.setKernel(kernel)
+        var ourOutput = [Float](repeating: 0, count: outputSize)
+        try conv.process(input: signal, output: &ourOutput)
+
+        // vDSP reference - same kernel orientation
+        var vdspOutput = [Float](repeating: 0, count: outputSize)
+        vDSP_conv(signal, 1, kernel, 1, &vdspOutput, 1,
+                  vDSP_Length(outputSize), vDSP_Length(kernelSize))
+
+        // Compute RMS error
+        var sumSqError: Float = 0
+        var sumSqRef: Float = 0
+
+        for i in 0..<outputSize {
+            let error = ourOutput[i] - vdspOutput[i]
+            sumSqError += error * error
+            sumSqRef += vdspOutput[i] * vdspOutput[i]
+        }
+
+        let relRMSError = sqrt(sumSqError / max(sumSqRef, 1e-10))
+        XCTAssertLessThan(relRMSError, 0.0001,
+            "Direct vs vDSP relative RMS error \(relRMSError) too high")
+    }
+
+    func testFFTConvolutionProducesOutput() throws {
+        // Verify FFT convolution produces valid output
+        // Note: FFT mode uses different semantics than direct mode
+        // (see testFFTConvolutionImpulseResponse for impulse response validation)
+        let kernel: [Float] = [0.5, 0.3, 0.2]
+        let signal: [Float] = [1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 3.0, 2.0, 1.0]
+
+        // FFT convolution
+        let fftConv = Convolution(device: device, mode: .fft)
+        try fftConv.setKernel(kernel, expectedInputSize: signal.count)
+        var fftOutput = [Float]()
+        try fftConv.process(input: signal, output: &fftOutput)
+
+        // Should produce non-empty output
+        XCTAssertGreaterThan(fftOutput.count, 0, "FFT convolution should produce output")
+
+        // Output should have expected length (at least signal + kernel - 1)
+        let expectedMinLength = signal.count + kernel.count - 1
+        XCTAssertGreaterThanOrEqual(fftOutput.count, expectedMinLength,
+            "FFT output should be at least \(expectedMinLength)")
+
+        // Output should be non-zero
+        let hasNonZero = fftOutput.contains { abs($0) > 0.01 }
+        XCTAssertTrue(hasNonZero, "FFT convolution output should have non-zero values")
+    }
+
+    // MARK: - Property Tests
+
+    func testConvolutionWithDelta() throws {
+        // Signal convolved with delta [1.0] should equal signal
+        // This is a fundamental property of convolution/correlation
+        let signal: [Float] = [1.0, 2.0, 3.0, 4.0, 5.0]
+        let delta: [Float] = [1.0]
+
+        let conv = Convolution(device: device, mode: .direct)
+        try conv.setKernel(delta)
+
+        var output = [Float](repeating: 0, count: signal.count)
+        try conv.process(input: signal, output: &output)
+
+        for i in 0..<signal.count {
+            XCTAssertEqual(output[i], signal[i], accuracy: tolerance,
+                "Delta convolution failed at index \(i)")
+        }
+    }
+
+    func testConvolutionScaling() throws {
+        // conv(k * signal, kernel) = k * conv(signal, kernel)
+        let kernel: [Float] = [0.5, 0.3, 0.2]
+        let signal: [Float] = [1.0, 2.0, 3.0, 4.0, 5.0]
+        let scale: Float = 2.5
+
+        let scaledSignal = signal.map { $0 * scale }
+        let outputSize = signal.count + kernel.count - 1
+
+        // Convolve original signal
+        let conv1 = Convolution(device: device, mode: .direct)
+        try conv1.setKernel(kernel)
+        var output1 = [Float](repeating: 0, count: outputSize)
+        try conv1.process(input: signal, output: &output1)
+
+        // Convolve scaled signal
+        let conv2 = Convolution(device: device, mode: .direct)
+        try conv2.setKernel(kernel)
+        var output2 = [Float](repeating: 0, count: outputSize)
+        try conv2.process(input: scaledSignal, output: &output2)
+
+        // output2 should equal scale * output1
+        for i in 0..<outputSize {
+            let expected = scale * output1[i]
+            XCTAssertEqual(output2[i], expected, accuracy: tolerance * scale,
+                "Scaling property violated at index \(i)")
+        }
+    }
+}

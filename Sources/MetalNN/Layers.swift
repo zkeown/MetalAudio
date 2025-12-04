@@ -725,11 +725,16 @@ public final class FusedLinear: NNLayer {
         return x >= 0.0f ? 1.0f / (1.0f + exp(-x)) : exp(x) / (1.0f + exp(x));
     }
 
-    // GELU approximation
+    // GELU approximation with input clamping for numerical stability
+    // Clamp to [-10, 10] to prevent x^3 overflow in tanh argument
+    // For |x| > 10: GELU ≈ x (positive) or GELU ≈ 0 (negative)
     inline float gelu(float x) {
+        float clamped = clamp(x, -10.0f, 10.0f);
         const float sqrt_2_over_pi = 0.7978845608f;
-        float x3 = x * x * x;
-        return 0.5f * x * (1.0f + tanh(sqrt_2_over_pi * (x + 0.044715f * x3)));
+        float x3 = clamped * clamped * clamped;
+        float result = 0.5f * clamped * (1.0f + tanh(sqrt_2_over_pi * (clamped + 0.044715f * x3)));
+        // For large positive x, return x directly; for large negative, return 0
+        return x > 10.0f ? x : (x < -10.0f ? 0.0f : result);
     }
 
     // Apply fused activation
@@ -1125,10 +1130,13 @@ public final class GELU: NNLayer {
         uint id [[thread_position_in_grid]]
     ) {
         float x = input[id];
-        // Approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+        // Clamp to [-10, 10] to prevent x^3 overflow in tanh argument
+        // For |x| > 10: GELU ≈ x (positive) or GELU ≈ 0 (negative)
+        float clamped = clamp(x, -10.0f, 10.0f);
         const float sqrt_2_over_pi = 0.7978845608f;
-        float x3 = x * x * x;
-        output[id] = 0.5f * x * (1.0f + tanh(sqrt_2_over_pi * (x + 0.044715f * x3)));
+        float x3 = clamped * clamped * clamped;
+        float result = 0.5f * clamped * (1.0f + tanh(sqrt_2_over_pi * (clamped + 0.044715f * x3)));
+        output[id] = x > 10.0f ? x : (x < -10.0f ? 0.0f : result);
     }
     """
 
