@@ -1718,490 +1718,66 @@ public final class FFT {
         var ref = reference
         vDSP_vdbcon(&workMagnitude, 1, &ref, magnitudeDB, 1, vDSP_Length(halfSize), 1)
     }
-}
 
-// MARK: - STFT
+    // MARK: - Internal Accessors for Extensions
 
-extension FFT {
-    /// Short-Time Fourier Transform result
-    public struct STFTResult {
-        public let real: [[Float]]
-        public let imag: [[Float]]
-        public let frameCount: Int
-        public let binCount: Int
+    /// Internal accessor for config (used by STFT extension)
+    internal var fftConfig: Config { config }
 
-        public init(real: [[Float]], imag: [[Float]]) {
-            self.real = real
-            self.imag = imag
-            self.frameCount = real.count
-            self.binCount = real.first?.count ?? 0
-        }
+    /// Internal accessor for device (used by STFT extension)
+    internal var internalDevice: AudioDevice { device }
+
+    /// Internal accessor for fftSetup (used by STFT extension)
+    internal var internalFftSetup: vDSP_DFT_Setup? { fftSetup }
+
+    /// Internal accessor for windowBuffer (used by STFT extension)
+    internal var internalWindowBuffer: [Float] { windowBuffer }
+
+    /// Internal accessor for gpuEnabled (used by STFT extension)
+    internal var internalGpuEnabled: Bool { gpuEnabled }
+
+    /// Internal accessor for gpuBitReversalPipeline (used by STFT extension)
+    internal var internalGpuBitReversalPipeline: MTLComputePipelineState? { gpuBitReversalPipeline }
+
+    /// Internal accessor for gpuButterflyPipeline (used by STFT extension)
+    internal var internalGpuButterflyPipeline: MTLComputePipelineState? { gpuButterflyPipeline }
+
+    /// Internal accessor for gpuButterflyOptimizedPipeline (used by STFT extension)
+    internal var internalGpuButterflyOptimizedPipeline: MTLComputePipelineState? { gpuButterflyOptimizedPipeline }
+
+    /// Internal accessor for gpuTwiddleBuffer (used by STFT extension)
+    internal var internalGpuTwiddleBuffer: MTLBuffer? { gpuTwiddleBuffer }
+
+    /// Internal accessor for gpuContext (used by STFT extension)
+    internal var internalGpuContext: ComputeContext? { gpuContext }
+
+    /// Internal accessor for gpuBatchBuffer (used by STFT extension)
+    internal var internalGpuBatchBuffer: MTLBuffer? { gpuBatchBuffer }
+
+    /// Internal accessor for gpuBatchBufferCapacity (used by STFT extension)
+    internal var internalGpuBatchBufferCapacity: Int { gpuBatchBufferCapacity }
+
+    /// Internal accessor for batchBufferLock (used by STFT extension)
+    internal var internalBatchBufferLock: os_unfair_lock {
+        get { batchBufferLock }
+        set { batchBufferLock = newValue }
     }
 
-    /// Perform Short-Time Fourier Transform
-    ///
-    /// Applies analysis window to each frame before FFT. Use `istft()` for reconstruction,
-    /// which applies synthesis window and normalizes by window sum for COLA compliance.
-    ///
-    /// ## Performance
-    /// Uses batch FFT processing for better throughput. For large audio files with many frames,
-    /// this is significantly faster than processing frames sequentially.
-    ///
-    /// ## Note on Memory
-    /// Pre-allocates arrays for all frames. For streaming real-time STFT, consider using
-    /// the lower-level `forward()` method with caller-managed buffers.
-    ///
-    /// - Parameter input: Audio samples (must have at least `config.size` samples)
-    /// - Returns: STFT result with real and imaginary parts
-    /// - Throws: `FFTError.inputTooShort` if input has fewer than `config.size` samples
-    public func stft(input: [Float]) throws -> STFTResult {
-        let hopSize = config.hopSize
-        let fftSize = config.size
-
-        // Throw error for input shorter than FFT size - silent empty return is misleading
-        guard input.count >= fftSize else {
-            throw FFTError.inputTooShort(inputSize: input.count, requiredSize: fftSize)
-        }
-
-        let frameCount = (input.count - fftSize) / hopSize + 1
-
-        // Pre-allocate windowed frames array
-        var windowedFrames = [[Float]](repeating: [Float](repeating: 0, count: fftSize), count: frameCount)
-
-        // Apply window to all frames in parallel
-        input.withUnsafeBufferPointer { inputPtr in
-            guard let baseAddress = inputPtr.baseAddress else { return }
-
-            DispatchQueue.concurrentPerform(iterations: frameCount) { frameIdx in
-                let start = frameIdx * hopSize
-                var windowedFrame = [Float](repeating: 0, count: fftSize)
-
-                // Apply analysis window
-                vDSP_vmul(
-                    baseAddress + start, 1,
-                    windowBuffer, 1,
-                    &windowedFrame, 1,
-                    vDSP_Length(fftSize)
-                )
-
-                windowedFrames[frameIdx] = windowedFrame
-            }
-        }
-
-        // Batch FFT all frames
-        var realFrames = [[Float]](repeating: [Float](repeating: 0, count: fftSize), count: frameCount)
-        var imagFrames = [[Float]](repeating: [Float](repeating: 0, count: fftSize), count: frameCount)
-
-        try forwardBatch(inputs: windowedFrames, outputsReal: &realFrames, outputsImag: &imagFrames)
-
-        return STFTResult(real: realFrames, imag: imagFrames)
+    /// Internal method to set gpuBatchBuffer (used by STFT extension)
+    internal func setGpuBatchBuffer(_ buffer: MTLBuffer?, capacity: Int) {
+        gpuBatchBuffer = buffer
+        gpuBatchBufferCapacity = capacity
     }
 
-    // MARK: - Batch FFT APIs
-
-    /// Perform batch FFT on multiple inputs (amortizes GPU overhead)
-    ///
-    /// For batch sizes > 1 and FFT sizes >= 2048, automatically uses GPU/MPSGraph
-    /// for better throughput. For small batches or sizes, uses parallel vDSP.
-    ///
-    /// - Parameters:
-    ///   - inputs: Array of input buffers (each of size `config.size`)
-    ///   - outputsReal: Array of output buffers for real parts
-    ///   - outputsImag: Array of output buffers for imaginary parts
-    public func forwardBatch(
-        inputs: [[Float]],
-        outputsReal: inout [[Float]],
-        outputsImag: inout [[Float]]
-    ) throws {
-        let batchSize = inputs.count
-        guard batchSize > 0 else { return }
-
-        // Ensure outputs are properly sized
-        if outputsReal.count != batchSize {
-            outputsReal = [[Float]](repeating: [Float](repeating: 0, count: config.size), count: batchSize)
-        }
-        if outputsImag.count != batchSize {
-            outputsImag = [[Float]](repeating: [Float](repeating: 0, count: config.size), count: batchSize)
-        }
-
-        // Decision: use GPU for large batches with large FFT sizes
-        let useGPU = batchSize >= 4 && config.size >= 1024 && gpuEnabled
-
-        if useGPU {
-            try forwardBatchGPU(inputs: inputs, outputsReal: &outputsReal, outputsImag: &outputsImag)
-        } else {
-            // Use parallel vDSP for CPU batch processing
-            try forwardBatchCPU(inputs: inputs, outputsReal: &outputsReal, outputsImag: &outputsImag)
-        }
-    }
-
-    /// Batch FFT using parallel vDSP (concurrent CPU execution)
-    private func forwardBatchCPU(
-        inputs: [[Float]],
-        outputsReal: inout [[Float]],
-        outputsImag: inout [[Float]]
-    ) throws {
-        let batchSize = inputs.count
-
-        // Process in parallel using DispatchQueue.concurrentPerform
-        // Each iteration gets its own output buffers (no shared state)
-        DispatchQueue.concurrentPerform(iterations: batchSize) { idx in
-            var outReal = [Float](repeating: 0, count: config.size)
-            var outImag = [Float](repeating: 0, count: config.size)
-
-            inputs[idx].withUnsafeBufferPointer { inputPtr in
-                guard let base = inputPtr.baseAddress else { return }
-                // Note: forward() uses instance-level workInputImag buffer, but
-                // since we're calling with different output buffers per thread,
-                // we need thread-local imaginary input buffer
-                var localInputImag = [Float](repeating: 0, count: config.size)
-
-                if let setup = fftSetup {
-                    vDSP_DFT_Execute(
-                        setup,
-                        base, &localInputImag,
-                        &outReal, &outImag
-                    )
-                }
-            }
-
-            // Store results (thread-safe: each index is unique)
-            outputsReal[idx] = outReal
-            outputsImag[idx] = outImag
-        }
-    }
-
-    /// Batch FFT using GPU (single command buffer for all FFTs)
-    private func forwardBatchGPU(
-        inputs: [[Float]],
-        outputsReal: inout [[Float]],
-        outputsImag: inout [[Float]]
-    ) throws {
-        guard gpuEnabled,
-              let bitReversalPipeline = gpuBitReversalPipeline,
-              let butterflyPipeline = gpuButterflyPipeline,
-              let context = gpuContext else {
-            // Fallback to CPU batch
-            try forwardBatchCPU(inputs: inputs, outputsReal: &outputsReal, outputsImag: &outputsImag)
-            return
-        }
-
-        let batchSize = inputs.count
-        let fftSize = config.size
-        let elementSize = MemoryLayout<Float>.stride * 2  // float2 per element
-
-        // Check for overflow in buffer size calculations to prevent memory corruption
-        // SAFETY: Check each multiplication separately and fail fast on first overflow
-        let (perFFTBufferSize, overflow1) = fftSize.multipliedReportingOverflow(by: elementSize)
-        guard !overflow1 else {
-            throw FFTError.batchSizeOverflow(batchSize: batchSize, fftSize: fftSize)
-        }
-        let (totalBufferSize, overflow2) = batchSize.multipliedReportingOverflow(by: perFFTBufferSize)
-        guard !overflow2 else {
-            throw FFTError.batchSizeOverflow(batchSize: batchSize, fftSize: fftSize)
-        }
-
-        // Use pre-allocated batch buffer when capacity is sufficient (avoids 1-5ms allocation overhead)
-        // For larger batches, allocate a new buffer (rare case)
-        // Lock protects buffer reallocation AND buffer use from concurrent batch calls
-        // IMPORTANT: Lock must be held until buffer copy is complete to prevent race conditions
-        // where another thread could reallocate the buffer while we're still writing to it
-        let batchBuffer: MTLBuffer
+    /// Internal method to perform batch buffer operations under lock
+    internal func withBatchBufferLock(_ body: () throws -> Void) rethrows {
         os_unfair_lock_lock(&batchBufferLock)
-        if batchSize <= gpuBatchBufferCapacity, let preallocated = gpuBatchBuffer {
-            batchBuffer = preallocated
-        } else {
-            // Rare case: batch exceeds pre-allocated capacity
-            // Allocate new buffer and update capacity for future calls
-            guard let newBuffer = device.device.makeBuffer(
-                length: totalBufferSize,
-                options: device.preferredStorageMode
-            ) else {
-                os_unfair_lock_unlock(&batchBufferLock)
-                try forwardBatchCPU(inputs: inputs, outputsReal: &outputsReal, outputsImag: &outputsImag)
-                return
-            }
-            gpuBatchBuffer = newBuffer
-            gpuBatchBufferCapacity = batchSize
-            batchBuffer = newBuffer
-        }
-
-        // Copy all inputs to batch buffer (interleaved format)
-        // Lock is held throughout entire operation (copy, GPU execution, read-back)
-        // to prevent another thread from overwriting the buffer during GPU execution.
-        // This serializes concurrent batch GPU calls, which is acceptable since:
-        // 1. Batch GPU FFT is already a heavy operation
-        // 2. Concurrent batch calls are rare in typical audio pipelines
-        // 3. Correctness is more important than concurrent throughput
-        //
-        // IMPORTANT: executeSync() MUST block until GPU completes, not just until submission.
-        // If executeSync() only waits for submission, we have a race condition where another
-        // thread could acquire the lock and modify the buffer while GPU is still reading it.
-        // Verify ComputeContext.executeSync() calls waitUntilCompleted() or equivalent.
-        let rawPtr = batchBuffer.contents()
-        let batchPtr = rawPtr.assumingMemoryBound(to: Float.self)
-        let bufferCapacity = batchBuffer.length / MemoryLayout<Float>.stride
-        for (idx, input) in inputs.enumerated() {
-            // Bounds check: offset calculation uses checked arithmetic
-            let (offset, offsetOverflow) = (idx * fftSize).multipliedReportingOverflow(by: 2)
-            guard !offsetOverflow && offset + fftSize * 2 <= bufferCapacity else {
-                os_unfair_lock_unlock(&batchBufferLock)
-                throw FFTError.batchSizeOverflow(batchSize: batchSize, fftSize: fftSize)
-            }
-            for i in 0..<min(input.count, fftSize) {
-                batchPtr[offset + i * 2] = input[i]      // Real
-                batchPtr[offset + i * 2 + 1] = 0.0       // Imag (input is real)
-            }
-        }
-
-        // Ensure lock is released on all exit paths
         defer { os_unfair_lock_unlock(&batchBufferLock) }
-
-        #if os(macOS)
-        if batchBuffer.storageMode == .managed {
-            batchBuffer.didModifyRange(0..<totalBufferSize)
-        }
-        #endif
-
-        var n = UInt32(fftSize)
-        // Use integer math for log2 instead of floating-point to avoid precision issues
-        var logN = UInt32(fftSize.trailingZeroBitCount)
-        let numStages = Int(logN)
-
-        let useOptimized = gpuButterflyOptimizedPipeline != nil && gpuTwiddleBuffer != nil
-        let activeButterflyPipeline = useOptimized ? gpuButterflyOptimizedPipeline! : butterflyPipeline
-
-        // Execute all FFTs in a single command buffer
-        // Lock remains held to prevent concurrent access to shared batch buffer
-        try context.executeSync { encoder in
-            for batchIdx in 0..<batchSize {
-                let bufferOffset = batchIdx * perFFTBufferSize
-
-                // Bit reversal
-                encoder.setComputePipelineState(bitReversalPipeline)
-                encoder.setBuffer(batchBuffer, offset: bufferOffset, index: 0)
-                encoder.setBytes(&n, length: MemoryLayout<UInt32>.stride, index: 1)
-                encoder.setBytes(&logN, length: MemoryLayout<UInt32>.stride, index: 2)
-
-                let (threadgroupSize, gridSize) = ComputeContext.calculate1DDispatch(
-                    pipeline: bitReversalPipeline,
-                    dataLength: fftSize
-                )
-                encoder.dispatchThreadgroups(gridSize, threadsPerThreadgroup: threadgroupSize)
-                encoder.memoryBarrier(scope: .buffers)
-
-                // Butterfly stages
-                for stage in 0..<numStages {
-                    var stageVal = UInt32(stage)
-
-                    encoder.setComputePipelineState(activeButterflyPipeline)
-                    encoder.setBuffer(batchBuffer, offset: bufferOffset, index: 0)
-                    encoder.setBytes(&n, length: MemoryLayout<UInt32>.stride, index: 1)
-                    encoder.setBytes(&stageVal, length: MemoryLayout<UInt32>.stride, index: 2)
-
-                    if useOptimized, let twiddleBuffer = gpuTwiddleBuffer {
-                        encoder.setBuffer(twiddleBuffer, offset: 0, index: 3)
-                    }
-
-                    let numButterflies = fftSize / 2
-                    let (bfThreadgroupSize, bfGridSize) = ComputeContext.calculate1DDispatch(
-                        pipeline: activeButterflyPipeline,
-                        dataLength: numButterflies
-                    )
-                    encoder.dispatchThreadgroups(bfGridSize, threadsPerThreadgroup: bfThreadgroupSize)
-
-                    if stage < numStages - 1 || batchIdx < batchSize - 1 {
-                        encoder.memoryBarrier(scope: .buffers)
-                    }
-                }
-            }
-        }
-
-        // Copy results back (de-interleave) - still holding lock
-        // Use overflow-checked arithmetic consistent with input side (line 1946)
-        for idx in 0..<batchSize {
-            let (offset, offsetOverflow) = (idx * fftSize).multipliedReportingOverflow(by: 2)
-            guard !offsetOverflow && offset >= 0 && offset + fftSize * 2 <= bufferCapacity else {
-                // Skip this frame if overflow (matches input-side behavior of throwing)
-                // In practice this should never happen since input side already validated
-                continue
-            }
-            for i in 0..<fftSize {
-                outputsReal[idx][i] = batchPtr[offset + i * 2]
-                outputsImag[idx][i] = batchPtr[offset + i * 2 + 1]
-            }
-        }
-        // Lock released by defer
+        try body()
     }
 
-    /// Perform batch inverse FFT on multiple inputs
-    ///
-    /// Uses parallel vDSP for CPU batch processing. Each inverse FFT is normalized by 1/N.
-    ///
-    /// - Parameters:
-    ///   - inputsReal: Array of real parts (each of size `config.size`)
-    ///   - inputsImag: Array of imaginary parts (each of size `config.size`)
-    ///   - outputs: Array of output buffers for time-domain results
-    public func inverseBatch(
-        inputsReal: [[Float]],
-        inputsImag: [[Float]],
-        outputs: inout [[Float]]
-    ) throws {
-        let batchSize = inputsReal.count
-        guard batchSize > 0 else { return }
-        guard inputsImag.count == batchSize else { return }
-
-        // Ensure outputs are properly sized
-        if outputs.count != batchSize {
-            outputs = [[Float]](repeating: [Float](repeating: 0, count: config.size), count: batchSize)
-        }
-
-        // Use parallel vDSP for CPU batch processing
-        let scale = Float(1.0 / Float(config.size))
-
-        DispatchQueue.concurrentPerform(iterations: batchSize) { idx in
-            var outBuffer = [Float](repeating: 0, count: config.size)
-            var outImag = [Float](repeating: 0, count: config.size)
-
-            inputsReal[idx].withUnsafeBufferPointer { realPtr in
-                inputsImag[idx].withUnsafeBufferPointer { imagPtr in
-                    guard let realBase = realPtr.baseAddress,
-                          let imagBase = imagPtr.baseAddress,
-                          let setup = fftSetup else { return }
-
-                    vDSP_DFT_Execute(
-                        setup,
-                        realBase, imagBase,
-                        &outBuffer, &outImag
-                    )
-                }
-            }
-
-            // Normalize by 1/N
-            var s = scale
-            vDSP_vsmul(outBuffer, 1, &s, &outBuffer, 1, vDSP_Length(config.size))
-
-            // Store result (thread-safe: each index is unique)
-            outputs[idx] = outBuffer
-        }
-    }
-
-    /// Inverse Short-Time Fourier Transform
-    ///
-    /// ## Performance
-    /// Uses batch inverse FFT processing for better throughput. For large STFT results
-    /// with many frames, this is significantly faster than processing frames sequentially.
-    ///
-    /// - Parameter stft: STFT result
-    /// - Returns: Reconstructed audio samples
-    public func istft(stft: STFTResult) -> [Float] {
-        let hopSize = config.hopSize
-        let fftSize = config.size
-        let frameCount = stft.frameCount
-        let outputLength = (frameCount - 1) * hopSize + fftSize
-
-        guard frameCount > 0 else { return [] }
-
-        // Filter out empty frames (should not happen with valid STFT result)
-        var validReal: [[Float]] = []
-        var validImag: [[Float]] = []
-        var validIndices: [Int] = []
-
-        for frameIdx in 0..<frameCount {
-            if !stft.real[frameIdx].isEmpty && !stft.imag[frameIdx].isEmpty {
-                validReal.append(stft.real[frameIdx])
-                validImag.append(stft.imag[frameIdx])
-                validIndices.append(frameIdx)
-            }
-        }
-
-        guard !validReal.isEmpty else { return [Float](repeating: 0, count: outputLength) }
-
-        // Batch inverse FFT all valid frames
-        var frames = [[Float]](repeating: [Float](repeating: 0, count: fftSize), count: validReal.count)
-        try? inverseBatch(inputsReal: validReal, inputsImag: validImag, outputs: &frames)
-
-        // Overlap-add with window (sequential due to overlapping writes, but vectorized per frame)
-        var output = [Float](repeating: 0, count: outputLength)
-        var windowSum = [Float](repeating: 0, count: outputLength)
-
-        // Pre-compute window squared (constant for all frames)
-        var windowSquared = [Float](repeating: 0, count: fftSize)
-        vDSP_vsq(windowBuffer, 1, &windowSquared, 1, vDSP_Length(fftSize))
-
-        // Pre-allocate windowed frame buffer
-        var windowedFrame = [Float](repeating: 0, count: fftSize)
-
-        for (batchIdx, frameIdx) in validIndices.enumerated() {
-            // Bounds check: prevent buffer overflow from invalid frame indices
-            // This guards against corrupted STFT data or integer overflow in frameIdx * hopSize
-            let (start, overflow) = frameIdx.multipliedReportingOverflow(by: hopSize)
-            guard !overflow && start >= 0 && start + fftSize <= outputLength else {
-                // Skip this frame - it would write out of bounds
-                // This is a defensive check; valid STFT results should never trigger this
-                continue
-            }
-
-            // Apply window to frame: windowedFrame = frame * window
-            frames[batchIdx].withUnsafeBufferPointer { framePtr in
-                guard let frameBase = framePtr.baseAddress else { return }
-                vDSP_vmul(frameBase, 1, windowBuffer, 1, &windowedFrame, 1, vDSP_Length(fftSize))
-            }
-
-            // Overlap-add using vDSP_vadd
-            // SAFETY: start + fftSize <= outputLength verified above
-            output.withUnsafeMutableBufferPointer { outPtr in
-                windowedFrame.withUnsafeBufferPointer { winPtr in
-                    guard let outBase = outPtr.baseAddress, let winBase = winPtr.baseAddress else { return }
-                    vDSP_vadd(outBase + start, 1, winBase, 1, outBase + start, 1, vDSP_Length(fftSize))
-                }
-            }
-
-            windowSum.withUnsafeMutableBufferPointer { sumPtr in
-                windowSquared.withUnsafeBufferPointer { sqPtr in
-                    guard let sumBase = sumPtr.baseAddress, let sqBase = sqPtr.baseAddress else { return }
-                    vDSP_vadd(sumBase + start, 1, sqBase, 1, sumBase + start, 1, vDSP_Length(fftSize))
-                }
-            }
-        }
-
-        // Normalize by window sum with regularization
-        // Instead of hard-zeroing samples where window sum is small (which causes clicks),
-        // we use regularization: divide by max(windowSum, floor) to smoothly attenuate
-        // rather than abruptly zero samples at frame boundaries.
-        //
-        // Validate windowFloorEpsilon: must be positive to prevent division by zero
-        // If misconfigured (zero or negative), fall back to a safe default
-        let configuredFloor = ToleranceProvider.shared.tolerances.windowFloorEpsilon
-        let windowFloor = configuredFloor > 0 ? configuredFloor : Float(1e-6)
-
-        // Clamp window sum to floor and divide
-        // Note: vDSP_vthr zeros values below threshold (not what we want).
-        // We need max(sum[i], floor), so use vDSP_vclip for proper floor clamping.
-        windowSum.withUnsafeMutableBufferPointer { sumPtr in
-            output.withUnsafeMutableBufferPointer { outPtr in
-                // Clamp to floor: sum[i] = max(sum[i], floor)
-                // vDSP_vclip clips to [low, high] range
-                var low = windowFloor
-                var high = Float.greatestFiniteMagnitude
-                vDSP_vclip(sumPtr.baseAddress!, 1, &low, &high, sumPtr.baseAddress!, 1, vDSP_Length(outputLength))
-                // Divide: out[i] = out[i] / sum[i]
-                vDSP_vdiv(sumPtr.baseAddress!, 1, outPtr.baseAddress!, 1, outPtr.baseAddress!, 1, vDSP_Length(outputLength))
-            }
-        }
-
-        return output
-    }
-
-    /// Release GPU resources to reduce memory footprint
-    ///
-    /// Call this when the FFT won't be used for a while, or in response to memory pressure.
-    /// GPU resources will be lazily recreated on the next forward/inverse call.
-    ///
-    /// Thread-safe: Uses internal locking to prevent release during active GPU operations.
-    /// Acquires both gpuResourceLock and batchBufferLock to prevent race conditions
-    /// with concurrent forwardBatchGPU calls.
-    public func releaseGPUResources() {
+    /// Internal method to release GPU resources (used by STFT extension)
+    internal func releaseGPUResourcesInternal() {
         // Acquire BOTH locks to prevent race conditions:
         // - gpuResourceLock protects gpuDataBuffer and MPS buffers (used by forwardGPU/inverseGPU)
         // - batchBufferLock protects gpuBatchBuffer (used by forwardBatchGPU)
@@ -2222,26 +1798,12 @@ extension FFT {
         // Keep pipeline states and twiddle factors - they're relatively small
         // and expensive to recreate
     }
-}
 
-// MARK: - Memory Pressure Integration
-
-extension FFT: MemoryPressureResponder {
-    public func didReceiveMemoryPressure(level: MemoryPressureLevel) {
-        switch level {
-        case .critical:
-            // Release all GPU buffers under critical pressure
-            releaseGPUResources()
-        case .warning:
-            // Release batch buffers (often large) but keep single-FFT buffers
-            os_unfair_lock_lock(&batchBufferLock)
-            gpuBatchBuffer = nil
-            gpuBatchBufferCapacity = 0
-            os_unfair_lock_unlock(&batchBufferLock)
-        case .normal:
-            // Pressure relieved - no action needed
-            // Buffers will be lazily recreated as needed
-            break
-        }
+    /// Internal method to release batch buffer only (used by memory pressure response)
+    internal func releaseBatchBufferOnly() {
+        os_unfair_lock_lock(&batchBufferLock)
+        gpuBatchBuffer = nil
+        gpuBatchBufferCapacity = 0
+        os_unfair_lock_unlock(&batchBufferLock)
     }
 }

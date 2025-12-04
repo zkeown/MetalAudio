@@ -121,8 +121,6 @@ public final class LSTMCoreML {
         output: Tensor,
         encoder: MTLComputeCommandEncoder
     ) throws -> String {
-        let sequenceLength = input.shape[0]
-
         // For now, always use CPU LSTM since Core ML LSTM setup is complex
         // and requires model compilation. Future: add MLModel-based implementation
         try cpuLSTM.forward(input: input, output: output, encoder: encoder)
