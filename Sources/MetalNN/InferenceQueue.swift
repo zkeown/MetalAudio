@@ -54,6 +54,21 @@ public final class InferenceQueue {
         let completion: @Sendable (UnsafePointer<Float>, Int) -> Void
     }
 
+    /// Inference error types
+    public enum InferenceError: Error, LocalizedError {
+        case emptyInput
+        case inferenceFailed
+        case queueFull
+
+        public var errorDescription: String? {
+            switch self {
+            case .emptyInput: return "Empty input provided to inference"
+            case .inferenceFailed: return "Inference prediction failed"
+            case .queueFull: return "Inference queue is full"
+            }
+        }
+    }
+
     /// Queue statistics
     public struct Statistics {
         /// Number of items currently in queue
@@ -70,6 +85,9 @@ public final class InferenceQueue {
 
         /// Items dropped due to queue overflow
         public let itemsDropped: UInt64
+
+        /// Inferences that failed (guard returned early, empty input, etc.)
+        public let inferencesFailed: UInt64
     }
 
     // MARK: - Properties
@@ -119,6 +137,7 @@ public final class InferenceQueue {
     /// Statistics tracking
     private var totalProcessed: UInt64 = 0
     private var itemsDropped: UInt64 = 0
+    private var inferencesFailed: UInt64 = 0
     private var totalInferenceTime: TimeInterval = 0
     private var maxInferenceTime: TimeInterval = 0
     private var statsLock = os_unfair_lock()
@@ -293,6 +312,10 @@ public final class InferenceQueue {
                     #if DEBUG
                     print("InferenceQueue: Skipping inference for empty input or zero output count")
                     #endif
+                    // Track failure
+                    os_unfair_lock_lock(&self.statsLock)
+                    self.inferencesFailed += 1
+                    os_unfair_lock_unlock(&self.statsLock)
                     // Deliver empty result to completion handler (prevents caller from waiting forever)
                     let emptyResult = PendingResult(id: item.id, output: [], completion: item.completion)
                     self.deliverResult(emptyResult)
@@ -320,6 +343,10 @@ public final class InferenceQueue {
 
                 // If inference failed (guard returned early), deliver empty result
                 guard inferenceSucceeded else {
+                    // Track failure
+                    os_unfair_lock_lock(&self.statsLock)
+                    self.inferencesFailed += 1
+                    os_unfair_lock_unlock(&self.statsLock)
                     let emptyResult = PendingResult(id: item.id, output: [], completion: item.completion)
                     self.deliverResult(emptyResult)
                     continue
@@ -428,7 +455,8 @@ public final class InferenceQueue {
             averageInferenceTime: totalProcessed > 0 ? totalInferenceTime / Double(totalProcessed) : 0,
             maxInferenceTime: maxInferenceTime,
             totalProcessed: totalProcessed,
-            itemsDropped: itemsDropped
+            itemsDropped: itemsDropped,
+            inferencesFailed: inferencesFailed
         )
         os_unfair_lock_unlock(&statsLock)
 

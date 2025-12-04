@@ -34,10 +34,16 @@ let package = Package(
             targets: ["Benchmark"]
         ),
     ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-atomics.git", from: "1.2.0"),
+    ],
     targets: [
         // MARK: - Core
         .target(
             name: "MetalAudioKit",
+            dependencies: [
+                .product(name: "Atomics", package: "swift-atomics"),
+            ],
             path: "Sources/MetalAudioKit",
             resources: [
                 .copy("Shaders"),

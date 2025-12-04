@@ -123,18 +123,25 @@ public enum WeightInitialization {
             // This is much safer than Float.leastNormalMagnitude (~1e-38) which
             // produces values up to ~13 std devs, causing weight init to fail
             let u1Min: Float = 1e-7
+
+            // Clamp range: ±6 std devs from mean captures 99.9999998% of distribution
+            // This prevents extreme outliers that cause training instability
+            let clampMin = mean - 6.0 * std
+            let clampMax = mean + 6.0 * std
+
             for i in stride(from: 0, to: count - 1, by: 2) {
                 let u1 = Float.random(in: u1Min...1.0)
                 let u2 = Float.random(in: 0...1.0)
                 let r = sqrt(-2.0 * log(u1))
                 let theta = 2.0 * Float.pi * u2
-                values[i] = mean + std * r * cos(theta)
-                values[i + 1] = mean + std * r * sin(theta)
+                values[i] = min(clampMax, max(clampMin, mean + std * r * cos(theta)))
+                values[i + 1] = min(clampMax, max(clampMin, mean + std * r * sin(theta)))
             }
             if count % 2 == 1 {
                 let u1 = Float.random(in: u1Min...1.0)
                 let u2 = Float.random(in: 0...1.0)
-                values[count - 1] = mean + std * sqrt(-2.0 * log(u1)) * cos(2.0 * Float.pi * u2)
+                let raw = mean + std * sqrt(-2.0 * log(u1)) * cos(2.0 * Float.pi * u2)
+                values[count - 1] = min(clampMax, max(clampMin, raw))
             }
 
         case .zeros:

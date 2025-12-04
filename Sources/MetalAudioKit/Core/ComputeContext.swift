@@ -26,9 +26,13 @@ public final class ComputeContext: @unchecked Sendable {
     // os_unfair_lock doesn't suffer from priority inversion issues
     internal var unfairLock = os_unfair_lock()
 
-    /// Count of GPU command buffers currently referencing triple buffers
-    /// Used to prevent clearing buffers while GPU is still accessing them
+    /// Count of closures currently accessing triple buffers (scope-based tracking)
+    /// Used to prevent clearing buffers while closure is executing
     internal var tripleBufferInFlightCount: Int = 0
+
+    /// Count of GPU command buffers currently executing that reference triple buffers
+    /// This tracks actual GPU lifetime, not just closure scope
+    internal var tripleBufferGPUCommandsInFlight: Int = 0
 
     /// Flag to indicate deferred clearing of triple buffers after memory pressure
     internal var tripleBufferPendingClear: Bool = false
@@ -783,7 +787,9 @@ extension ComputeContext {
         // Try to swap buffers, or wait for in-flight accesses to complete
         os_unfair_lock_lock(&unfairLock)
 
-        if tripleBufferInFlightCount == 0 {
+        // Must wait for BOTH closure accesses AND GPU command buffers to complete
+        let totalInFlight = tripleBufferInFlightCount + tripleBufferGPUCommandsInFlight
+        if totalInFlight == 0 {
             // Fast path: no buffers in flight, swap immediately
             tripleBuffer = newBuffers
             currentWriteIndex = 0
@@ -878,8 +884,8 @@ extension ComputeContext {
         tripleBufferInFlightCount += 1
         let result = access(tripleBuffer[currentWriteIndex])
         tripleBufferInFlightCount -= 1
-        // Signal drain semaphore if someone is waiting and count reached 0
-        if tripleBufferInFlightCount == 0 && waitingForDrain {
+        // Signal drain semaphore if someone is waiting and BOTH counts reached 0
+        if tripleBufferInFlightCount == 0 && tripleBufferGPUCommandsInFlight == 0 && waitingForDrain {
             tripleBufferDrainSemaphore?.signal()
         }
         return result
@@ -918,8 +924,8 @@ extension ComputeContext {
         let result = access(tripleBuffer[readIndex])
         tripleBufferInFlightCount -= 1
 
-        // Signal drain semaphore if someone is waiting and count reached 0
-        if tripleBufferInFlightCount == 0 && waitingForDrain {
+        // Signal drain semaphore if someone is waiting and BOTH counts reached 0
+        if tripleBufferInFlightCount == 0 && tripleBufferGPUCommandsInFlight == 0 && waitingForDrain {
             tripleBufferDrainSemaphore?.signal()
         }
         return result
@@ -943,11 +949,52 @@ extension ComputeContext {
             currentWriteIndex = (currentWriteIndex + 1) % bufferCount
         }
 
-        // Check for deferred clear from memory pressure
-        if tripleBufferPendingClear && tripleBufferInFlightCount == 0 {
+        // Check for deferred clear from memory pressure (need BOTH counts at 0)
+        if tripleBufferPendingClear && tripleBufferInFlightCount == 0 && tripleBufferGPUCommandsInFlight == 0 {
             tripleBuffer.removeAll()
             currentWriteIndex = 0
             tripleBufferPendingClear = false
+        }
+    }
+
+    /// Register a command buffer as using triple buffer resources
+    ///
+    /// Call this BEFORE committing a command buffer that references triple buffers.
+    /// The completion handler will automatically decrement the in-flight count when
+    /// the GPU finishes executing the command buffer.
+    ///
+    /// This ensures `setupTripleBuffering()` waits for actual GPU completion, not just
+    /// closure scope, preventing use-after-free when buffers are reallocated.
+    ///
+    /// ## Example
+    /// ```swift
+    /// context.withWriteBuffer { buffer in
+    ///     encoder.setBuffer(buffer, offset: 0, index: 0)
+    /// }
+    /// // IMPORTANT: Register BEFORE commit
+    /// context.registerTripleBufferCommandBuffer(commandBuffer)
+    /// commandBuffer.commit()
+    /// ```
+    ///
+    /// - Parameter commandBuffer: The command buffer that references triple buffers
+    /// - Warning: Must be called BEFORE `commandBuffer.commit()`. Calling after commit
+    ///   may result in the completion handler not being registered.
+    public func registerTripleBufferCommandBuffer(_ commandBuffer: MTLCommandBuffer) {
+        os_unfair_lock_lock(&unfairLock)
+        tripleBufferGPUCommandsInFlight += 1
+        os_unfair_lock_unlock(&unfairLock)
+
+        commandBuffer.addCompletedHandler { [weak self] _ in
+            guard let self = self else { return }
+            os_unfair_lock_lock(&self.unfairLock)
+            self.tripleBufferGPUCommandsInFlight -= 1
+            // Signal drain semaphore if someone is waiting and BOTH counts reached 0
+            if self.tripleBufferInFlightCount == 0 &&
+               self.tripleBufferGPUCommandsInFlight == 0 &&
+               self.waitingForDrain {
+                self.tripleBufferDrainSemaphore?.signal()
+            }
+            os_unfair_lock_unlock(&self.unfairLock)
         }
     }
 

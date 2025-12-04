@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import Atomics
 
 /// A lock-free single-producer single-consumer ring buffer for real-time audio
 ///
@@ -35,10 +36,12 @@ public final class RingBuffer {
     private let buffer: UnsafeMutablePointer<Float>
 
     /// Write position (only modified by producer)
-    private var writePosition: UInt64 = 0
+    /// Uses atomic operations with release/acquire ordering for thread safety
+    private let writePosition = ManagedAtomic<UInt64>(0)
 
     /// Read position (only modified by consumer)
-    private var readPosition: UInt64 = 0
+    /// Uses atomic operations with release/acquire ordering for thread safety
+    private let readPosition = ManagedAtomic<UInt64>(0)
 
     // MARK: - Computed Properties
 
@@ -48,26 +51,28 @@ public final class RingBuffer {
     /// data see writes that happened before the producer's release barrier.
     ///
     /// MEMORY ORDERING:
-    /// 1. Read writePosition (may be stale, but that's safe - we just undercount)
-    /// 2. Acquire barrier - ensures subsequent buffer data reads see producer's writes
-    /// 3. Caller reads buffer data
+    /// 1. Load writePosition with acquiring ordering - ensures we see producer's writes
+    /// 2. Load readPosition (relaxed is fine since consumer owns this)
+    /// 3. Subsequent buffer data reads will see producer's data
     ///
-    /// This pairs with write()'s release barrier which is: write data → barrier → update position
+    /// This pairs with write()'s release barrier which is: write data → store position (releasing)
     public var availableToRead: Int {
-        // Read positions first
-        let write = writePosition
-        let read = readPosition
-        // Acquire barrier AFTER reading position: ensures subsequent buffer data reads
-        // by the caller see the data that was written before the producer's release barrier.
-        // Without this barrier after the position read, the CPU could reorder buffer reads
-        // to occur before we read the position, potentially reading stale/uninitialized data.
-        OSMemoryBarrier()
+        // Acquire load ensures we see all writes that happened before producer's release store
+        let write = writePosition.load(ordering: .acquiring)
+        // Consumer owns readPosition, so relaxed is safe here
+        let read = readPosition.load(ordering: .relaxed)
         return Int(write &- read)
     }
 
     /// Number of samples that can be written
+    ///
+    /// Thread-safe: Uses acquire semantics to ensure we see consumer's read position updates.
     public var availableToWrite: Int {
-        return capacity - availableToRead
+        // Producer needs to acquire readPosition to see consumer's updates
+        let read = readPosition.load(ordering: .acquiring)
+        // Producer owns writePosition, so relaxed is safe
+        let write = writePosition.load(ordering: .relaxed)
+        return capacity - Int(write &- read)
     }
 
     /// Whether the buffer is empty
@@ -113,7 +118,8 @@ public final class RingBuffer {
 
         guard toWrite > 0 else { return 0 }
 
-        let writeIndex = Int(writePosition % UInt64(capacity))
+        let currentWrite = writePosition.load(ordering: .relaxed)
+        let writeIndex = Int(currentWrite % UInt64(capacity))
         let firstChunk = min(toWrite, capacity - writeIndex)
         let secondChunk = toWrite - firstChunk
 
@@ -125,9 +131,8 @@ public final class RingBuffer {
             memcpy(buffer, source + firstChunk, secondChunk * MemoryLayout<Float>.stride)
         }
 
-        // Memory barrier before updating position
-        OSMemoryBarrier()
-        writePosition = writePosition &+ UInt64(toWrite)
+        // Release store ensures consumer sees our buffer writes before the position update
+        writePosition.store(currentWrite &+ UInt64(toWrite), ordering: .releasing)
 
         return toWrite
     }
@@ -157,15 +162,16 @@ public final class RingBuffer {
 
         guard maxWrite > 0 else { return 0 }
 
-        let writeIndex = Int(writePosition % UInt64(capacity))
+        let currentWrite = writePosition.load(ordering: .relaxed)
+        let writeIndex = Int(currentWrite % UInt64(capacity))
         let contiguous = min(maxWrite, capacity - writeIndex)
 
         // Provide contiguous region to closure
         let written = body(UnsafeMutableBufferPointer(start: buffer + writeIndex, count: contiguous))
         let actualWritten = min(written, contiguous)
 
-        OSMemoryBarrier()
-        writePosition = writePosition &+ UInt64(actualWritten)
+        // Release store ensures consumer sees buffer writes before position update
+        writePosition.store(currentWrite &+ UInt64(actualWritten), ordering: .releasing)
 
         return actualWritten
     }
@@ -181,12 +187,13 @@ public final class RingBuffer {
     @discardableResult
     @inline(__always)
     public func read(into destination: UnsafeMutablePointer<Float>, count: Int) -> Int {
-        let available = availableToRead
+        let available = availableToRead  // This does acquire load of writePosition
         let toRead = min(count, available)
 
         guard toRead > 0 else { return 0 }
 
-        let readIndex = Int(readPosition % UInt64(capacity))
+        let currentRead = readPosition.load(ordering: .relaxed)
+        let readIndex = Int(currentRead % UInt64(capacity))
         let firstChunk = min(toRead, capacity - readIndex)
         let secondChunk = toRead - firstChunk
 
@@ -198,8 +205,8 @@ public final class RingBuffer {
             memcpy(destination + firstChunk, buffer, secondChunk * MemoryLayout<Float>.stride)
         }
 
-        OSMemoryBarrier()
-        readPosition = readPosition &+ UInt64(toRead)
+        // Release store ensures producer sees we've consumed these slots
+        readPosition.store(currentRead &+ UInt64(toRead), ordering: .releasing)
 
         return toRead
     }
@@ -228,12 +235,13 @@ public final class RingBuffer {
     @discardableResult
     @inline(__always)
     public func peek(into destination: UnsafeMutablePointer<Float>, count: Int) -> Int {
-        let available = availableToRead
+        let available = availableToRead  // This does acquire load of writePosition
         let toPeek = min(count, available)
 
         guard toPeek > 0 else { return 0 }
 
-        let readIndex = Int(readPosition % UInt64(capacity))
+        let currentRead = readPosition.load(ordering: .relaxed)
+        let readIndex = Int(currentRead % UInt64(capacity))
         let firstChunk = min(toPeek, capacity - readIndex)
         let secondChunk = toPeek - firstChunk
 
@@ -253,11 +261,14 @@ public final class RingBuffer {
     @discardableResult
     @inline(__always)
     public func skip(count: Int) -> Int {
-        let available = availableToRead
+        let available = availableToRead  // This does acquire load of writePosition
         let toSkip = min(count, available)
 
-        OSMemoryBarrier()
-        readPosition = readPosition &+ UInt64(toSkip)
+        guard toSkip > 0 else { return 0 }
+
+        let currentRead = readPosition.load(ordering: .relaxed)
+        // Release store ensures producer sees we've consumed these slots
+        readPosition.store(currentRead &+ UInt64(toSkip), ordering: .releasing)
 
         return toSkip
     }
@@ -270,19 +281,20 @@ public final class RingBuffer {
     /// - Returns: Number of samples consumed
     @discardableResult
     public func read(maxCount count: Int, _ body: (UnsafeBufferPointer<Float>) -> Int) -> Int {
-        let available = availableToRead
+        let available = availableToRead  // This does acquire load of writePosition
         let maxRead = min(count, available)
 
         guard maxRead > 0 else { return 0 }
 
-        let readIndex = Int(readPosition % UInt64(capacity))
+        let currentRead = readPosition.load(ordering: .relaxed)
+        let readIndex = Int(currentRead % UInt64(capacity))
         let contiguous = min(maxRead, capacity - readIndex)
 
         let consumed = body(UnsafeBufferPointer(start: buffer + readIndex, count: contiguous))
         let actualConsumed = min(consumed, contiguous)
 
-        OSMemoryBarrier()
-        readPosition = readPosition &+ UInt64(actualConsumed)
+        // Release store ensures producer sees we've consumed these slots
+        readPosition.store(currentRead &+ UInt64(actualConsumed), ordering: .releasing)
 
         return actualConsumed
     }
@@ -293,8 +305,9 @@ public final class RingBuffer {
     ///
     /// - Warning: Only call when no other thread is accessing the buffer
     public func reset() {
-        writePosition = 0
-        readPosition = 0
+        // Using relaxed ordering since caller guarantees exclusive access
+        writePosition.store(0, ordering: .relaxed)
+        readPosition.store(0, ordering: .relaxed)
     }
 }
 
