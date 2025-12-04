@@ -627,6 +627,7 @@ extension Tensor {
 
         // Convert float32 to float16 using vImage (SIMD optimized)
         let dstPtr = float16Pointer
+        var conversionError: vImage_Error = kvImageNoError
         array.withUnsafeBufferPointer { srcBuffer in
             guard let srcPtr = srcBuffer.baseAddress else { return }
 
@@ -645,7 +646,11 @@ extension Tensor {
             )
 
             // Convert float32 -> float16 (uses NEON/AVX SIMD)
-            vImageConvert_PlanarFtoPlanar16F(&srcVImage, &dstVImage, vImage_Flags(kvImageNoFlags))
+            conversionError = vImageConvert_PlanarFtoPlanar16F(&srcVImage, &dstVImage, vImage_Flags(kvImageNoFlags))
+        }
+
+        guard conversionError == kvImageNoError else {
+            throw MetalAudioError.invalidConfiguration("vImage float32->float16 conversion failed: error code \(conversionError)")
         }
 
         #if os(macOS)
@@ -685,7 +690,9 @@ extension Tensor {
             )
 
             // Convert float16 -> float32 (uses NEON/AVX SIMD)
-            vImageConvert_Planar16FtoPlanarF(&srcVImage, &dstVImage, vImage_Flags(kvImageNoFlags))
+            let error = vImageConvert_Planar16FtoPlanarF(&srcVImage, &dstVImage, vImage_Flags(kvImageNoFlags))
+            // Assert in debug builds - vImage errors indicate buffer misconfiguration
+            assert(error == kvImageNoError, "vImage float16->float32 conversion failed: error code \(error)")
         }
 
         return result
@@ -715,7 +722,10 @@ extension Tensor {
                 rowBytes: count * MemoryLayout<Float16>.stride
             )
 
-            vImageConvert_PlanarFtoPlanar16F(&srcVImage, &dstVImage, vImage_Flags(kvImageNoFlags))
+            let error = vImageConvert_PlanarFtoPlanar16F(&srcVImage, &dstVImage, vImage_Flags(kvImageNoFlags))
+            guard error == kvImageNoError else {
+                throw MetalAudioError.invalidConfiguration("vImage float32->float16 conversion failed: error code \(error)")
+            }
         } else if dataType == .float16 {
             // Just copy
             memcpy(halfTensor.buffer.contents(), buffer.contents(), byteSize)
@@ -754,7 +764,10 @@ extension Tensor {
                 rowBytes: count * MemoryLayout<Float>.stride
             )
 
-            vImageConvert_Planar16FtoPlanarF(&srcVImage, &dstVImage, vImage_Flags(kvImageNoFlags))
+            let error = vImageConvert_Planar16FtoPlanarF(&srcVImage, &dstVImage, vImage_Flags(kvImageNoFlags))
+            guard error == kvImageNoError else {
+                throw MetalAudioError.invalidConfiguration("vImage float16->float32 conversion failed: error code \(error)")
+            }
         } else if dataType == .float32 {
             // Just copy
             memcpy(floatTensor.buffer.contents(), buffer.contents(), byteSize)

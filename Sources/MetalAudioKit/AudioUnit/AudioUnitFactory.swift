@@ -1,6 +1,6 @@
 import Foundation
 import AudioToolbox
-import AVFoundation
+@preconcurrency import AVFoundation
 #if canImport(CoreAudioKit)
 import CoreAudioKit
 #endif
@@ -25,7 +25,9 @@ import CoreAudioKit
 /// ## Lifecycle
 /// Call `register()` early in your app lifecycle (e.g., `application(_:didFinishLaunchingWithOptions:)`).
 /// The factory keeps strong references to registered factories.
-public final class AudioUnitFactory {
+///
+/// - Note: Thread safety assumes single-threaded registration at app startup.
+public final class AudioUnitFactory: @unchecked Sendable {
 
     // MARK: - Types
 
@@ -241,7 +243,9 @@ public enum AudioUnitFactoryError: Error, LocalizedError {
 /// Factory for Audio Unit view controllers
 ///
 /// Use this to register custom UIs for your audio units.
-public final class AudioUnitViewFactory {
+///
+/// - Note: Thread safety assumes single-threaded registration at app startup.
+public final class AudioUnitViewFactory: @unchecked Sendable {
 
     public typealias ViewFactory = (AUAudioUnit) -> AUViewController?
 

@@ -204,8 +204,11 @@ open class AudioUnitScaffold: AUAudioUnit {
 
         _parameterTree?.implementorValueProvider = { [weak self] param in
             guard let self = self else { return param.value }
-            // Read is atomic on modern processors for aligned AUValue
-            return self.parameterValues[param.address] ?? param.value
+            // SAFETY: Dictionary access requires lock to prevent concurrent read/write crash
+            os_unfair_lock_lock(&self.parameterLock)
+            let value = self.parameterValues[param.address] ?? param.value
+            os_unfair_lock_unlock(&self.parameterLock)
+            return value
         }
     }
 
@@ -305,7 +308,8 @@ open class AudioUnitScaffold: AUAudioUnit {
         let helper = self.helper
         let channelCount = config.channelCount
         let bypassed = { [weak self] in self?._bypassed ?? false }
-        let getParam = { [weak self] (address: AUParameterAddress) -> AUValue in
+        // Note: Parameter getter prepared but currently unused - kept for future per-sample parameter interpolation
+        let _ = { [weak self] (address: AUParameterAddress) -> AUValue in
             self?.parameterValues[address] ?? 0
         }
         let processFunc = { [weak self] (
@@ -412,8 +416,11 @@ open class AudioUnitScaffold: AUAudioUnit {
     /// - Parameter address: Parameter address
     /// - Returns: Current value
     public func parameterValue(for address: AUParameterAddress) -> AUValue {
-        // Atomic read
-        parameterValues[address] ?? 0
+        // SAFETY: Dictionary access requires lock to prevent concurrent read/write crash
+        os_unfair_lock_lock(&parameterLock)
+        let value = parameterValues[address] ?? 0
+        os_unfair_lock_unlock(&parameterLock)
+        return value
     }
 
     /// Set parameter value

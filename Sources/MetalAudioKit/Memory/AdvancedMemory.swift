@@ -653,7 +653,7 @@ public enum SpeculativeBufferError: Error {
 ///
 /// The manager periodically scans buffers and deallocates those that have
 /// gone cold, freeing memory for other uses.
-public final class SpeculativeBufferManager {
+public final class SpeculativeBufferManager: @unchecked Sendable {
 
     /// Registered buffers (weak references)
     private var buffers = NSHashTable<SpeculativeBuffer>.weakObjects()

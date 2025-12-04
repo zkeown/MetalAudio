@@ -976,8 +976,8 @@ extension AudioBufferPool: MemoryBudgetable {
     }
 
     /// Memory budget storage
-    private static var budgets: [ObjectIdentifier: Int] = [:]
-    private static var budgetLock = os_unfair_lock()
+    private nonisolated(unsafe) static var budgets: [ObjectIdentifier: Int] = [:]
+    private nonisolated(unsafe) static var budgetLock = os_unfair_lock()
 
     /// Set memory budget for this pool
     ///

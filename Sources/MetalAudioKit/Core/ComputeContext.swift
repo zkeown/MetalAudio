@@ -290,7 +290,7 @@ public final class ComputeContext: @unchecked Sendable {
     ///   - completion: Called on GPU completion
     public func executeAsync(
         _ encode: @escaping (MTLComputeCommandEncoder) throws -> Void,
-        completion: @escaping (Error?) -> Void
+        completion: @escaping @Sendable (Error?) -> Void
     ) {
         // Wait for a slot with timeout to prevent indefinite blocking
         let waitResult = inFlightSemaphore.wait(timeout: .now() + Self.defaultGPUTimeout)
@@ -340,7 +340,7 @@ public final class ComputeContext: @unchecked Sendable {
     @discardableResult
     public func tryExecuteAsync(
         _ encode: @escaping (MTLComputeCommandEncoder) throws -> Void,
-        completion: @escaping (Error?) -> Void
+        completion: @escaping @Sendable (Error?) -> Void
     ) -> Bool {
         // Non-blocking check for available slot
         guard inFlightSemaphore.wait(timeout: .now()) == .success else {
@@ -602,7 +602,7 @@ extension ComputeContext {
 
         // Wrap semaphore in a class to ensure proper capture semantics
         // This guarantees the semaphore stays alive until the callback completes
-        final class SemaphoreHolder {
+        final class SemaphoreHolder: @unchecked Sendable {
             let semaphore: DispatchSemaphore
             init(_ sem: DispatchSemaphore) { self.semaphore = sem }
         }
@@ -658,7 +658,7 @@ extension ComputeContext {
     ///   - completion: Called with fence value when GPU completes; CPU can safely access buffers
     public func executeWithFence(
         _ encode: @escaping (MTLComputeCommandEncoder) throws -> Void,
-        completion: @escaping (Result<UInt64, Error>) -> Void
+        completion: @escaping @Sendable (Result<UInt64, Error>) -> Void
     ) {
         // Wait for a slot with timeout to prevent indefinite blocking
         let waitResult = inFlightSemaphore.wait(timeout: .now() + Self.defaultGPUTimeout)

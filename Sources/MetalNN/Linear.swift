@@ -39,8 +39,8 @@ public final class Linear: NNLayer {
 
     /// Internal lock for thread-safe access to static thresholds
     private static let thresholdLock = NSLock()
-    private static var _mpsBatchThreshold: Int = 4
-    private static var _mpsGPUThreshold: Int = 32  // MPS wins at 4096×4096 starting at batch 32
+    private nonisolated(unsafe) static var _mpsBatchThreshold: Int = 4
+    private nonisolated(unsafe) static var _mpsGPUThreshold: Int = 32  // MPS wins at 4096×4096 starting at batch 32
 
     /// Batch size threshold for batched Accelerate vs single-vector path.
     /// Thread-safe. Set during app initialization before inference begins.
@@ -86,7 +86,7 @@ public final class Linear: NNLayer {
     /// Matrix dimension threshold for MPS GPU acceleration.
     /// MPS is only used when inputFeatures OR outputFeatures >= this threshold.
     /// Thread-safe. Default: 4096 (based on M4 Max benchmarks).
-    private static var _mpsMatrixThreshold: Int = 4096
+    private nonisolated(unsafe) static var _mpsMatrixThreshold: Int = 4096
 
     public static var mpsMatrixThreshold: Int {
         get {

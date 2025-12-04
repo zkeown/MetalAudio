@@ -43,7 +43,7 @@ import os.signpost
 /// 2. Choose "Blank" template
 /// 3. Add "os_signpost" instrument
 /// 4. Filter by subsystem "com.metalaudio"
-public final class AudioSignpost {
+public final class AudioSignpost: @unchecked Sendable {
 
     /// Signpost log for this category
     private let log: OSLog
@@ -52,7 +52,7 @@ public final class AudioSignpost {
     public let category: String
 
     /// Whether signposting is enabled
-    public static var isEnabled: Bool = true
+    public nonisolated(unsafe) static var isEnabled: Bool = true
 
     // MARK: - Predefined Categories
 
@@ -386,7 +386,7 @@ public final class PerfStats {
 /// Registry of all performance statistics
 ///
 /// Collects stats from across the library for unified reporting.
-public final class PerfRegistry {
+public final class PerfRegistry: @unchecked Sendable {
 
     /// Shared instance
     public static let shared = PerfRegistry()

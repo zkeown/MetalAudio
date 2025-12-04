@@ -107,6 +107,16 @@ public enum WeightInitialization {
             }
 
         case .normal(let mean, let std):
+            // SAFETY: Warn if std is unusually large, which can produce extreme weights
+            // Box-Muller can produce values up to ~5.67 * std from mean
+            // With std=100, max weight ~566 from mean, which may cause training instability
+            #if DEBUG
+            if std > 10.0 {
+                print("WeightInitialization WARNING: std=\(std) is large. " +
+                      "Max possible weight: ±\(mean + 5.67 * std). This may cause training instability.")
+            }
+            #endif
+
             // Box-Muller transform for normal distribution
             // Use 1e-7 as lower bound for u1 to avoid extreme values from log(~0)
             // log(1e-7) ≈ -16.1, so sqrt(-2 * -16.1) ≈ 5.67 max std devs
@@ -148,11 +158,11 @@ public enum WeightInitialization {
 public enum MetalNNConfig {
     /// Callback for logging warnings. Set to a custom function to integrate with your logging system.
     /// Default prints to stderr.
-    public static var logWarning: (String) -> Void = { message in
+    public nonisolated(unsafe) static var logWarning: @Sendable (String) -> Void = { message in
         fputs("[MetalNN] Warning: \(message)\n", stderr)
     }
 
     /// If true, pipeline creation failures throw instead of falling back to CPU.
     /// Default is false for backwards compatibility.
-    public static var strictGPUMode: Bool = false
+    public nonisolated(unsafe) static var strictGPUMode: Bool = false
 }

@@ -1,7 +1,7 @@
 import Metal
 import MetalPerformanceShaders
 import Accelerate
-import MetalAudioKit
+@preconcurrency import MetalAudioKit
 
 /// LSTM layer for sequential audio processing
 /// Optimized for inference with pre-computed weights
@@ -409,19 +409,32 @@ public final class LSTM: NNLayer {
 
         // Ensure sequence-dependent work buffers are large enough
         // These are resized only when sequence length increases (rare in real-time audio)
-        let preIHSize = sequenceLength * gateSize
+        // SAFETY: Use overflow-checked arithmetic to prevent wraparound causing undersized allocation
+        let (preIHSize, preIHOverflow) = sequenceLength.multipliedReportingOverflow(by: gateSize)
+        guard !preIHOverflow else {
+            throw MetalAudioError.bufferOverflow("LSTM: preIHSize overflow (sequenceLength=\(sequenceLength), gateSize=\(gateSize))")
+        }
         if workPreIHCapacity < preIHSize {
             workPreIH = [Float](repeating: 0, count: preIHSize)
             workPreIHCapacity = preIHSize
         }
 
-        let layerOutputSize = sequenceLength * hiddenSize * numDirections
+        let (layerOutputPartial, layerOutputOverflow1) = sequenceLength.multipliedReportingOverflow(by: hiddenSize)
+        let (layerOutputSize, layerOutputOverflow2) = layerOutputPartial.multipliedReportingOverflow(by: numDirections)
+        guard !layerOutputOverflow1 && !layerOutputOverflow2 else {
+            throw MetalAudioError.bufferOverflow("LSTM: layerOutputSize overflow (sequenceLength=\(sequenceLength), hiddenSize=\(hiddenSize))")
+        }
         if workLayerOutputCapacity < layerOutputSize {
             workLayerOutput = [Float](repeating: 0, count: layerOutputSize)
             workLayerOutputCapacity = layerOutputSize
         }
 
-        let maxLayerInputSize = max(inputSize, hiddenSize * numDirections) * sequenceLength
+        let (hiddenTimesDir, hiddenOverflow) = hiddenSize.multipliedReportingOverflow(by: numDirections)
+        let maxPerStep = max(inputSize, hiddenTimesDir)
+        let (maxLayerInputSize, layerInputOverflow) = maxPerStep.multipliedReportingOverflow(by: sequenceLength)
+        guard !hiddenOverflow && !layerInputOverflow else {
+            throw MetalAudioError.bufferOverflow("LSTM: maxLayerInputSize overflow (sequenceLength=\(sequenceLength))")
+        }
         if workLayerInputCapacity < maxLayerInputSize {
             workLayerInput = [Float](repeating: 0, count: maxLayerInputSize)
             workLayerInputCapacity = maxLayerInputSize
@@ -743,7 +756,7 @@ extension LSTM {
     public func forwardAsync(
         input: Tensor,
         output: Tensor,
-        completion: @escaping (Error?) -> Void
+        completion: @escaping @Sendable (Error?) -> Void
     ) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else {
@@ -778,7 +791,7 @@ extension LSTM {
         input: Tensor,
         output: Tensor,
         encoder: MTLComputeCommandEncoder,
-        completion: @escaping (Error?) -> Void
+        completion: @escaping @Sendable (Error?) -> Void
     ) {
         // Forward to the new signature, ignoring the unused encoder
         forwardAsync(input: input, output: output, completion: completion)
@@ -875,8 +888,8 @@ extension LSTM: MemoryBudgetable {
     }
 
     /// Maximum sequence length based on memory budget
-    private static var budgetedMaxSequenceLengths: [ObjectIdentifier: Int] = [:]
-    private static var budgetedMaxSequenceLock = os_unfair_lock()
+    private nonisolated(unsafe) static var budgetedMaxSequenceLengths: [ObjectIdentifier: Int] = [:]
+    private nonisolated(unsafe) static var budgetedMaxSequenceLock = os_unfair_lock()
 
     /// Set memory budget for this LSTM
     ///

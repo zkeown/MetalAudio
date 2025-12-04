@@ -192,7 +192,7 @@ public final class CompressedTensor {
 
         // Convert back to Float array using fast memcpy
         var floatArray = [Float](repeating: 0, count: count)
-        floatArray.withUnsafeMutableBytes { dest in
+        _ = floatArray.withUnsafeMutableBytes { dest in
             memcpy(dest.baseAddress!, destinationBuffer, originalSize)
         }
 

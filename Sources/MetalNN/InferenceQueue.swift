@@ -41,17 +41,17 @@ public final class InferenceQueue {
     // MARK: - Types
 
     /// Work item for the queue
-    private struct WorkItem {
+    private struct WorkItem: @unchecked Sendable {
         let id: UInt64
         let input: [Float]
-        let completion: (UnsafePointer<Float>, Int) -> Void
+        let completion: @Sendable (UnsafePointer<Float>, Int) -> Void
     }
 
     /// Result waiting for delivery
-    private struct PendingResult {
+    private struct PendingResult: @unchecked Sendable {
         let id: UInt64
         let output: [Float]
-        let completion: (UnsafePointer<Float>, Int) -> Void
+        let completion: @Sendable (UnsafePointer<Float>, Int) -> Void
     }
 
     /// Queue statistics
@@ -212,11 +212,11 @@ public final class InferenceQueue {
     public func enqueue(
         input: UnsafePointer<Float>,
         count: Int,
-        completion: @escaping (UnsafePointer<Float>, Int) -> Void
+        completion: @escaping @Sendable (UnsafePointer<Float>, Int) -> Void
     ) -> Bool {
         // Copy input (necessary since we're async)
         var inputCopy = [Float](repeating: 0, count: count)
-        inputCopy.withUnsafeMutableBufferPointer { ptr in
+        _ = inputCopy.withUnsafeMutableBufferPointer { ptr in
             memcpy(ptr.baseAddress!, input, count * MemoryLayout<Float>.stride)
         }
 
@@ -251,7 +251,7 @@ public final class InferenceQueue {
     @discardableResult
     public func enqueue(
         input: [Float],
-        completion: @escaping (UnsafePointer<Float>, Int) -> Void
+        completion: @escaping @Sendable (UnsafePointer<Float>, Int) -> Void
     ) -> Bool {
         return input.withUnsafeBufferPointer { ptr in
             enqueue(input: ptr.baseAddress!, count: ptr.count, completion: completion)
@@ -288,13 +288,18 @@ public final class InferenceQueue {
                 var output = [Float](repeating: 0, count: outputCount)
 
                 // Guard against empty arrays which would have nil baseAddress
+                // SAFETY: Must still call completion handler with empty result to avoid hanging caller
                 guard !item.input.isEmpty && outputCount > 0 else {
                     #if DEBUG
                     print("InferenceQueue: Skipping inference for empty input or zero output count")
                     #endif
+                    // Deliver empty result to completion handler (prevents caller from waiting forever)
+                    let emptyResult = PendingResult(id: item.id, output: [], completion: item.completion)
+                    self.deliverResult(emptyResult)
                     continue
                 }
 
+                var inferenceSucceeded = false
                 item.input.withUnsafeBufferPointer { inputPtr in
                     output.withUnsafeMutableBufferPointer { outputPtr in
                         guard let inputBase = inputPtr.baseAddress,
@@ -309,7 +314,15 @@ public final class InferenceQueue {
                             inputSize: item.input.count,
                             outputSize: outputCount
                         )
+                        inferenceSucceeded = true
                     }
+                }
+
+                // If inference failed (guard returned early), deliver empty result
+                guard inferenceSucceeded else {
+                    let emptyResult = PendingResult(id: item.id, output: [], completion: item.completion)
+                    self.deliverResult(emptyResult)
+                    continue
                 }
 
                 let inferenceTime = CACurrentMediaTime() - startTime
@@ -339,7 +352,15 @@ public final class InferenceQueue {
 
             callbackQueue.async {
                 result.output.withUnsafeBufferPointer { ptr in
-                    result.completion(ptr.baseAddress!, ptr.count)
+                    // SAFETY: Empty arrays have nil baseAddress, handle gracefully
+                    if let baseAddress = ptr.baseAddress {
+                        result.completion(baseAddress, ptr.count)
+                    } else {
+                        // Empty result - call completion with dummy pointer and count 0
+                        // This signals the caller that inference produced no output
+                        var dummy: Float = 0
+                        result.completion(&dummy, 0)
+                    }
                 }
             }
 
@@ -367,7 +388,13 @@ public final class InferenceQueue {
             // Deliver the completion callback
             callbackQueue.async {
                 output.withUnsafeBufferPointer { ptr in
-                    completion(ptr.baseAddress!, ptr.count)
+                    // SAFETY: Empty arrays have nil baseAddress, handle gracefully
+                    if let baseAddress = ptr.baseAddress {
+                        completion(baseAddress, ptr.count)
+                    } else {
+                        var dummy: Float = 0
+                        completion(&dummy, 0)
+                    }
                 }
             }
 

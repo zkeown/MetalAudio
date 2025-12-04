@@ -31,7 +31,7 @@ import Metal
 /// let pipeline = try device.makeComputePipelineState(...)
 /// cache.savePipeline(pipeline, source: shaderCode, functionName: "myKernel")
 /// ```
-public final class ShaderDiskCache {
+public final class ShaderDiskCache: @unchecked Sendable {
 
     /// The Metal device (used for validation)
     public let device: MTLDevice
@@ -405,7 +405,7 @@ public final class ShaderDiskCache {
 /// // Later, get precompiled pipeline (instant if ready)
 /// let pipeline = try precompiler.getPipeline(source: fftShader, functionName: "fft_radix2")
 /// ```
-public final class ShaderPrecompiler {
+public final class ShaderPrecompiler: @unchecked Sendable {
 
     /// The audio device for compilation
     public let device: AudioDevice
@@ -434,10 +434,10 @@ public final class ShaderPrecompiler {
     private var compiledCount = 0
 
     /// Progress callback
-    public typealias ProgressCallback = (Double) -> Void
+    public typealias ProgressCallback = @Sendable (Double) -> Void
 
     /// Completion callback
-    public typealias CompletionCallback = (Int, Int) -> Void  // (success, failed)
+    public typealias CompletionCallback = @Sendable (Int, Int) -> Void  // (success, failed)
 
     /// Initialize with device and optional disk cache
     ///

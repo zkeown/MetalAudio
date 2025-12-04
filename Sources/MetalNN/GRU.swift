@@ -175,10 +175,19 @@ public final class GRU: NNLayer {
     private func forwardOptimized(input: Tensor, output: Tensor) throws {
         let sequenceLength = input.shape[0]
         let gateSize = 3 * hiddenSize
-        let outputSize = sequenceLength * hiddenSize * numDirections
+
+        // SAFETY: Use overflow-checked arithmetic to prevent wraparound causing undersized allocation
+        let (outputPartial, outputOverflow1) = sequenceLength.multipliedReportingOverflow(by: hiddenSize)
+        let (outputSize, outputOverflow2) = outputPartial.multipliedReportingOverflow(by: numDirections)
+        guard !outputOverflow1 && !outputOverflow2 else {
+            throw MetalAudioError.bufferOverflow("GRU: outputSize overflow (sequenceLength=\(sequenceLength), hiddenSize=\(hiddenSize))")
+        }
 
         // Ensure sequence-dependent work buffers are large enough
-        let preIHSize = sequenceLength * gateSize
+        let (preIHSize, preIHOverflow) = sequenceLength.multipliedReportingOverflow(by: gateSize)
+        guard !preIHOverflow else {
+            throw MetalAudioError.bufferOverflow("GRU: preIHSize overflow (sequenceLength=\(sequenceLength), gateSize=\(gateSize))")
+        }
         if workPreIHCapacity < preIHSize {
             workPreIH = [Float](repeating: 0, count: preIHSize)
             workPreIHCapacity = preIHSize
@@ -326,7 +335,13 @@ public final class GRU: NNLayer {
         let sequenceLength = input.shape[0]
         let inputData = input.toArray()
         let gateSize = 3 * hiddenSize
-        let outputSize = sequenceLength * hiddenSize * numDirections
+
+        // SAFETY: Use overflow-checked arithmetic to prevent wraparound causing undersized allocation
+        let (outputPartial, outputOverflow1) = sequenceLength.multipliedReportingOverflow(by: hiddenSize)
+        let (outputSize, outputOverflow2) = outputPartial.multipliedReportingOverflow(by: numDirections)
+        guard !outputOverflow1 && !outputOverflow2 else {
+            throw MetalAudioError.bufferOverflow("GRU: outputSize overflow (sequenceLength=\(sequenceLength), hiddenSize=\(hiddenSize))")
+        }
 
         // Ensure output work buffer is large enough
         if workOutputCapacity < outputSize {

@@ -103,7 +103,7 @@ public protocol BNNSStreamingMemoryPressureDelegate: AnyObject {
 /// - Avoid dynamic shapes (use fixed batch size)
 /// - Keep model complexity reasonable for real-time (< 20ms inference)
 @available(macOS 15.0, iOS 18.0, *)
-public final class BNNSInference {
+public final class BNNSInference: @unchecked Sendable {
 
     private static let logger = Logger(subsystem: "com.metalaudio", category: "BNNSInference")
 
@@ -565,7 +565,7 @@ extension BNNSInference: MemoryPressureResponder {
 /// ## Thread Safety
 /// Like `BNNSInference`, this is safe to call from the audio thread after initialization.
 @available(macOS 15.0, iOS 18.0, *)
-public final class BNNSStreamingInference {
+public final class BNNSStreamingInference: @unchecked Sendable {
 
     private let graph: bnns_graph_t
     private var context: bnns_graph_context_t  // var to allow resetState() recreation

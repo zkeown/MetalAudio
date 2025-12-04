@@ -432,10 +432,21 @@ extension FFT {
         // we use regularization: divide by max(windowSum, floor) to smoothly attenuate
         // rather than abruptly zero samples at frame boundaries.
         //
-        // Validate windowFloorEpsilon: must be positive to prevent division by zero
-        // If misconfigured (zero or negative), fall back to a safe default
+        // Validate windowFloorEpsilon: must be in reasonable range to prevent:
+        // - Division by zero (if too small or zero)
+        // - Denormal results causing 10-100x performance degradation (if < ~1e-38)
+        // - Audible artifacts from incorrect normalization (if > ~0.1)
         let configuredFloor = ToleranceProvider.shared.tolerances.windowFloorEpsilon
-        let windowFloor = configuredFloor > 0 ? configuredFloor : Float(1e-6)
+        let windowFloor: Float
+        if configuredFloor < 1e-10 {
+            // Too small - could cause denormals or div-by-zero, use safe minimum
+            windowFloor = 1e-6
+        } else if configuredFloor > 0.1 {
+            // Too large - would cause audible artifacts, clamp to reasonable max
+            windowFloor = 0.1
+        } else {
+            windowFloor = configuredFloor
+        }
 
         // Clamp window sum to floor and divide
         // Note: vDSP_vthr zeros values below threshold (not what we want).

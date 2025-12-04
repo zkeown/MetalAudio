@@ -1246,7 +1246,7 @@ if #available(macOS 15.0, iOS 18.0, *) {
             // 3. State reset latency (measures allocation overhead)
             let resetIterations = adjustedIterations(20)
             let (resetTotalMs, resetAvgUs) = measureTime(resetIterations) {
-                streaming.resetState()
+                try? streaming.resetState()
             }
 
             recordResult(category: "BNNS-Streaming-Reset", operation: "resetState()",
@@ -1274,7 +1274,7 @@ if #available(macOS 15.0, iOS 18.0, *) {
                 let callbackIterations = adjustedIterations(50)
 
                 // Reset state before each test
-                streaming.resetState()
+                try? streaming.resetState()
 
                 for _ in 0..<callbackIterations {
                     let start = DispatchTime.now()

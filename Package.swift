@@ -41,6 +41,9 @@ let package = Package(
             path: "Sources/MetalAudioKit",
             resources: [
                 .copy("Shaders"),
+            ],
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency")
             ]
         ),
 
@@ -51,6 +54,9 @@ let package = Package(
             path: "Sources/MetalDSP",
             resources: [
                 .copy("Shaders"),
+            ],
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency")
             ]
         ),
 
@@ -61,6 +67,9 @@ let package = Package(
             path: "Sources/MetalNN",
             resources: [
                 .copy("Shaders"),
+            ],
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency")
             ]
         ),
 

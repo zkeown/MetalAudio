@@ -49,6 +49,11 @@ public final class Sequential {
     /// Forward passes after build() don't need locking since state is read-only.
     private var buildLock = os_unfair_lock()
 
+    #if DEBUG
+    /// DEBUG-only: Tracks number of forward() calls in flight to detect concurrent access violations
+    private var forwardInFlightCount: Int32 = 0
+    #endif
+
     /// Initialize sequential model
     /// - Parameter device: Audio device
     /// - Throws: `ComputeContext.ComputeContextError` if compute context creation fails
@@ -62,6 +67,14 @@ public final class Sequential {
     /// - Throws: `SequentialModelError.shapeMismatch` if layer input doesn't match previous output
     /// - Note: Thread-safe with respect to other add/build calls
     public func add(_ layer: NNLayer) throws {
+        #if DEBUG
+        // Detect concurrent access violations - add() should not be called during forward()
+        let inFlight = OSAtomicAdd32(0, &forwardInFlightCount)
+        assert(inFlight == 0,
+            "Sequential.add() called while \(inFlight) forward() call(s) are in progress. " +
+            "This is a threading violation. Build your model completely before starting inference.")
+        #endif
+
         os_unfair_lock_lock(&buildLock)
         defer { os_unfair_lock_unlock(&buildLock) }
 
@@ -115,6 +128,14 @@ public final class Sequential {
     ///
     /// - Note: Thread-safe with respect to other add/build calls
     public func build() throws {
+        #if DEBUG
+        // Detect concurrent access violations - build() should not be called during forward()
+        let inFlight = OSAtomicAdd32(0, &forwardInFlightCount)
+        assert(inFlight == 0,
+            "Sequential.build() called while \(inFlight) forward() call(s) are in progress. " +
+            "This is a threading violation. Build your model completely before starting inference.")
+        #endif
+
         os_unfair_lock_lock(&buildLock)
         defer { os_unfair_lock_unlock(&buildLock) }
 
@@ -191,6 +212,11 @@ public final class Sequential {
     ///           `SequentialModelError.inputShapeMismatch` if input shape doesn't match,
     ///           or layer errors
     public func forward(_ input: Tensor) throws -> Tensor {
+        #if DEBUG
+        OSAtomicIncrement32(&forwardInFlightCount)
+        defer { OSAtomicDecrement32(&forwardInFlightCount) }
+        #endif
+
         guard !layers.isEmpty else {
             throw SequentialModelError.emptyModel
         }
@@ -231,17 +257,30 @@ public final class Sequential {
 
     /// Run inference asynchronously
     public func forwardAsync(_ input: Tensor, completion: @escaping (Result<Tensor, Error>) -> Void) {
+        #if DEBUG
+        OSAtomicIncrement32(&forwardInFlightCount)
+        #endif
+
         guard !layers.isEmpty else {
+            #if DEBUG
+            OSAtomicDecrement32(&forwardInFlightCount)
+            #endif
             completion(.failure(SequentialModelError.emptyModel))
             return
         }
         guard !intermediateBuffers.isEmpty else {
+            #if DEBUG
+            OSAtomicDecrement32(&forwardInFlightCount)
+            #endif
             completion(.failure(MetalAudioError.invalidConfiguration("Model not built. Call build() first.")))
             return
         }
 
         // SAFETY: Verify intermediateBuffers matches layers count
         guard intermediateBuffers.count >= layers.count else {
+            #if DEBUG
+            OSAtomicDecrement32(&forwardInFlightCount)
+            #endif
             completion(.failure(MetalAudioError.invalidConfiguration(
                 "Buffer count (\(intermediateBuffers.count)) < layer count (\(layers.count)). Rebuild model."
             )))
@@ -251,6 +290,9 @@ public final class Sequential {
         // Validate input shape matches first layer's expected input
         let expectedShape = layers[0].inputShape
         guard input.shape == expectedShape else {
+            #if DEBUG
+            OSAtomicDecrement32(&forwardInFlightCount)
+            #endif
             completion(.failure(SequentialModelError.inputShapeMismatch(
                 expected: expectedShape,
                 actual: input.shape
@@ -266,10 +308,15 @@ public final class Sequential {
                 try layer.forward(input: currentInput, output: output, encoder: encoder)
                 currentInput = output
             }
-        }, completion: { error in
+        }, completion: { [weak self] error in
+            #if DEBUG
+            if let self = self {
+                OSAtomicDecrement32(&self.forwardInFlightCount)
+            }
+            #endif
             if let error = error {
                 completion(.failure(error))
-            } else {
+            } else if let self = self {
                 // Safe: We checked intermediateBuffers is not empty above
                 completion(.success(self.intermediateBuffers[self.intermediateBuffers.count - 1]))
             }

@@ -25,7 +25,7 @@ public protocol MemoryPressureResponder: AnyObject {
 ///
 /// For iOS, treat `.warning` as potentially critical and release as much memory as
 /// possible to avoid jetsam termination.
-public enum MemoryPressureLevel {
+public enum MemoryPressureLevel: Sendable {
     /// Low memory pressure - consider releasing caches
     case warning
     /// Critical memory pressure - release as much as possible

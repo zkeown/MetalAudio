@@ -87,7 +87,7 @@ public final class MemoryManager: @unchecked Sendable {
     private var debugTracker: MemoryTracker?
 
     /// Callback for debug monitoring
-    public var debugCallback: ((MemorySnapshot, MemoryWatermarks?) -> Void)?
+    public var debugCallback: (@Sendable (MemorySnapshot, MemoryWatermarks?) -> Void)?
 
     /// Global memory budget (optional)
     private var _globalBudget: Int?

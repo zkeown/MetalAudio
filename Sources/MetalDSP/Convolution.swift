@@ -432,6 +432,16 @@ public final class Convolution {
             throw ConvolutionError.fftNotInitialized
         }
 
+        // Validate working buffers are properly allocated (defensive check)
+        // These are allocated in setKernel() - this guard catches misuse or race conditions
+        guard workPaddedInput.count >= fftSize,
+              workInputReal.count >= fftSize,
+              workInputImag.count >= fftSize,
+              workOutputReal.count >= fftSize,
+              workOutputImag.count >= fftSize else {
+            throw ConvolutionError.fftNotInitialized
+        }
+
         // Validate input size to prevent circular convolution artifacts
         // If input exceeds expectedInputSize, FFT output will wrap around causing audible artifacts
         // This is a hard error - silent truncation would produce incorrect audio output
@@ -482,6 +492,13 @@ public final class Convolution {
             )
         }
 
+        // Validate working buffers are properly allocated (defensive check)
+        guard workInputBlock.count >= fftSize,
+              workInputReal.count >= fftSize,
+              workInputImag.count >= fftSize else {
+            throw ConvolutionError.fftNotInitialized
+        }
+
         // Full convolution output size: input + kernel - 1
         // We need to process enough blocks to capture the entire convolution tail
         // Check for overflow before computing fullOutputSize
@@ -503,7 +520,17 @@ public final class Convolution {
 
         // Process all blocks (including tail blocks with zero input)
         for block in 0..<totalBlocks {
-            let inputOffset = block * blockSize
+            // SAFETY: Check for integer overflow at the START of each iteration
+            // Before any state modifications (ring buffer writes happen later in loop)
+            let (inputOffset, inputOffsetOverflow) = block.multipliedReportingOverflow(by: blockSize)
+            let (outputOffset, outputOffsetOverflow) = block.multipliedReportingOverflow(by: blockSize)
+            guard !inputOffsetOverflow && !outputOffsetOverflow else {
+                // Break BEFORE any state modification - prevents state desync
+                break
+            }
+            guard outputOffset >= 0 && outputOffset < fullOutputSize else {
+                break
+            }
 
             // Prepare input block using pre-allocated buffer (zero-pad to fftSize)
             // For blocks beyond input length, use all zeros
@@ -652,12 +679,7 @@ public final class Convolution {
             }
 
             // Overlap-add to output using vectorized vDSP_vadd (3-5x faster than scalar loop)
-            // SAFETY: Check for integer overflow in offset calculation
-            let (outputOffset, overflow) = block.multipliedReportingOverflow(by: blockSize)
-            guard !overflow else { break }
-
-            // Guard against offset exceeding output size (prevents unsigned wrap-around in vDSP_Length)
-            guard outputOffset >= 0 && outputOffset < fullOutputSize else { break }
+            // NOTE: outputOffset overflow/bounds already checked at start of loop iteration
 
             // SAFETY: samplesToWrite is guaranteed <= fullOutputSize - outputOffset,
             // so outputOffset + samplesToWrite <= fullOutputSize (no overflow possible)

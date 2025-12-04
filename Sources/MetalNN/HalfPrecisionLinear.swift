@@ -6,7 +6,7 @@ import MetalAudioKit
 
 /// Thread-safe cache for half-precision shader pipelines
 /// Prevents recompiling the same shader for every layer instance
-internal final class HalfPrecisionPipelineCache {
+internal final class HalfPrecisionPipelineCache: @unchecked Sendable {
     static let shared = HalfPrecisionPipelineCache()
 
     private var cache: [String: MTLComputePipelineState] = [:]

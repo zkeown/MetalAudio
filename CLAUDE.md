@@ -49,17 +49,19 @@ MetalAudio is a GPU-accelerated audio processing framework with three modules:
 
 #### Thread Safety Matrix
 
-| Class | Thread-Safe | Notes |
-|-------|-------------|-------|
-| `AudioDevice` | ✅ Yes | After initialization. Pipeline caching uses double-checked locking. |
-| `ComputeContext` | ✅ Yes | Triple buffering uses `os_unfair_lock`. Use `tryExecuteAsync` for audio callbacks. |
-| `Tensor` | ⚠️ Partial | Concurrent reads safe. Concurrent writes or read/write require external sync. |
-| `FFT` | ❌ No | `forward()`/`inverse()` share mutable work buffers. **Exception:** `forwardBatch()` IS thread-safe (uses thread-local buffers via `concurrentPerform`). DEBUG builds validate output for NaN/Inf. |
-| `Convolution` | ❌ No | Partitioned mode has ring buffer state. Create one instance per thread. |
-| `LSTM`/`GRU` | ❌ No | Hidden/cell state is shared mutable. One instance per thread. |
-| `BNNSInference` | ✅ Yes | After initialization. `predict()` is safe from audio thread. |
-| `BNNSStreamingInference` | ✅ Yes | After initialization. `resetState()` is thread-safe but allocates memory (not real-time safe). |
-| `Sequential` | ✅ Yes | After `build()`. Forward pass is read-only. |
+| Class | Sendable | Thread-Safe | Notes |
+|-------|----------|-------------|-------|
+| `AudioDevice` | @unchecked | ✅ Yes | After initialization. Pipeline caching uses double-checked locking. |
+| `ComputeContext` | @unchecked | ✅ Yes | Triple buffering uses `os_unfair_lock`. Use `tryExecuteAsync` for audio callbacks. |
+| `Tensor` | No | ⚠️ Partial | Concurrent reads safe. Concurrent writes or read/write require external sync. |
+| `FFT` | No | ❌ No | `forward()`/`inverse()` share mutable work buffers. **Exception:** `forwardBatch()` IS thread-safe. |
+| `Convolution` | No | ❌ No | Partitioned mode has ring buffer state. Create one instance per thread. |
+| `LSTM`/`GRU` | No | ❌ No | Hidden/cell state is shared mutable. One instance per thread. |
+| `BNNSInference` | @unchecked | ✅ Yes | After initialization. `predict()` is safe from audio thread. |
+| `BNNSStreamingInference` | @unchecked | ✅ Yes | After initialization. `resetState()` is thread-safe but allocates memory. |
+| `Sequential` | No | ✅ Yes | After `build()`. Forward pass is read-only. |
+| `ShaderDiskCache` | @unchecked | ✅ Yes | Uses `os_unfair_lock` + `NSLock` for disk operations. |
+| `ShaderPrecompiler` | @unchecked | ✅ Yes | Uses `os_unfair_lock` for thread safety. |
 
 #### Audio Unit Render Callback Safety
 

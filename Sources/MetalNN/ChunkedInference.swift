@@ -265,7 +265,7 @@ public final class ChunkedInference {
         }
 
         // Run inference
-        inputChunk.withUnsafeBufferPointer { inputPtr in
+        _ = inputChunk.withUnsafeBufferPointer { inputPtr in
             outputChunk.withUnsafeMutableBufferPointer { outputPtr in
                 inference.predict(
                     input: inputPtr.baseAddress!,
@@ -297,12 +297,12 @@ public final class ChunkedInference {
             }
 
             // Write completed samples (hop size worth)
-            overlapBuffer.withUnsafeBufferPointer { ptr in
+            _ = overlapBuffer.withUnsafeBufferPointer { ptr in
                 outputRing.write(ptr.baseAddress!, count: config.hopSize)
             }
 
             // Store new overlap for next iteration
-            outputChunk.withUnsafeBufferPointer { chunkPtr in
+            _ = outputChunk.withUnsafeBufferPointer { chunkPtr in
                 overlapBuffer.withUnsafeMutableBufferPointer { overlapPtr in
                     memcpy(overlapPtr.baseAddress!,
                            chunkPtr.baseAddress! + config.hopSize,
@@ -312,7 +312,7 @@ public final class ChunkedInference {
         } else {
             // First chunk: store overlap, output hop
             if config.overlap > 0 {
-                outputChunk.withUnsafeBufferPointer { chunkPtr in
+                _ = outputChunk.withUnsafeBufferPointer { chunkPtr in
                     overlapBuffer.withUnsafeMutableBufferPointer { overlapPtr in
                         memcpy(overlapPtr.baseAddress!,
                                chunkPtr.baseAddress! + config.hopSize,
@@ -320,12 +320,12 @@ public final class ChunkedInference {
                     }
                 }
 
-                outputChunk.withUnsafeBufferPointer { ptr in
+                _ = outputChunk.withUnsafeBufferPointer { ptr in
                     outputRing.write(ptr.baseAddress!, count: config.hopSize)
                 }
             } else {
                 // No overlap: write full chunk
-                outputChunk.withUnsafeBufferPointer { ptr in
+                _ = outputChunk.withUnsafeBufferPointer { ptr in
                     outputRing.write(ptr.baseAddress!, count: config.chunkSize)
                 }
             }
@@ -342,13 +342,13 @@ public final class ChunkedInference {
         inputRing.reset()
         outputRing.reset()
 
-        inputChunk.withUnsafeMutableBufferPointer { ptr in
+        _ = inputChunk.withUnsafeMutableBufferPointer { ptr in
             memset(ptr.baseAddress!, 0, config.chunkSize * MemoryLayout<Float>.stride)
         }
-        outputChunk.withUnsafeMutableBufferPointer { ptr in
+        _ = outputChunk.withUnsafeMutableBufferPointer { ptr in
             memset(ptr.baseAddress!, 0, config.chunkSize * MemoryLayout<Float>.stride)
         }
-        overlapBuffer.withUnsafeMutableBufferPointer { ptr in
+        _ = overlapBuffer.withUnsafeMutableBufferPointer { ptr in
             memset(ptr.baseAddress!, 0, config.chunkSize * MemoryLayout<Float>.stride)
         }
 
