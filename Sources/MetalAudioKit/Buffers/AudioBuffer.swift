@@ -286,6 +286,76 @@ public final class AudioBuffer {
         memcpy(destBase, buffer.contents(), size)
     }
 
+    /// Copy data from GPU buffer to CPU with GPU synchronization (raw pointer version)
+    ///
+    /// This method waits for the GPU to complete any operations up to the specified
+    /// fence value before copying, ensuring safe access to GPU-written data.
+    ///
+    /// - Parameters:
+    ///   - destination: Destination data pointer (must be valid and have capacity >= size)
+    ///   - size: Number of bytes to copy (must not exceed buffer size)
+    ///   - context: Compute context for synchronization
+    ///   - fenceValue: GPU fence value to wait for before copying
+    ///   - timeout: Maximum time to wait for GPU (nil = use default timeout)
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if size exceeds buffer capacity,
+    ///           `MetalAudioError.gpuTimeout` if fence wait times out
+    public func safeCopyToCPU(
+        _ destination: UnsafeMutableRawPointer,
+        size: Int,
+        context: ComputeContext,
+        fenceValue: UInt64,
+        timeout: TimeInterval? = nil
+    ) throws {
+        guard size <= byteSize else {
+            throw MetalAudioError.bufferSizeMismatch(expected: size, actual: byteSize)
+        }
+
+        // Wait for GPU to complete operations on this buffer
+        guard context.waitForGPU(fenceValue: fenceValue, timeout: timeout) else {
+            throw MetalAudioError.gpuTimeout(timeout ?? ComputeContext.defaultGPUTimeout)
+        }
+
+        memcpy(destination, buffer.contents(), size)
+    }
+
+    /// Copy data from GPU buffer to CPU with GPU synchronization (typed buffer version)
+    ///
+    /// This method waits for the GPU to complete any operations up to the specified
+    /// fence value before copying, ensuring safe access to GPU-written data.
+    ///
+    /// - Parameters:
+    ///   - destination: Destination buffer with capacity information
+    ///   - size: Number of bytes to copy (must not exceed source or destination capacity)
+    ///   - context: Compute context for synchronization
+    ///   - fenceValue: GPU fence value to wait for before copying
+    ///   - timeout: Maximum time to wait for GPU (nil = use default timeout)
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if size exceeds either buffer capacity,
+    ///           `MetalAudioError.gpuTimeout` if fence wait times out
+    public func safeCopyToCPU(
+        _ destination: UnsafeMutableRawBufferPointer,
+        size: Int,
+        context: ComputeContext,
+        fenceValue: UInt64,
+        timeout: TimeInterval? = nil
+    ) throws {
+        guard size <= byteSize else {
+            throw MetalAudioError.bufferSizeMismatch(expected: size, actual: byteSize)
+        }
+        guard size <= destination.count else {
+            throw MetalAudioError.bufferSizeMismatch(expected: size, actual: destination.count)
+        }
+        guard let destBase = destination.baseAddress else {
+            throw MetalAudioError.invalidPointer
+        }
+
+        // Wait for GPU to complete operations on this buffer
+        guard context.waitForGPU(fenceValue: fenceValue, timeout: timeout) else {
+            throw MetalAudioError.gpuTimeout(timeout ?? ComputeContext.defaultGPUTimeout)
+        }
+
+        memcpy(destBase, buffer.contents(), size)
+    }
+
     /// Copy entire buffer to Float array
     ///
     /// - Warning: **Storage Mode**: This method requires `storageModeShared` or `storageModeManaged`.
@@ -297,6 +367,8 @@ public final class AudioBuffer {
     ///   GPU commands completed before calling this method. Use command buffer completion handlers
     ///   or fence-based synchronization. For managed storage, this method automatically calls
     ///   `synchronizeResource()` to ensure CPU sees the latest GPU writes.
+    ///
+    /// For safe GPU-synchronized reads, use `safeToArray(context:fenceValue:)` instead.
     public func toArray() -> [Float] {
         let count = sampleCount * channelCount
         guard count > 0 else { return [] }
@@ -312,6 +384,38 @@ public final class AudioBuffer {
             // Best practice: Use completion handlers to ensure GPU is done.
         }
         #endif
+
+        var result = [Float](repeating: 0, count: count)
+        result.withUnsafeMutableBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            memcpy(baseAddress, buffer.contents(), min(ptr.count, byteSize))
+        }
+        return result
+    }
+
+    /// Copy entire buffer to Float array with GPU synchronization
+    ///
+    /// This method waits for the GPU to complete any operations up to the specified
+    /// fence value before copying, ensuring safe access to GPU-written data.
+    ///
+    /// - Parameters:
+    ///   - context: Compute context for synchronization
+    ///   - fenceValue: GPU fence value to wait for before copying
+    ///   - timeout: Maximum time to wait for GPU (nil = use default timeout)
+    /// - Returns: Array of Float samples
+    /// - Throws: `MetalAudioError.gpuTimeout` if fence wait times out
+    public func safeToArray(
+        context: ComputeContext,
+        fenceValue: UInt64,
+        timeout: TimeInterval? = nil
+    ) throws -> [Float] {
+        let count = sampleCount * channelCount
+        guard count > 0 else { return [] }
+
+        // Wait for GPU to complete operations on this buffer
+        guard context.waitForGPU(fenceValue: fenceValue, timeout: timeout) else {
+            throw MetalAudioError.gpuTimeout(timeout ?? ComputeContext.defaultGPUTimeout)
+        }
 
         var result = [Float](repeating: 0, count: count)
         result.withUnsafeMutableBytes { ptr in

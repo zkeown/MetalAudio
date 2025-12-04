@@ -1,0 +1,70 @@
+name: Documentation Fix
+description: Report typos, unclear docs, or missing information
+labels: ["documentation", "tier-1", "claude-eligible"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Help us improve the documentation!
+
+        **Note:** This issue type is eligible for automated handling by Claude.
+        Simple fixes may be automatically merged after review.
+
+  - type: dropdown
+    id: doc-type
+    attributes:
+      label: Documentation Type
+      options:
+        - README.md
+        - CONTRIBUTING.md
+        - Code comments
+        - docs/ folder
+        - CHANGELOG.md
+        - Other markdown
+    validations:
+      required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: File/Section
+      description: Where is the issue located?
+      placeholder: "docs/ARCHITECTURE.md, section 'Thread Safety'"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: issue-type
+    attributes:
+      label: Issue Type
+      options:
+        - Typo/spelling
+        - Outdated information
+        - Missing information
+        - Unclear explanation
+        - Broken links
+        - Code example error
+    validations:
+      required: true
+
+  - type: textarea
+    id: current
+    attributes:
+      label: Current Text
+      description: Copy the problematic text (if applicable)
+
+  - type: textarea
+    id: suggested
+    attributes:
+      label: Suggested Fix
+      description: What should it say instead?
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope Confirmation
+      options:
+        - label: This is a documentation-only change (no code changes needed)
+          required: true

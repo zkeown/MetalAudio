@@ -1,0 +1,86 @@
+name: Auto Merge
+
+on:
+  pull_request_review:
+    types: [submitted]
+  check_suite:
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    # Only run for tier-1 PRs that have been approved
+    if: |
+      github.event_name == 'pull_request_review' &&
+      github.event.review.state == 'approved'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check tier eligibility
+        id: check-tier
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          LABELS=$(gh pr view $PR_NUMBER --repo ${{ github.repository }} --json labels --jq '.labels[].name' | tr '\n' ' ')
+
+          if echo "$LABELS" | grep -q "tier-1"; then
+            echo "eligible=true" >> $GITHUB_OUTPUT
+          else
+            echo "eligible=false" >> $GITHUB_OUTPUT
+            echo "Not a tier-1 PR, skipping auto-merge"
+          fi
+
+      - name: Check CI status
+        id: check-ci
+        if: steps.check-tier.outputs.eligible == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          # Get the status of required checks
+          STATUS=$(gh pr checks $PR_NUMBER --repo ${{ github.repository }} --json state --jq 'all(.state == "SUCCESS" or .state == "SKIPPED")')
+
+          if [ "$STATUS" = "true" ]; then
+            echo "ci-passed=true" >> $GITHUB_OUTPUT
+          else
+            echo "ci-passed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate GitHub App token
+        if: |
+          steps.check-tier.outputs.eligible == 'true' &&
+          steps.check-ci.outputs.ci-passed == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Auto-merge tier-1 PR
+        if: |
+          steps.check-tier.outputs.eligible == 'true' &&
+          steps.check-ci.outputs.ci-passed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+
+          # Final safety check - verify no code files changed
+          CODE_FILES=$(gh pr view $PR_NUMBER --repo ${{ github.repository }} --json files --jq '.files[].path' | grep -vE '\.(md|txt|json)$' | grep -v '^docs/' || true)
+
+          if [ -n "$CODE_FILES" ]; then
+            echo "Found non-documentation files, blocking auto-merge:"
+            echo "$CODE_FILES"
+            gh pr comment $PR_NUMBER --body "Auto-merge blocked: PR contains non-documentation changes. Requires human review."
+            gh pr edit $PR_NUMBER --add-label "needs-human"
+            exit 0
+          fi
+
+          # All checks passed, merge the PR
+          gh pr merge $PR_NUMBER --repo ${{ github.repository }} --squash --auto
+
+          echo "Tier-1 PR auto-merged successfully!"

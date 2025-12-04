@@ -550,7 +550,7 @@ final class BNNSStreamingInferenceFunctionalTests: XCTestCase {
         let zerosOutput = runPrediction(inference, input: zerosInput)
 
         // Reset state for fair comparison
-        inference.resetState()
+        try inference.resetState()
 
         // Second: non-zero input (sine wave pattern)
         let nonZeroInput = (0..<inference.inputElementCount).map { Float(sin(Double($0) * 0.1)) }
@@ -670,7 +670,7 @@ final class BNNSStreamingInferenceFunctionalTests: XCTestCase {
         for _ in 0..<5 {
             _ = runPrediction(inferenceB, input: input)  // Build up state
         }
-        inferenceB.resetState()  // Clear state
+        try inferenceB.resetState()  // Clear state
         let outputBAfterReset = runPrediction(inferenceB, input: input)
 
         // After reset, B should produce same output as fresh A
@@ -686,7 +686,7 @@ final class BNNSStreamingInferenceFunctionalTests: XCTestCase {
         // Reset multiple times without crash
         for i in 0..<5 {
             _ = runPrediction(inference, input: input)
-            inference.resetState()
+            try inference.resetState()
             let output = runPrediction(inference, input: input)
             XCTAssertFalse(output.contains(where: { $0.isNaN }), "Output after reset \(i) should not be NaN")
         }
@@ -707,7 +707,7 @@ final class BNNSStreamingInferenceFunctionalTests: XCTestCase {
         for _ in 0..<10 {
             _ = runPrediction(used, input: input)
         }
-        used.resetState()
+        try used.resetState()
 
         var usedOutputs: [[Float]] = []
         for _ in 0..<3 {
@@ -733,7 +733,7 @@ final class BNNSStreamingInferenceFunctionalTests: XCTestCase {
             _ = runPrediction(inference, input: inputA)
         }
 
-        inference.resetState()
+        try inference.resetState()
 
         // Sequence 2: input pattern B (should start fresh)
         let inputB = (0..<inference.inputElementCount).map { Float(99 - ($0 % 100)) * 0.01 }
@@ -756,7 +756,7 @@ final class BNNSStreamingInferenceFunctionalTests: XCTestCase {
         _ = runPrediction(inference, input: input)
         _ = runPrediction(inference, input: input)
 
-        inference.resetState()
+        try inference.resetState()
 
         // Long sequence (10 steps) - should work correctly
         for i in 0..<10 {

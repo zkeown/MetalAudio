@@ -1,0 +1,67 @@
+name: Simple Code Fix
+description: Request a straightforward code change with clear scope
+labels: ["enhancement", "tier-2", "claude-eligible"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for simple, well-defined code changes.
+
+        **Note:** This issue type is eligible for automated handling by Claude.
+        PRs will be created automatically but require human approval to merge.
+
+        **Not suitable for:**
+        - Architecture changes
+        - New features
+        - Performance optimization
+        - Thread safety changes
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What needs to change?
+      description: Describe the specific change needed
+      placeholder: "Add a `reset()` method to BiquadFilter that clears internal state"
+    validations:
+      required: true
+
+  - type: textarea
+    id: location
+    attributes:
+      label: File(s) Affected
+      description: List the specific file(s) that need changes
+      placeholder: |
+        - Sources/MetalDSP/Filters/BiquadFilter.swift
+        - Tests/MetalDSPTests/BiquadFilterTests.swift
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior After Fix
+      description: How should the code behave after this change?
+    validations:
+      required: true
+
+  - type: textarea
+    id: test
+    attributes:
+      label: How to Test
+      description: How can we verify the fix works?
+      placeholder: "Run `swift test --filter BiquadFilterTests.testReset`"
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope Confirmation
+      description: Please confirm this is a simple change
+      options:
+        - label: This changes fewer than 3 files
+          required: true
+        - label: This does NOT change any public API
+          required: true
+        - label: This does NOT involve thread safety or real-time code paths
+          required: true
+        - label: This does NOT require architectural decisions
+          required: true

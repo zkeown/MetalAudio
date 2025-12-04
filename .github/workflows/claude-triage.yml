@@ -1,0 +1,114 @@
+name: Claude Triage
+
+on:
+  issues:
+    types: [opened, labeled]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-budget:
+    runs-on: ubuntu-latest
+    outputs:
+      within-budget: ${{ steps.check.outputs.within-budget }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check monthly budget
+        id: check
+        run: |
+          if [ -f .github/budget-tracker.json ]; then
+            SPENT=$(cat .github/budget-tracker.json | jq -r '.month_total // 0')
+          else
+            SPENT=0
+          fi
+          # Budget limit: $20 (2000 cents) - reserve $5 for emergencies
+          if [ "$SPENT" -lt "2000" ]; then
+            echo "within-budget=true" >> $GITHUB_OUTPUT
+            echo "Budget OK: $SPENT cents spent"
+          else
+            echo "within-budget=false" >> $GITHUB_OUTPUT
+            echo "Budget exceeded: $SPENT cents spent"
+          fi
+
+  triage:
+    needs: check-budget
+    if: |
+      needs.check-budget.outputs.within-budget == 'true' &&
+      contains(github.event.issue.labels.*.name, 'claude-eligible')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Triage with Claude
+        uses: anthropics/claude-code-action@beta
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          model: claude-sonnet-4-20250514
+          prompt: |
+            You are triaging issue #${{ github.event.issue.number }}.
+
+            ## Issue Details
+            Title: ${{ github.event.issue.title }}
+            Labels: ${{ join(github.event.issue.labels.*.name, ', ') }}
+            Body:
+            ${{ github.event.issue.body }}
+
+            ## Your Task
+            Analyze this issue and determine if it can be handled automatically.
+
+            ### Tier Classification
+            - **Tier 1** (auto-mergeable): Documentation-only changes, typos, comment fixes
+            - **Tier 2** (auto-PR, human merge): Simple code fixes, < 3 files, no API changes
+            - **Tier 3** (research only): Features, architecture, performance, thread safety
+
+            ### Decision Criteria
+            ACCEPT if:
+            - The issue is clearly defined
+            - The scope is limited and verifiable
+            - No security implications
+            - Does not touch: Package.swift, .github/*, Shaders/*.metal, or files with os_unfair_lock/Sendable/@unchecked
+
+            REJECT if:
+            - Vague or unclear requirements
+            - Requires architectural decisions
+            - Touches thread safety or real-time audio paths
+            - Could have security implications
+            - Scope is too large (> 200 lines likely)
+
+            NEEDS_INFO if:
+            - Missing reproduction steps
+            - Ambiguous expected behavior
+            - File location unclear
+
+            ### Response Format
+            Respond with a comment that includes:
+            1. Your decision: ACCEPT, REJECT, or NEEDS_INFO
+            2. Tier classification (if ACCEPT): tier-1, tier-2, or tier-3
+            3. Brief reasoning (2-3 sentences)
+            4. If ACCEPT: outline the approach you'll take
+
+            Be concise. Do not be overly verbose.
+
+      - name: Record spend estimate
+        if: always()
+        run: |
+          # Estimate: ~$0.10 per triage
+          if [ -f .github/budget-tracker.json ]; then
+            CURRENT=$(cat .github/budget-tracker.json | jq -r '.month_total // 0')
+            NEW=$((CURRENT + 10))
+            echo "{\"month_total\": $NEW, \"last_updated\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > .github/budget-tracker.json
+          fi

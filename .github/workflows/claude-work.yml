@@ -1,0 +1,200 @@
+name: Claude Work
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  check-budget:
+    runs-on: ubuntu-latest
+    outputs:
+      within-budget: ${{ steps.check.outputs.within-budget }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check monthly budget
+        id: check
+        run: |
+          if [ -f .github/budget-tracker.json ]; then
+            SPENT=$(cat .github/budget-tracker.json | jq -r '.month_total // 0')
+          else
+            SPENT=0
+          fi
+          if [ "$SPENT" -lt "2000" ]; then
+            echo "within-budget=true" >> $GITHUB_OUTPUT
+          else
+            echo "within-budget=false" >> $GITHUB_OUTPUT
+          fi
+
+  check-rate-limit:
+    runs-on: ubuntu-latest
+    outputs:
+      within-limit: ${{ steps.check.outputs.within-limit }}
+    steps:
+      - name: Check daily PR limit
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Count PRs created by the bot today
+          TODAY=$(date -u +%Y-%m-%d)
+          COUNT=$(gh pr list --repo ${{ github.repository }} --author "app/github-actions" --json createdAt --jq "[.[] | select(.createdAt | startswith(\"$TODAY\"))] | length")
+          if [ "$COUNT" -lt "5" ]; then
+            echo "within-limit=true" >> $GITHUB_OUTPUT
+            echo "Daily limit OK: $COUNT PRs today"
+          else
+            echo "within-limit=false" >> $GITHUB_OUTPUT
+            echo "Daily limit reached: $COUNT PRs today"
+          fi
+
+  work:
+    needs: [check-budget, check-rate-limit]
+    if: |
+      needs.check-budget.outputs.within-budget == 'true' &&
+      needs.check-rate-limit.outputs.within-limit == 'true' &&
+      github.event.label.name == 'claude-approved'
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Create branch
+        id: branch
+        run: |
+          BRANCH="claude/${{ github.event.issue.number }}-$(echo '${{ github.event.issue.title }}' | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | head -c 30)"
+          git checkout -b "$BRANCH"
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Work on issue with Claude
+        uses: anthropics/claude-code-action@beta
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          model: claude-sonnet-4-20250514
+          prompt: |
+            You are working on issue #${{ github.event.issue.number }}.
+
+            ## Issue Details
+            Title: ${{ github.event.issue.title }}
+            Labels: ${{ join(github.event.issue.labels.*.name, ', ') }}
+            Body:
+            ${{ github.event.issue.body }}
+
+            ## Your Task
+            Implement a fix for this issue.
+
+            ### Constraints
+            - Read CLAUDE.md for project conventions
+            - Maximum 50 files, 10k lines of context
+            - Keep changes minimal and focused
+            - Add tests for code changes
+            - Update documentation if needed
+            - Do NOT modify: Package.swift, .github/*, Shaders/*.metal
+
+            ### Blocked Patterns (DO NOT TOUCH)
+            Files containing: os_unfair_lock, Sendable, @unchecked
+
+            ### Process
+            1. Understand the issue completely
+            2. Identify the minimal set of changes needed
+            3. Make the changes
+            4. Verify with `swift build` and `swift test`
+            5. If tests fail, fix them or report the issue
+
+            ### If You Get Stuck
+            Comment on the issue explaining:
+            - What you tried
+            - What blocked you
+            - What a human needs to do
+
+            Do NOT create a PR if you cannot verify the fix works.
+
+      - name: Run tests
+        id: test
+        continue-on-error: true
+        run: |
+          swift build
+          swift test
+
+      - name: Create PR if tests pass
+        if: steps.test.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          # Check if there are changes to commit
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No changes to commit"
+            gh issue comment ${{ github.event.issue.number }} --body "I analyzed this issue but found no changes were needed, or I was unable to implement a fix. Labeling for human review."
+            gh issue edit ${{ github.event.issue.number }} --add-label "needs-human"
+            exit 0
+          fi
+
+          # Determine tier from labels
+          TIER="tier-2"
+          if echo "${{ join(github.event.issue.labels.*.name, ' ') }}" | grep -q "tier-1"; then
+            TIER="tier-1"
+          fi
+
+          git config user.name "claude-bot"
+          git config user.email "claude-bot@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: resolve issue #${{ github.event.issue.number }}
+
+          ${{ github.event.issue.title }}
+
+          Automated fix by Claude Code."
+
+          git push origin ${{ steps.branch.outputs.branch }}
+
+          gh pr create \
+            --title "fix: ${{ github.event.issue.title }}" \
+            --body "## Summary
+
+          Automated fix for #${{ github.event.issue.number }}.
+
+          ## Changes
+
+          See diff for details.
+
+          ## Testing
+
+          - [x] \`swift build\` passes
+          - [x] \`swift test\` passes
+
+          ---
+          *This PR was automatically generated by Claude Code.*
+          *Tier: $TIER*" \
+            --label "claude-automation" \
+            --label "$TIER"
+
+      - name: Report failure
+        if: steps.test.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          gh issue comment ${{ github.event.issue.number }} --body "I attempted to fix this issue but tests are failing. Here's what I found:
+
+          - Branch: \`${{ steps.branch.outputs.branch }}\`
+          - Build/test failed
+
+          Labeling for human review."
+          gh issue edit ${{ github.event.issue.number }} --add-label "needs-human"

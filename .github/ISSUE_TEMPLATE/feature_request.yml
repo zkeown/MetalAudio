@@ -1,0 +1,75 @@
+name: Feature Request
+description: Propose a new feature or enhancement
+labels: ["enhancement", "tier-3", "needs-discussion"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature!
+
+        **Note:** Feature requests are complex and require human review.
+        Claude may research and provide analysis, but implementation requires maintainer approval.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: What problem does this feature solve?
+      placeholder: "Currently, there's no way to..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: How would you like this to work?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: What other approaches did you consider?
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: Target Module
+      options:
+        - MetalAudioKit
+        - MetalDSP
+        - MetalNN
+        - New module
+        - Multiple modules
+    validations:
+      required: true
+
+  - type: dropdown
+    id: breaking
+    attributes:
+      label: Breaking Change?
+      options:
+        - "No - purely additive"
+        - "Minor - deprecates existing API"
+        - "Yes - changes existing behavior"
+        - "Unknown"
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Any other information, mockups, or references?
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I'm willing to help implement this feature
+          required: false
+        - label: I've read the CONTRIBUTING.md guidelines
+          required: true

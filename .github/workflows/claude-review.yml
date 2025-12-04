@@ -1,0 +1,167 @@
+name: Claude Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check-eligibility:
+    runs-on: ubuntu-latest
+    outputs:
+      should-review: ${{ steps.check.outputs.should-review }}
+    steps:
+      - name: Check if Claude-generated PR
+        id: check
+        run: |
+          # Only review PRs created by Claude automation
+          if echo "${{ join(github.event.pull_request.labels.*.name, ' ') }}" | grep -q "claude-automation"; then
+            echo "should-review=true" >> $GITHUB_OUTPUT
+          else
+            echo "should-review=false" >> $GITHUB_OUTPUT
+          fi
+
+  check-budget:
+    runs-on: ubuntu-latest
+    outputs:
+      within-budget: ${{ steps.check.outputs.within-budget }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check monthly budget
+        id: check
+        run: |
+          if [ -f .github/budget-tracker.json ]; then
+            SPENT=$(cat .github/budget-tracker.json | jq -r '.month_total // 0')
+          else
+            SPENT=0
+          fi
+          if [ "$SPENT" -lt "2000" ]; then
+            echo "within-budget=true" >> $GITHUB_OUTPUT
+          else
+            echo "within-budget=false" >> $GITHUB_OUTPUT
+          fi
+
+  review:
+    needs: [check-eligibility, check-budget]
+    if: |
+      needs.check-eligibility.outputs.should-review == 'true' &&
+      needs.check-budget.outputs.within-budget == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Get PR diff stats
+        id: diff
+        run: |
+          LINES=$(gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }} | wc -l)
+          FILES=$(gh pr view ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --json files --jq '.files | length')
+          echo "lines=$LINES" >> $GITHUB_OUTPUT
+          echo "files=$FILES" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Check hard blocks
+        id: blocks
+        run: |
+          BLOCKED="false"
+          REASON=""
+
+          # Check diff size
+          if [ "${{ steps.diff.outputs.lines }}" -gt "200" ]; then
+            BLOCKED="true"
+            REASON="PR exceeds 200 line limit (${{ steps.diff.outputs.lines }} lines)"
+          fi
+
+          # Check for blocked files
+          BLOCKED_FILES=$(gh pr view ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --json files --jq '.files[].path' | grep -E '(Package\.swift|\.github/|Shaders/.*\.metal|SECURITY\.md)' || true)
+          if [ -n "$BLOCKED_FILES" ]; then
+            BLOCKED="true"
+            REASON="PR modifies protected files: $BLOCKED_FILES"
+          fi
+
+          echo "blocked=$BLOCKED" >> $GITHUB_OUTPUT
+          echo "reason=$REASON" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Block if necessary
+        if: steps.blocks.outputs.blocked == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --body "## Auto-Review Blocked
+
+          This PR cannot be auto-reviewed because: ${{ steps.blocks.outputs.reason }}
+
+          A human maintainer must review this PR."
+          gh pr edit ${{ github.event.pull_request.number }} --add-label "needs-human"
+          exit 0
+
+      - name: Review with Claude
+        if: steps.blocks.outputs.blocked != 'true'
+        uses: anthropics/claude-code-action@beta
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          model: claude-sonnet-4-20250514
+          prompt: |
+            You are reviewing PR #${{ github.event.pull_request.number }}.
+
+            ## PR Details
+            Title: ${{ github.event.pull_request.title }}
+            Labels: ${{ join(github.event.pull_request.labels.*.name, ', ') }}
+            Files changed: ${{ steps.diff.outputs.files }}
+            Lines changed: ${{ steps.diff.outputs.lines }}
+
+            ## Your Task
+            Review this PR as a second pair of eyes on Claude-generated code.
+
+            ### Review Checklist
+            1. Does the change match the linked issue?
+            2. Are there any obvious bugs or logic errors?
+            3. Are edge cases handled?
+            4. Is there adequate test coverage?
+            5. Does the code follow CLAUDE.md conventions?
+            6. Any security concerns?
+            7. Is the change minimal and focused?
+
+            ### Decision
+            - **APPROVE** if all checks pass and the change is correct
+            - **REQUEST_CHANGES** if there are issues that must be fixed
+            - **COMMENT** if you have suggestions but the PR is acceptable
+
+            ### For Tier 1 PRs (documentation only)
+            If this is a tier-1 PR (docs only), apply higher scrutiny but approve if:
+            - Changes are documentation-only
+            - No code logic changes
+            - Information is accurate
+
+            ### Response Format
+            Provide a brief review (3-5 bullet points max) and your decision.
+            Be specific about any issues found.
+
+      - name: Record spend estimate
+        if: always()
+        run: |
+          # Estimate: ~$0.25 per review
+          if [ -f .github/budget-tracker.json ]; then
+            CURRENT=$(cat .github/budget-tracker.json | jq -r '.month_total // 0')
+            NEW=$((CURRENT + 25))
+            echo "{\"month_total\": $NEW, \"last_updated\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > .github/budget-tracker.json
+          fi

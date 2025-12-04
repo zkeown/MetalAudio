@@ -143,6 +143,72 @@ See the [README](README.md) for detailed architecture docs.
 3. Performance-sensitive changes need benchmark data
 4. Breaking API changes need discussion first
 
+## Automated Issue Handling (Claude)
+
+This repository uses AI-assisted automation for certain issue types. Here's how it works:
+
+### Tier System
+
+| Tier | Issue Type | Automation Level |
+|------|------------|------------------|
+| **Tier 1** | Documentation fixes, typos | Auto-PR, auto-merge after review |
+| **Tier 2** | Simple code fixes (< 3 files) | Auto-PR, human merge required |
+| **Tier 3** | Features, architecture | Research only, human implementation |
+
+### What Gets Automated?
+
+**Tier 1** (fully automated):
+
+- Typo fixes in documentation
+- README/docs updates
+- Comment corrections
+- Changelog entries
+
+**Tier 2** (auto-PR, human approval):
+
+- Simple bug fixes with clear scope
+- Single-file changes
+- Test additions
+- Minor refactors
+
+**Tier 3** (research only):
+
+- New features
+- Performance optimization
+- Anything touching thread safety
+- Multi-module changes
+- Architecture decisions
+
+### Hard Blocks (Never Automated)
+
+These files/patterns are **never** touched by automation:
+
+- `Package.swift`, `Package.resolved`
+- `.github/` workflows
+- `**/*.metal` shaders
+- `SECURITY.md`
+- Code containing `os_unfair_lock`, `Sendable`, `@unchecked`
+
+### How to Use Issue Templates
+
+When opening an issue, select the appropriate template:
+
+- **Documentation Fix** → Tier 1, eligible for full automation
+- **Simple Code Fix** → Tier 2, auto-PR with human review
+- **Bug Report** → Tier 2-3, depending on complexity
+- **Feature Request** → Tier 3, research only
+
+### Opting Out
+
+Add the label `no-automation` to any issue to prevent Claude from processing it.
+
+### Budget & Rate Limits
+
+- Monthly budget: $25 (prevents runaway costs)
+- Max 5 PRs per day
+- 24-hour cooldown after failed attempts
+- All decisions logged in issue comments
+
 ## Community
 
 - Be respectful and constructive

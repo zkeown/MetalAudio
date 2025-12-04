@@ -1,0 +1,56 @@
+# Claude Automation Configuration
+# This file controls the behavior of the self-learning automation system
+
+# Tier 1: Auto-mergeable paths (documentation only)
+tier_1_paths:
+  - "*.md"
+  - "docs/**"
+  - "CHANGELOG.md"
+  - "LICENSE"
+
+# Paths that are NEVER auto-mergeable
+blocked_paths:
+  - "Package.swift"
+  - "Package.resolved"
+  - ".github/**"
+  - "**/*.metal"
+  - "SECURITY.md"
+
+# Patterns in file content that block auto-merge
+blocked_patterns:
+  - "os_unfair_lock"
+  - "@unchecked Sendable"
+  - "Sendable"
+  - "withUnsafe"
+  - "UnsafeMutablePointer"
+  - "UnsafeRawPointer"
+
+# Size limits
+max_diff_lines: 200
+max_files_changed: 10
+max_context_files: 50
+max_context_lines: 10000
+
+# Rate limits
+max_prs_per_day: 5
+max_concurrent_sessions: 3
+cooldown_after_failure_hours: 24
+
+# Budget (in cents)
+monthly_budget: 2500
+hard_stop_threshold: 2000
+emergency_reserve: 500
+
+# Model configuration
+default_model: "claude-sonnet-4-20250514"
+# Use opus only for complex architectural analysis (currently disabled)
+use_opus_for_complex: false
+
+# Feature flags
+auto_merge_enabled: true
+require_tests: true
+allow_tier_2_without_tests: false
+
+# Audit settings
+audit_all_decisions: true
+weekly_summary_enabled: true
