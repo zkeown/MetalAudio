@@ -1,6 +1,5 @@
 import Foundation
 import MetalAudioKit
-import MetalDSP
 
 /// A hybrid inference pipeline combining BNNS (for sequential ops) with Metal (for parallel ops)
 ///

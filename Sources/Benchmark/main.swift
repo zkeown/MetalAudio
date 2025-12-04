@@ -729,6 +729,83 @@ for cfg in batchedLinearConfigs {
     }
 }
 
+// MARK: - MPS vs Accelerate Crossover Benchmark
+
+if verboseOutput { print("\n--- MPS vs Accelerate Crossover Analysis ---") }
+
+// Test large matrices to find where MPS overtakes Accelerate
+// MPS has ~200-300µs command buffer overhead, so it needs enough compute to amortize
+let mpsCrossoverConfigs = [
+    (inFeatures: 2048, outFeatures: 2048, batch: 64, name: "2048×2048 b=64"),
+    (inFeatures: 2048, outFeatures: 2048, batch: 128, name: "2048×2048 b=128"),
+    (inFeatures: 4096, outFeatures: 4096, batch: 32, name: "4096×4096 b=32"),
+    (inFeatures: 4096, outFeatures: 4096, batch: 64, name: "4096×4096 b=64"),
+]
+
+// Store original threshold
+let originalMPSThreshold = Linear.mpsGPUThreshold
+
+for cfg in mpsCrossoverConfigs {
+    let linear = try! Linear(
+        device: device,
+        inputFeatures: cfg.inFeatures,
+        outputFeatures: cfg.outFeatures
+    )
+
+    let inputTensor = try! Tensor(device: device, shape: [cfg.batch, cfg.inFeatures])
+    inputTensor.fill(0.5)
+    let outputTensor = try! Tensor(device: device, shape: [cfg.batch, cfg.outFeatures])
+    let context = try! ComputeContext(device: device)
+
+    // Test Accelerate path (threshold = Int.max)
+    Linear.mpsGPUThreshold = Int.max
+
+    // Warmup Accelerate
+    for _ in 0..<5 {
+        try! context.executeSync { encoder in
+            try! linear.forward(input: inputTensor, output: outputTensor, encoder: encoder)
+        }
+    }
+
+    let iterations = 100
+    let (accelTotalMs, accelAvgUs) = measureTime(iterations) {
+        try! context.executeSync { encoder in
+            try! linear.forward(input: inputTensor, output: outputTensor, encoder: encoder)
+        }
+    }
+
+    // Test MPS path (threshold = 1 to force MPS)
+    Linear.mpsGPUThreshold = 1
+
+    // Warmup MPS
+    for _ in 0..<5 {
+        try! context.executeSync { encoder in
+            try! linear.forward(input: inputTensor, output: outputTensor, encoder: encoder)
+        }
+    }
+
+    let (mpsTotalMs, mpsAvgUs) = measureTime(iterations) {
+        try! context.executeSync { encoder in
+            try! linear.forward(input: inputTensor, output: outputTensor, encoder: encoder)
+        }
+    }
+
+    let speedup = accelAvgUs / mpsAvgUs
+    let winner = speedup > 1.0 ? "MPS" : "Accelerate"
+
+    recordResult(category: "MPS-Crossover", operation: "\(cfg.name) Accel", iterations: iterations, totalMs: accelTotalMs, avgUs: accelAvgUs, throughput: Double(iterations) / (accelTotalMs / 1000.0))
+    recordResult(category: "MPS-Crossover", operation: "\(cfg.name) MPS", iterations: iterations, totalMs: mpsTotalMs, avgUs: mpsAvgUs, throughput: Double(iterations) / (mpsTotalMs / 1000.0))
+
+    if verboseOutput {
+        print("  \(cfg.name):")
+        print("    Accelerate: \(String(format: "%9.1f", accelAvgUs)) µs")
+        print("    MPS:        \(String(format: "%9.1f", mpsAvgUs)) µs (\(String(format: "%.2f", speedup))x, \(winner) wins)")
+    }
+}
+
+// Restore original threshold
+Linear.mpsGPUThreshold = originalMPSThreshold
+
 // MARK: - Partitioned Convolution Benchmarks
 
 if verboseOutput { print("\n--- Partitioned Convolution (Long IRs) ---") }

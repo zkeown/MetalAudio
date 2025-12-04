@@ -228,6 +228,15 @@ public final class LSTM: NNLayer {
         }
     }
 
+    deinit {
+        // Clean up static dictionary entry to prevent stale data when
+        // a new LSTM instance gets allocated at the same memory address
+        let id = ObjectIdentifier(self)
+        os_unfair_lock_lock(&Self.budgetedMaxSequenceLock)
+        Self.budgetedMaxSequenceLengths.removeValue(forKey: id)
+        os_unfair_lock_unlock(&Self.budgetedMaxSequenceLock)
+    }
+
     /// Load weights for a specific layer and direction
     ///
     /// Thread-safe: Acquires internal lock to prevent races with `forward()` calls.

@@ -617,6 +617,29 @@ public final class FFT {
     }
 
     deinit {
+        // Acquire GPU resource lock to ensure any in-flight GPU operations complete
+        // before we release resources. This prevents use-after-free if another thread
+        // is in the middle of forwardGPU/inverseGPU when the FFT is deallocated.
+        //
+        // Note: In practice, Swift's ARC ensures `self` is retained during method calls,
+        // so this is defensive programming for edge cases like escaping closures or
+        // concurrent access patterns.
+        os_unfair_lock_lock(&gpuResourceLock)
+
+        // Clear GPU enabled flag to prevent any new operations (defensive)
+        gpuEnabled = false
+        mpsGraphEnabled = false
+
+        // Release lock before destroying resources (resources are deallocated after deinit)
+        os_unfair_lock_unlock(&gpuResourceLock)
+
+        // Acquire batch buffer lock for consistency
+        os_unfair_lock_lock(&batchBufferLock)
+        gpuBatchBuffer = nil
+        gpuBatchBufferCapacity = 0
+        os_unfair_lock_unlock(&batchBufferLock)
+
+        // Destroy vDSP setup (Accelerate FFT)
         if let setup = fftSetup {
             vDSP_DFT_DestroySetup(setup)
         }

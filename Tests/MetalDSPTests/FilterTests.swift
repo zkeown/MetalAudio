@@ -181,7 +181,8 @@ final class BiquadFilterExtendedTests: XCTestCase {
         let outputRMS = sqrt(output.map { $0 * $0 }.reduce(0, +) / Float(numSamples))
 
         // Allpass should preserve amplitude (within tolerance)
-        XCTAssertEqual(outputRMS, inputRMS, accuracy: 0.1, "Allpass should preserve amplitude")
+        // Note: RMS difference can exceed 0.1% due to transient response at filter startup
+        XCTAssertEqual(outputRMS, inputRMS, accuracy: 5e-3, "Allpass should preserve amplitude")
     }
 
     func testPeakingFilter() throws {
@@ -1010,7 +1011,7 @@ final class PeakingFilterExtendedTests: XCTestCase {
         let outputRMS = sqrt(output.map { $0 * $0 }.reduce(0, +) / Float(numSamples))
 
         // With unity gain, RMS should be approximately preserved
-        XCTAssertEqual(outputRMS, inputRMS, accuracy: inputRMS * 0.1,
+        XCTAssertEqual(outputRMS, inputRMS, accuracy: inputRMS * 0.01,
             "Unity gain peaking should preserve amplitude")
     }
 }

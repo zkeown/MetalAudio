@@ -295,7 +295,7 @@ final class FFTTests: XCTestCase {
         let hammingConfig = FFT.Config(size: size, windowType: .hamming)
         XCTAssertGreaterThan(hammingConfig.windowType.coefficient(at: 0, length: size), 0,
             "Hamming window should be > 0 at start")
-        XCTAssertEqual(hammingConfig.windowType.coefficient(at: size/2, length: size), 1, accuracy: 0.01,
+        XCTAssertEqual(hammingConfig.windowType.coefficient(at: size/2, length: size), 1, accuracy: 1e-5,
             "Hamming window should be near 1 at center")
 
         // Test Blackman window coefficients
@@ -859,7 +859,7 @@ final class FFTMPSGraphTests: XCTestCase {
         try inverseFFT.inverseMPSGraph(inputReal: real, inputImag: imag, output: &output)
 
         // Verify reconstruction (with tolerance for GPU precision)
-        let accuracy: Float = 0.01  // MPSGraph may have lower precision
+        let accuracy: Float = 1e-3  // MPSGraph has slightly lower precision than vDSP
         var maxError: Float = 0
         for i in 0..<size {
             maxError = max(maxError, abs(output[i] - input[i]))
@@ -1262,7 +1262,7 @@ final class FFTInverseAutoTests: XCTestCase {
         XCTAssertEqual(backend, .vdsp, "Small FFT should use vDSP")
         // DC component should result in constant value after inverse
         let avgOutput = output.reduce(0, +) / Float(fftSize)
-        XCTAssertEqual(avgOutput, 1.0, accuracy: 0.1, "DC should give constant output")
+        XCTAssertEqual(avgOutput, 1.0, accuracy: 1e-3, "DC should give constant output")
     }
 
     func testInverseAutoLargeSize() throws {
@@ -1309,8 +1309,8 @@ final class FFTInverseAutoTests: XCTestCase {
         let inputRMS = sqrt(input.map { $0 * $0 }.reduce(0, +) / Float(fftSize))
         let outputRMS = sqrt(reconstructed.map { $0 * $0 }.reduce(0, +) / Float(fftSize))
 
-        // RMS should be preserved within 10%
-        XCTAssertEqual(inputRMS, outputRMS, accuracy: inputRMS * 0.1, "RMS should be preserved")
+        // RMS should be preserved within 1%
+        XCTAssertEqual(inputRMS, outputRMS, accuracy: inputRMS * 0.01, "RMS should be preserved")
     }
 }
 
@@ -1726,7 +1726,7 @@ final class FFTEnergyConservationTests: XCTestCase {
         freqDomainEnergy /= Float(fftSize)  // Normalize
 
         // Energies should be approximately equal (within tolerance)
-        XCTAssertEqual(timeDomainEnergy, freqDomainEnergy, accuracy: timeDomainEnergy * 0.1,
+        XCTAssertEqual(timeDomainEnergy, freqDomainEnergy, accuracy: timeDomainEnergy * 0.01,
             "Energy should be conserved (Parseval's theorem)")
     }
 
@@ -1810,7 +1810,7 @@ final class FFTEnergyConservationTests: XCTestCase {
         // Other bins should be near zero
         for i in 1..<(fftSize/2) {
             let magnitude = sqrt(real[i] * real[i] + imag[i] * imag[i])
-            XCTAssertEqual(magnitude, 0, accuracy: 0.01,
+            XCTAssertEqual(magnitude, 0, accuracy: 1e-4,
                 "Non-DC bin \(i) should be near zero for DC input")
         }
     }
@@ -1957,5 +1957,367 @@ final class FFTWindowApplicationTests: XCTestCase {
         // (in some cases the window may not significantly change leakage)
         XCTAssertLessThanOrEqual(leakageHann, leakageNoWindow * 1.01,
             "Hann window should not increase spectral leakage significantly")
+    }
+}
+
+// MARK: - FFTError Description Tests
+
+final class FFTErrorDescriptionTests: XCTestCase {
+
+    func testInputTooShortDescription() {
+        let error = FFTError.inputTooShort(inputSize: 100, requiredSize: 256)
+        let description = error.errorDescription ?? ""
+
+        XCTAssertTrue(description.contains("100"), "Should mention input size")
+        XCTAssertTrue(description.contains("256"), "Should mention required size")
+        XCTAssertTrue(description.contains("shorter"), "Should describe the problem")
+    }
+
+    func testSizeTooLargeDescription() {
+        let error = FFTError.sizeTooLarge(requestedSize: 1000000, maxSize: 65536)
+        let description = error.errorDescription ?? ""
+
+        XCTAssertTrue(description.contains("1000000"), "Should mention requested size")
+        XCTAssertTrue(description.contains("65536"), "Should mention max size")
+        XCTAssertTrue(description.contains("exceeds"), "Should describe the problem")
+    }
+
+    func testSizeNotPowerOf2Description() {
+        let error = FFTError.sizeNotPowerOf2(size: 1000)
+        let description = error.errorDescription ?? ""
+
+        XCTAssertTrue(description.contains("1000"), "Should mention invalid size")
+        XCTAssertTrue(description.contains("power of 2"), "Should mention power of 2")
+        XCTAssertTrue(description.contains("256") || description.contains("512") || description.contains("1024"),
+            "Should give examples")
+    }
+
+    func testInvalidHopSizeDescription() {
+        let error = FFTError.invalidHopSize(hopSize: 0, fftSize: 1024)
+        let description = error.errorDescription ?? ""
+
+        XCTAssertTrue(description.contains("0"), "Should mention hop size")
+        XCTAssertTrue(description.contains("1024"), "Should mention FFT size")
+        XCTAssertTrue(description.contains("invalid"), "Should describe invalid")
+    }
+
+    func testBatchSizeOverflowDescription() {
+        let error = FFTError.batchSizeOverflow(batchSize: 10000, fftSize: 65536)
+        let description = error.errorDescription ?? ""
+
+        XCTAssertTrue(description.contains("10000"), "Should mention batch size")
+        XCTAssertTrue(description.contains("65536"), "Should mention FFT size")
+        XCTAssertTrue(description.contains("overflow"), "Should mention overflow")
+    }
+}
+
+// MARK: - FFT Memory Pressure Tests
+
+final class FFTMemoryPressureTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testDidReceiveMemoryPressureNormal() throws {
+        let fft = try FFT(device: device, config: .init(size: 1024))
+
+        // Should not crash on normal pressure
+        fft.didReceiveMemoryPressure(level: .normal)
+
+        // FFT should still work
+        var input = [Float](repeating: 1.0, count: 1024)
+        var real = [Float](repeating: 0, count: 1024)
+        var imag = [Float](repeating: 0, count: 1024)
+
+        input.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &real, outputImag: &imag)
+        }
+
+        // Verify output is valid
+        XCTAssertFalse(real[0].isNaN)
+    }
+
+    func testDidReceiveMemoryPressureWarning() throws {
+        let fft = try FFT(device: device, config: .init(size: 1024))
+
+        // Should not crash on warning pressure
+        fft.didReceiveMemoryPressure(level: .warning)
+
+        // FFT should still work
+        var input = [Float](repeating: 1.0, count: 1024)
+        var real = [Float](repeating: 0, count: 1024)
+        var imag = [Float](repeating: 0, count: 1024)
+
+        input.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &real, outputImag: &imag)
+        }
+
+        XCTAssertFalse(real[0].isNaN)
+    }
+
+    func testDidReceiveMemoryPressureCritical() throws {
+        let fft = try FFT(device: device, config: .init(size: 1024))
+
+        // Critical pressure should release GPU resources
+        fft.didReceiveMemoryPressure(level: .critical)
+
+        // FFT should still work (will use CPU fallback if needed)
+        var input = [Float](repeating: 1.0, count: 1024)
+        var real = [Float](repeating: 0, count: 1024)
+        var imag = [Float](repeating: 0, count: 1024)
+
+        input.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &real, outputImag: &imag)
+        }
+
+        XCTAssertFalse(real[0].isNaN)
+    }
+
+    func testReleaseGPUResources() throws {
+        let fft = try FFT(device: device, config: .init(size: 4096))
+
+        // Warm up GPU resources first
+        fft.warmup()
+
+        // Release GPU resources
+        fft.releaseGPUResources()
+
+        // FFT should still work (will reallocate or use CPU)
+        var input = [Float](repeating: 1.0, count: 4096)
+        var real = [Float](repeating: 0, count: 4096)
+        var imag = [Float](repeating: 0, count: 4096)
+
+        input.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &real, outputImag: &imag)
+        }
+
+        XCTAssertFalse(real[0].isNaN)
+    }
+}
+
+// MARK: - FFT Config Extended Tests
+
+final class FFTConfigExtendedTests: XCTestCase {
+
+    func testOverlapPercent() {
+        let config1 = FFT.Config(size: 1024, windowType: .hann, hopSize: 256)
+        XCTAssertEqual(config1.overlapPercent, 75)
+
+        let config2 = FFT.Config(size: 1024, windowType: .hann, hopSize: 512)
+        XCTAssertEqual(config2.overlapPercent, 50)
+
+        let config3 = FFT.Config(size: 1024, windowType: .hann, hopSize: 1024)
+        XCTAssertEqual(config3.overlapPercent, 0)
+    }
+
+    func testValidateCOLAPerfect() {
+        // Hann window with 75% overlap is perfect COLA
+        let config = FFT.Config(size: 1024, windowType: .hann, hopSize: 256)
+        let validation = config.validateCOLA()
+
+        XCTAssertTrue(validation.isValid)
+        XCTAssertEqual(validation.compliance, .perfect)
+        XCTAssertTrue(validation.message.contains("satisfies COLA"))
+    }
+
+    func testValidateCOLANearPerfect() {
+        // Hamming with standard hop is near-perfect
+        let config = FFT.Config(size: 1024, windowType: .hamming, hopSize: 512)
+        let validation = config.validateCOLA()
+
+        XCTAssertTrue(validation.isValid)
+        XCTAssertEqual(validation.compliance, .nearPerfect)
+        XCTAssertTrue(validation.message.contains("near-COLA"))
+    }
+
+    func testValidateCOLANonCompliant() {
+        // Hann with non-standard hop is non-compliant
+        let config = FFT.Config(size: 1024, windowType: .hann, hopSize: 300)
+        let validation = config.validateCOLA()
+
+        XCTAssertFalse(validation.isValid)
+        XCTAssertEqual(validation.compliance, .nonCompliant)
+        XCTAssertTrue(validation.message.contains("does not satisfy") || validation.message.contains("Suggested"))
+    }
+
+    func testDefaultHopSize() {
+        let config = FFT.Config(size: 1024)
+        XCTAssertEqual(config.hopSize, 256, "Default hop should be size/4")
+
+        let config2 = FFT.Config(size: 512)
+        XCTAssertEqual(config2.hopSize, 128)
+    }
+
+    func testMinimumHopSize() {
+        // Very small FFT size should still have valid hop
+        let config = FFT.Config(size: 4)
+        XCTAssertGreaterThan(config.hopSize, 0, "Hop size should be at least 1")
+    }
+}
+
+// MARK: - Window Type Extended Tests
+
+final class WindowTypeExtendedTests: XCTestCase {
+
+    func testWindowTypeNames() {
+        XCTAssertEqual(FFT.WindowType.none.name, "rectangular")
+        XCTAssertEqual(FFT.WindowType.hann.name, "Hann")
+        XCTAssertEqual(FFT.WindowType.hamming.name, "Hamming")
+        XCTAssertEqual(FFT.WindowType.blackman.name, "Blackman")
+    }
+
+    func testWindowCoefficientBounds() {
+        let windows: [FFT.WindowType] = [.none, .hann, .hamming, .blackman]
+        let length = 256
+
+        for window in windows {
+            for i in 0..<length {
+                let coeff = window.coefficient(at: i, length: length)
+                XCTAssertFalse(coeff.isNaN, "\(window.name) coefficient at \(i) should not be NaN")
+                XCTAssertFalse(coeff.isInfinite, "\(window.name) coefficient at \(i) should not be infinite")
+            }
+        }
+    }
+
+    func testRectangularWindowIsFlat() {
+        let window = FFT.WindowType.none
+        let length = 256
+
+        for i in 0..<length {
+            let coeff = window.coefficient(at: i, length: length)
+            XCTAssertEqual(coeff, 1.0, accuracy: 1e-6, "Rectangular window should be 1.0 everywhere")
+        }
+    }
+
+    func testHannWindowSymmetry() {
+        let window = FFT.WindowType.hann
+        let length = 256
+
+        for i in 0..<(length / 2) {
+            let left = window.coefficient(at: i, length: length)
+            let right = window.coefficient(at: length - 1 - i, length: length)
+            XCTAssertEqual(left, right, accuracy: 1e-5, "Hann window should be symmetric")
+        }
+    }
+
+    func testHannWindowCenter() {
+        let window = FFT.WindowType.hann
+        let length = 256
+
+        let centerCoeff = window.coefficient(at: length / 2, length: length)
+        let edgeCoeff = window.coefficient(at: 0, length: length)
+
+        // Center should be higher than edge
+        XCTAssertGreaterThan(centerCoeff, edgeCoeff, "Hann window should peak at center")
+    }
+}
+
+// MARK: - FFT Warmup Extended Tests
+
+final class FFTWarmupExtendedTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testWarmupSmallSize() throws {
+        let fft = try FFT(device: device, config: .init(size: 256))
+
+        // Should not crash
+        fft.warmup()
+
+        // FFT should work after warmup
+        var input = [Float](repeating: 1.0, count: 256)
+        var real = [Float](repeating: 0, count: 256)
+        var imag = [Float](repeating: 0, count: 256)
+
+        input.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &real, outputImag: &imag)
+        }
+
+        XCTAssertFalse(real[0].isNaN)
+    }
+
+    func testWarmupLargeSize() throws {
+        let fft = try FFT(device: device, config: .init(size: 8192))
+
+        // Should initialize GPU resources
+        fft.warmup()
+
+        // FFT should work after warmup
+        var input = [Float](repeating: 1.0, count: 8192)
+        var real = [Float](repeating: 0, count: 8192)
+        var imag = [Float](repeating: 0, count: 8192)
+
+        input.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &real, outputImag: &imag)
+        }
+
+        XCTAssertFalse(real[0].isNaN)
+    }
+
+    func testMultipleWarmupCalls() throws {
+        let fft = try FFT(device: device, config: .init(size: 1024))
+
+        // Multiple warmup calls should be safe
+        fft.warmup()
+        fft.warmup()
+        fft.warmup()
+
+        var input = [Float](repeating: 1.0, count: 1024)
+        var real = [Float](repeating: 0, count: 1024)
+        var imag = [Float](repeating: 0, count: 1024)
+
+        input.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &real, outputImag: &imag)
+        }
+
+        XCTAssertFalse(real[0].isNaN)
+    }
+}
+
+// MARK: - FFT Size Validation Tests
+
+final class FFTSizeValidationTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testValidPowerOf2Sizes() throws {
+        let validSizes = [64, 128, 256, 512, 1024, 2048, 4096, 8192]
+
+        for size in validSizes {
+            let fft = try FFT(device: device, config: .init(size: size))
+            XCTAssertNotNil(fft, "FFT with size \(size) should be created successfully")
+        }
+    }
+
+    func testSmallestValidSize() throws {
+        // Test smallest practical FFT sizes
+        let fft = try FFT(device: device, config: .init(size: 2))
+        XCTAssertNotNil(fft)
+    }
+
+    func testVeryLargeSize() throws {
+        // Test larger FFT size
+        let fft = try FFT(device: device, config: .init(size: 16384))
+
+        var input = [Float](repeating: 1.0, count: 16384)
+        var real = [Float](repeating: 0, count: 16384)
+        var imag = [Float](repeating: 0, count: 16384)
+
+        input.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &real, outputImag: &imag)
+        }
+
+        XCTAssertFalse(real[0].isNaN)
     }
 }

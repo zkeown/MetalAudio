@@ -113,9 +113,9 @@ final class ActivationTests: XCTestCase {
         }
 
         let result = output.toArray()
-        XCTAssertEqual(result[0], 0.0, accuracy: 0.01)  // sigmoid(-10) ≈ 0
-        XCTAssertEqual(result[1], 0.5, accuracy: 0.01)  // sigmoid(0) = 0.5
-        XCTAssertEqual(result[2], 1.0, accuracy: 0.01)  // sigmoid(10) ≈ 1
+        XCTAssertEqual(result[0], 0.0, accuracy: 1e-3)  // sigmoid(-10) ≈ 0
+        XCTAssertEqual(result[1], 0.5, accuracy: 1e-3)  // sigmoid(0) = 0.5
+        XCTAssertEqual(result[2], 1.0, accuracy: 1e-3)  // sigmoid(10) ≈ 1
     }
 
     func testTanh() throws {
@@ -132,9 +132,9 @@ final class ActivationTests: XCTestCase {
         }
 
         let result = output.toArray()
-        XCTAssertEqual(result[0], -1.0, accuracy: 0.01)  // tanh(-10) ≈ -1
-        XCTAssertEqual(result[1], 0.0, accuracy: 0.01)   // tanh(0) = 0
-        XCTAssertEqual(result[2], 1.0, accuracy: 0.01)   // tanh(10) ≈ 1
+        XCTAssertEqual(result[0], -1.0, accuracy: 1e-3)  // tanh(-10) ≈ -1
+        XCTAssertEqual(result[1], 0.0, accuracy: 1e-3)   // tanh(0) = 0
+        XCTAssertEqual(result[2], 1.0, accuracy: 1e-3)   // tanh(10) ≈ 1
     }
 }
 
@@ -191,11 +191,11 @@ final class ExtendedActivationTests: XCTestCase {
 
         // GELU(-2) ≈ -0.0454, GELU(-1) ≈ -0.158, GELU(0) = 0
         // GELU(1) ≈ 0.841, GELU(2) ≈ 1.954
-        XCTAssertEqual(result[0], -0.0454, accuracy: 0.01)
-        XCTAssertEqual(result[1], -0.158, accuracy: 0.01)
-        XCTAssertEqual(result[2], 0.0, accuracy: 0.01)
-        XCTAssertEqual(result[3], 0.841, accuracy: 0.01)
-        XCTAssertEqual(result[4], 1.954, accuracy: 0.01)
+        XCTAssertEqual(result[0], -0.0454, accuracy: 1e-3)
+        XCTAssertEqual(result[1], -0.158, accuracy: 1e-3)
+        XCTAssertEqual(result[2], 0.0, accuracy: 1e-3)
+        XCTAssertEqual(result[3], 0.841, accuracy: 1e-3)
+        XCTAssertEqual(result[4], 1.954, accuracy: 1e-3)
     }
 
     func testLeakyReLU() throws {
@@ -258,11 +258,11 @@ final class ExtendedActivationTests: XCTestCase {
         // Swish(x) = x * sigmoid(x)
         // Swish(-2) ≈ -0.238, Swish(-1) ≈ -0.269, Swish(0) = 0
         // Swish(1) ≈ 0.731, Swish(2) ≈ 1.762
-        XCTAssertEqual(result[0], -0.238, accuracy: 0.01)
-        XCTAssertEqual(result[1], -0.269, accuracy: 0.01)
-        XCTAssertEqual(result[2], 0.0, accuracy: 0.01)
-        XCTAssertEqual(result[3], 0.731, accuracy: 0.01)
-        XCTAssertEqual(result[4], 1.762, accuracy: 0.01)
+        XCTAssertEqual(result[0], -0.238, accuracy: 1e-3)
+        XCTAssertEqual(result[1], -0.269, accuracy: 1e-3)
+        XCTAssertEqual(result[2], 0.0, accuracy: 1e-3)
+        XCTAssertEqual(result[3], 0.731, accuracy: 1e-3)
+        XCTAssertEqual(result[4], 1.762, accuracy: 1e-3)
     }
 }
 
@@ -313,7 +313,7 @@ final class WeightInitializationTests: XCTestCase {
 
         // Mean should be approximately 0
         let mean = result.reduce(0, +) / Float(result.count)
-        XCTAssertEqual(mean, 0, accuracy: 0.1, "Xavier mean should be near 0")
+        XCTAssertEqual(mean, 0, accuracy: 0.05, "Xavier mean should be near 0")
     }
 
     func testHeInitialization() throws {
@@ -333,7 +333,7 @@ final class WeightInitializationTests: XCTestCase {
 
         // Mean should be approximately 0
         let mean = result.reduce(0, +) / Float(result.count)
-        XCTAssertEqual(mean, 0, accuracy: 0.1, "He mean should be near 0")
+        XCTAssertEqual(mean, 0, accuracy: 0.05, "He mean should be near 0")
     }
 
     func testUniformInitialization() throws {
@@ -349,7 +349,7 @@ final class WeightInitializationTests: XCTestCase {
 
         // Mean should be approximately 0 (center of range)
         let mean = result.reduce(0, +) / Float(result.count)
-        XCTAssertEqual(mean, 0, accuracy: 0.1, "Uniform mean should be near 0")
+        XCTAssertEqual(mean, 0, accuracy: 0.05, "Uniform mean should be near 0")
     }
 
     func testNormalInitialization() throws {
@@ -362,12 +362,12 @@ final class WeightInitializationTests: XCTestCase {
 
         // Compute sample mean
         let mean = result.reduce(0, +) / Float(result.count)
-        XCTAssertEqual(mean, targetMean, accuracy: 0.1, "Normal mean should be near target")
+        XCTAssertEqual(mean, targetMean, accuracy: 0.05, "Normal mean should be near target")
 
         // Compute sample standard deviation
         let variance = result.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Float(result.count)
         let std = sqrt(variance)
-        XCTAssertEqual(std, targetStd, accuracy: 0.1, "Normal std should be near target")
+        XCTAssertEqual(std, targetStd, accuracy: 0.05, "Normal std should be near target")
     }
 }
 
@@ -407,11 +407,11 @@ final class LayerNormTests: XCTestCase {
         // After normalization with default gamma=1, beta=0:
         // mean should be 0, std should be 1
         let mean = result.reduce(0, +) / Float(result.count)
-        XCTAssertEqual(mean, 0, accuracy: 0.01, "Normalized mean should be ~0")
+        XCTAssertEqual(mean, 0, accuracy: 1e-3, "Normalized mean should be ~0")
 
         let variance = result.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Float(result.count)
         let std = sqrt(variance)
-        XCTAssertEqual(std, 1, accuracy: 0.1, "Normalized std should be ~1")
+        XCTAssertEqual(std, 1, accuracy: 0.05, "Normalized std should be ~1")
     }
 
     func testLayerNormWithParameters() throws {
@@ -439,7 +439,7 @@ final class LayerNormTests: XCTestCase {
         // With gamma=2, beta=1: output = 2 * normalized + 1
         // Mean should be 1 (beta), not 0
         let mean = result.reduce(0, +) / Float(result.count)
-        XCTAssertEqual(mean, 1.0, accuracy: 0.1, "Mean should be shifted by beta")
+        XCTAssertEqual(mean, 1.0, accuracy: 0.05, "Mean should be shifted by beta")
     }
 }
 

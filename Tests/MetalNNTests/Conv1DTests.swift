@@ -140,7 +140,7 @@ final class Conv1DTests: XCTestCase {
         let expected: [Float] = [2.0, 3.0, 3.0, 3.0, 2.0]
 
         for i in 0..<expected.count {
-            XCTAssertEqual(result[i], expected[i], accuracy: 1e-4,
+            XCTAssertEqual(result[i], expected[i], accuracy: tolerance,
                 "Averaging kernel failed at index \(i)")
         }
     }
@@ -185,7 +185,7 @@ final class Conv1DTests: XCTestCase {
         ]
 
         for i in 0..<expected.count {
-            XCTAssertEqual(result[i], expected[i], accuracy: 1e-4,
+            XCTAssertEqual(result[i], expected[i], accuracy: tolerance,
                 "Bias test failed at index \(i)")
         }
     }
@@ -231,7 +231,7 @@ final class Conv1DTests: XCTestCase {
         let expected: [Float] = [5.0, 7.0, 9.0, -3.0, -3.0, -3.0]
 
         for i in 0..<expected.count {
-            XCTAssertEqual(result[i], expected[i], accuracy: 1e-4,
+            XCTAssertEqual(result[i], expected[i], accuracy: tolerance,
                 "Multi-channel test failed at index \(i)")
         }
     }
@@ -280,7 +280,7 @@ final class Conv1DTests: XCTestCase {
         let expected: [Float] = [6.0, 0.0, 9.0]
 
         for i in 0..<expected.count {
-            XCTAssertEqual(result[i], expected[i], accuracy: 1e-4,
+            XCTAssertEqual(result[i], expected[i], accuracy: tolerance,
                 "Dilation test failed at index \(i)")
         }
     }
@@ -332,7 +332,7 @@ final class Conv1DTests: XCTestCase {
         ]
 
         for i in 0..<expected.count {
-            XCTAssertEqual(result[i], expected[i], accuracy: 1e-4,
+            XCTAssertEqual(result[i], expected[i], accuracy: tolerance,
                 "Grouped conv test failed at index \(i)")
         }
     }
@@ -363,7 +363,7 @@ final class Conv1DTests: XCTestCase {
         }
 
         let result = output.toArray()
-        XCTAssertEqual(result[0], 6.0, accuracy: 1e-4)
+        XCTAssertEqual(result[0], 6.0, accuracy: tolerance)
     }
 
     func testConv1DLargeKernel() throws {

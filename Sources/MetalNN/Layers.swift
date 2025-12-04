@@ -178,7 +178,7 @@ public final class Linear: NNLayer {
     /// Internal lock for thread-safe access to static thresholds
     private static let thresholdLock = NSLock()
     private static var _mpsBatchThreshold: Int = 4
-    private static var _mpsGPUThreshold: Int = Int.max
+    private static var _mpsGPUThreshold: Int = 32  // MPS wins at 4096×4096 starting at batch 32
 
     /// Batch size threshold for batched Accelerate vs single-vector path.
     /// Thread-safe. Set during app initialization before inference begins.
@@ -198,12 +198,16 @@ public final class Linear: NNLayer {
     /// Batch size threshold for MPS GPU acceleration.
     /// Thread-safe. Set during app initialization before inference begins.
     ///
-    /// BENCHMARKING NOTE: On M4 Max, Accelerate's cblas_sgemm consistently outperforms
-    /// MPS for typical audio model matrix sizes (up to 2048x2048). MPS command buffer
-    /// overhead (~200-300µs) dominates. MPS only beneficial for:
-    /// - Very large matrices (4096+ dimensions)
-    /// - When amortized in larger MPS graphs
-    /// Set to Int.max to effectively disable MPS for normal audio workloads.
+    /// BENCHMARKING NOTE (M4 Max, 2024-12):
+    /// - For 2048×2048 matrices: Accelerate wins at all batch sizes (MPS is 0.72-0.79x slower)
+    /// - For 4096×4096 matrices: MPS wins at batch >= 32 (1.62x), batch >= 64 (2.09x)
+    ///
+    /// MPS is only used when BOTH conditions are met:
+    /// 1. batchSize >= mpsGPUThreshold (default: 32)
+    /// 2. matrix dimensions >= mpsMatrixThreshold (default: 4096)
+    ///
+    /// For typical audio models (< 4096 dimensions), Accelerate always wins.
+    /// Set mpsGPUThreshold to Int.max to disable MPS entirely.
     public static var mpsGPUThreshold: Int {
         get {
             thresholdLock.lock()
@@ -214,6 +218,24 @@ public final class Linear: NNLayer {
             thresholdLock.lock()
             defer { thresholdLock.unlock() }
             _mpsGPUThreshold = newValue
+        }
+    }
+
+    /// Matrix dimension threshold for MPS GPU acceleration.
+    /// MPS is only used when inputFeatures OR outputFeatures >= this threshold.
+    /// Thread-safe. Default: 4096 (based on M4 Max benchmarks).
+    private static var _mpsMatrixThreshold: Int = 4096
+
+    public static var mpsMatrixThreshold: Int {
+        get {
+            thresholdLock.lock()
+            defer { thresholdLock.unlock() }
+            return _mpsMatrixThreshold
+        }
+        set {
+            thresholdLock.lock()
+            defer { thresholdLock.unlock() }
+            _mpsMatrixThreshold = newValue
         }
     }
 
@@ -315,6 +337,7 @@ public final class Linear: NNLayer {
 
         // Validate input features dimension
         let inputFeatures = inputShape[0]
+        let outputFeatures = outputShape[0]
         let actualFeatures = input.shape.last ?? 0
         guard actualFeatures == inputFeatures else {
             throw MetalAudioError.bufferSizeMismatch(
@@ -326,12 +349,16 @@ public final class Linear: NNLayer {
         // Detect batch dimension: input shape [batchSize, inputFeatures] or just [inputFeatures]
         let batchSize = input.shape.count > 1 ? input.shape[0] : 1
 
-        // Route to appropriate backend based on batch size:
-        // - Very large batches (>= 64): MPS GPU acceleration (2-5x faster)
-        // - Medium batches (4-63): Accelerate batched GEMM
+        // Check if matrix is large enough to benefit from MPS
+        let matrixThreshold = Self.mpsMatrixThreshold
+        let isLargeMatrix = inputFeatures >= matrixThreshold || outputFeatures >= matrixThreshold
+
+        // Route to appropriate backend based on batch size and matrix size:
+        // - Large batches AND large matrices: MPS GPU acceleration (1.6-2x faster)
+        // - Medium batches (4+): Accelerate batched GEMM
         // - Small batches (1-3): Accelerate single-vector path
-        if batchSize >= Self.mpsGPUThreshold && mpsEnabled {
-            // MPS path for very large batches (2-5x faster due to GPU parallelism)
+        if batchSize >= Self.mpsGPUThreshold && isLargeMatrix && mpsEnabled {
+            // MPS path for large batches with large matrices (1.6-2x faster on 4096+ dimensions)
             try forwardMPS(input: input, output: output, batchSize: batchSize)
         } else if batchSize >= Self.mpsBatchThreshold {
             // Accelerate batched GEMM for medium batches (optimized on Apple Silicon)

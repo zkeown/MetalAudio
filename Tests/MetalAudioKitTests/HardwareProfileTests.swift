@@ -531,6 +531,217 @@ final class HardwareProfileSIMDTests: XCTestCase {
     }
 }
 
+// MARK: - GPUFamily Additional Tests
+
+final class GPUFamilyAdditionalTests: XCTestCase {
+
+    func testRecommendedMaxThreadsApple4() {
+        XCTAssertEqual(HardwareProfile.GPUFamily.apple4.recommendedMaxThreads, 128)
+    }
+
+    func testRecommendedMaxThreadsUnknown() {
+        XCTAssertEqual(HardwareProfile.GPUFamily.unknown.recommendedMaxThreads, 128)
+    }
+
+    func testRecommendedMaxThreadsApple5Plus() {
+        XCTAssertEqual(HardwareProfile.GPUFamily.apple5.recommendedMaxThreads, 256)
+        XCTAssertEqual(HardwareProfile.GPUFamily.apple6.recommendedMaxThreads, 256)
+        XCTAssertEqual(HardwareProfile.GPUFamily.apple7.recommendedMaxThreads, 256)
+        XCTAssertEqual(HardwareProfile.GPUFamily.apple8.recommendedMaxThreads, 256)
+        XCTAssertEqual(HardwareProfile.GPUFamily.apple9.recommendedMaxThreads, 256)
+        XCTAssertEqual(HardwareProfile.GPUFamily.mac2.recommendedMaxThreads, 256)
+    }
+
+    func testHasHardwareDAZApple4() {
+        XCTAssertFalse(HardwareProfile.GPUFamily.apple4.hasHardwareDAZ)
+        XCTAssertFalse(HardwareProfile.GPUFamily.unknown.hasHardwareDAZ)
+    }
+
+    func testHasHardwareDAZApple5Plus() {
+        XCTAssertTrue(HardwareProfile.GPUFamily.apple5.hasHardwareDAZ)
+        XCTAssertTrue(HardwareProfile.GPUFamily.apple6.hasHardwareDAZ)
+        XCTAssertTrue(HardwareProfile.GPUFamily.apple7.hasHardwareDAZ)
+        XCTAssertTrue(HardwareProfile.GPUFamily.apple8.hasHardwareDAZ)
+        XCTAssertTrue(HardwareProfile.GPUFamily.apple9.hasHardwareDAZ)
+        XCTAssertTrue(HardwareProfile.GPUFamily.mac2.hasHardwareDAZ)
+    }
+
+    func testApple4RawValue() {
+        XCTAssertEqual(HardwareProfile.GPUFamily.apple4.rawValue, 4)
+    }
+}
+
+// MARK: - DeviceType Additional Tests
+
+final class DeviceTypeAdditionalTests: XCTestCase {
+
+    func testALegacyThreshold() {
+        let threshold = HardwareProfile.DeviceType.aLegacy.recommendedGpuCpuThreshold
+        XCTAssertEqual(threshold, 16384, "A11 legacy should have highest threshold (heavily favor CPU)")
+    }
+
+    func testALegacyNotHighBandwidth() {
+        XCTAssertFalse(HardwareProfile.DeviceType.aLegacy.isHighBandwidth)
+    }
+}
+
+// MARK: - Threadgroup Size Tests
+
+final class ThreadgroupSizeTests: XCTestCase {
+
+    private func makeProfile(
+        gpuFamily: HardwareProfile.GPUFamily = .apple9,
+        maxThreads: Int = 1024
+    ) -> HardwareProfile {
+        return HardwareProfile(
+            gpuFamily: gpuFamily,
+            deviceType: .mBase,
+            deviceName: "Test Device",
+            hasUnifiedMemory: true,
+            maxBufferLength: 1024 * 1024 * 256,
+            recommendedWorkingSetSize: 1024 * 1024 * 256,
+            maxThreadsPerThreadgroup: maxThreads,
+            threadExecutionWidth: 32,
+            supports32BitFloatFiltering: true,
+            supportsSimdPermute: true,
+            supportsSimdReduction: true,
+            estimatedMemoryBandwidthGBps: 100
+        )
+    }
+
+    func testOptimal1DThreadgroupSizeDefault() {
+        let profile = makeProfile()
+        let size = profile.optimal1DThreadgroupSize(workloadSize: 1000)
+
+        // For workload 1000 with default preferred 256, should return 256
+        XCTAssertEqual(size, 256)
+    }
+
+    func testOptimal1DThreadgroupSizeLargeWorkload() {
+        let profile = makeProfile()
+        let size = profile.optimal1DThreadgroupSize(workloadSize: 100000)
+
+        XCTAssertEqual(size, 256)
+    }
+
+    func testOptimal1DThreadgroupSizeSmallWorkload() {
+        let profile = makeProfile()
+
+        // Workload smaller than preferred size should round to power of 2
+        let size = profile.optimal1DThreadgroupSize(workloadSize: 50)
+
+        // 50 should round up to 64 (next power of 2)
+        XCTAssertEqual(size, 64)
+    }
+
+    func testOptimal1DThreadgroupSizeVerySmallWorkload() {
+        let profile = makeProfile()
+
+        // Very small workload should still return at least 32
+        let size = profile.optimal1DThreadgroupSize(workloadSize: 10)
+        XCTAssertEqual(size, 32)
+    }
+
+    func testOptimal1DThreadgroupSizeZeroWorkload() {
+        let profile = makeProfile()
+
+        // Zero workload should return minimum of 32
+        let size = profile.optimal1DThreadgroupSize(workloadSize: 0)
+        XCTAssertEqual(size, 32)
+    }
+
+    func testOptimal1DThreadgroupSizeNegativeWorkload() {
+        let profile = makeProfile()
+
+        // Negative workload should return minimum of 32
+        let size = profile.optimal1DThreadgroupSize(workloadSize: -100)
+        XCTAssertEqual(size, 32)
+    }
+
+    func testOptimal1DThreadgroupSizeCustomPreferred() {
+        let profile = makeProfile()
+
+        let size = profile.optimal1DThreadgroupSize(workloadSize: 1000, preferredSize: 128)
+        XCTAssertEqual(size, 128)
+    }
+
+    func testOptimal1DThreadgroupSizeClampedByDevice() {
+        // Create profile with low max threads
+        let profile = makeProfile(maxThreads: 64)
+
+        let size = profile.optimal1DThreadgroupSize(workloadSize: 1000, preferredSize: 256)
+        XCTAssertEqual(size, 64, "Should be clamped by device maxThreadsPerThreadgroup")
+    }
+
+    func testOptimal1DThreadgroupSizeClampedByFamily() {
+        // Create profile with apple4 (which has recommendedMaxThreads of 128)
+        let profile = makeProfile(gpuFamily: .apple4, maxThreads: 1024)
+
+        let size = profile.optimal1DThreadgroupSize(workloadSize: 1000, preferredSize: 256)
+        XCTAssertEqual(size, 128, "Should be clamped by GPU family's recommendedMaxThreads")
+    }
+
+    func testOptimal1DThreadgroupSizePowerOf2Rounding() {
+        let profile = makeProfile()
+
+        // Various sizes should round to next power of 2
+        XCTAssertEqual(profile.optimal1DThreadgroupSize(workloadSize: 33), 64)
+        XCTAssertEqual(profile.optimal1DThreadgroupSize(workloadSize: 65), 128)
+        XCTAssertEqual(profile.optimal1DThreadgroupSize(workloadSize: 129), 256)
+    }
+
+    func testOptimal1DThreadgroupSizeExactPowerOf2() {
+        let profile = makeProfile()
+
+        // Exact power of 2 should return itself (if less than preferred)
+        XCTAssertEqual(profile.optimal1DThreadgroupSize(workloadSize: 64), 64)
+        XCTAssertEqual(profile.optimal1DThreadgroupSize(workloadSize: 128), 128)
+    }
+}
+
+// MARK: - ToleranceConfiguration A11/Legacy Tests
+
+final class ToleranceConfigurationLegacyTests: XCTestCase {
+
+    private func makeProfile(
+        gpuFamily: HardwareProfile.GPUFamily,
+        deviceType: HardwareProfile.DeviceType
+    ) -> HardwareProfile {
+        return HardwareProfile(
+            gpuFamily: gpuFamily,
+            deviceType: deviceType,
+            deviceName: "Test Device",
+            hasUnifiedMemory: true,
+            maxBufferLength: 1024 * 1024 * 256,
+            recommendedWorkingSetSize: 1024 * 1024 * 256,
+            maxThreadsPerThreadgroup: 1024,
+            threadExecutionWidth: 32,
+            supports32BitFloatFiltering: true,
+            supportsSimdPermute: gpuFamily >= .apple7,
+            supportsSimdReduction: gpuFamily >= .apple7,
+            estimatedMemoryBandwidthGBps: 25
+        )
+    }
+
+    func testOptimalForApple4() {
+        let profile = makeProfile(gpuFamily: .apple4, deviceType: .aLegacy)
+        let config = ToleranceConfiguration.optimal(for: profile)
+
+        // apple4 (A11) has its own case with conservative-ish settings
+        XCTAssertEqual(config.gpuCpuThreshold, HardwareProfile.DeviceType.aLegacy.recommendedGpuCpuThreshold)
+        XCTAssertEqual(config.maxInFlightBuffers, 2)
+    }
+
+    func testALegacyDeviceTypeThreshold() {
+        // When creating optimal config with aLegacy device type
+        let profile = makeProfile(gpuFamily: .apple5, deviceType: .aLegacy)
+        let config = ToleranceConfiguration.optimal(for: profile)
+
+        // gpuCpuThreshold should come from deviceType.recommendedGpuCpuThreshold
+        XCTAssertEqual(config.gpuCpuThreshold, HardwareProfile.DeviceType.aLegacy.recommendedGpuCpuThreshold)
+    }
+}
+
 // MARK: - ToleranceProvider Tests
 
 final class ToleranceProviderTests: XCTestCase {
