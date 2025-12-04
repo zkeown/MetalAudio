@@ -100,7 +100,10 @@ public final class Convolution {
         /// FFT-based convolution (best for medium kernels)
         case fft
         /// Partitioned convolution (best for long kernels like reverb IRs)
-        case partitioned(blockSize: Int)
+        /// - Parameters:
+        ///   - blockSize: Size of each partition block
+        ///   - useMPSGraphFFT: Use MPSGraph for FFT operations (faster for large blocks, but has first-call latency)
+        case partitioned(blockSize: Int, useMPSGraphFFT: Bool = false)
     }
 
     private let device: AudioDevice
@@ -116,12 +119,22 @@ public final class Convolution {
 
     // For partitioned convolution
     private var partitions: [(real: [Float], imag: [Float])] = []
-    private var inputBuffer: [[Float]] = []  // Ring buffer of input FFT blocks
+    private var inputBufferReal: [[Float]] = []  // Ring buffer of input FFT blocks (real part, split format)
+    private var inputBufferImag: [[Float]] = []  // Ring buffer of input FFT blocks (imag part, split format)
     private var blockSize: Int = 0
     private var partitionCount: Int = 0
     private var inputWriteIndex: Int = 0
     private var partitionOffsets: [Int] = []  // Pre-computed: offsets[p] = (partitionCount - p) % partitionCount
     private var stateLock = os_unfair_lock()  // Protects inputBuffer and inputWriteIndex modifications
+    private var useMPSGraphFFT: Bool = false  // Use MPSGraph for FFT (faster for large blocks)
+
+    // Work buffers for vectorized complex multiply-accumulate
+    private var workMulReal: [Float] = []  // Temporary for complex multiply result
+    private var workMulImag: [Float] = []
+
+    // Copy buffers for lock scope reduction (copy input data under lock, process without lock)
+    private var copyBufferReal: [[Float]] = []
+    private var copyBufferImag: [[Float]] = []
 
     // For direct convolution
     private var kernel: [Float] = []
@@ -170,8 +183,8 @@ public final class Convolution {
         case .fft:
             try setupFFTConvolution(kernel, expectedInputSize: expectedInputSize ?? kernel.count)
 
-        case .partitioned(let blockSize):
-            try setupPartitionedConvolution(kernel, blockSize: blockSize)
+        case .partitioned(let blockSize, let useMPSGraph):
+            try setupPartitionedConvolution(kernel, blockSize: blockSize, useMPSGraph: useMPSGraph)
         }
     }
 
@@ -215,7 +228,7 @@ public final class Convolution {
         }
     }
 
-    private func setupPartitionedConvolution(_ kernel: [Float], blockSize: Int) throws {
+    private func setupPartitionedConvolution(_ kernel: [Float], blockSize: Int, useMPSGraph: Bool = false) throws {
         // Validate block size
         guard blockSize > 0 else {
             throw MetalAudioError.invalidConfiguration("Block size must be positive, got \(blockSize)")
@@ -226,9 +239,16 @@ public final class Convolution {
 
         self.blockSize = blockSize
         self.fftSize = blockSize * 2
+        self.useMPSGraphFFT = useMPSGraph
 
         fft = try FFT(device: device, config: .init(size: fftSize, windowType: .none))
         inverseFft = try FFT(device: device, config: .init(size: fftSize, inverse: true, windowType: .none))
+
+        // Warm up MPSGraph if enabled (avoids first-call latency during processing)
+        if useMPSGraph {
+            fft?.warmup()
+            inverseFft?.warmup()
+        }
 
         // Pre-allocate working buffers for real-time safety
         workInputBlock = [Float](repeating: 0, count: fftSize)
@@ -237,6 +257,8 @@ public final class Convolution {
         workAccumReal = [Float](repeating: 0, count: fftSize)
         workAccumImag = [Float](repeating: 0, count: fftSize)
         workOutputBlock = [Float](repeating: 0, count: fftSize)
+        workMulReal = [Float](repeating: 0, count: fftSize)
+        workMulImag = [Float](repeating: 0, count: fftSize)
 
         // Partition the kernel into blocks
         partitionCount = (kernel.count + blockSize - 1) / blockSize
@@ -262,9 +284,15 @@ public final class Convolution {
             partitions.append((real: real, imag: imag))
         }
 
-        // Initialize input ring buffer
-        inputBuffer = [[Float]](repeating: [Float](repeating: 0, count: fftSize * 2), count: partitionCount)
+        // Initialize input ring buffer (split format for vectorized complex multiply)
+        inputBufferReal = [[Float]](repeating: [Float](repeating: 0, count: fftSize), count: partitionCount)
+        inputBufferImag = [[Float]](repeating: [Float](repeating: 0, count: fftSize), count: partitionCount)
         inputWriteIndex = 0
+
+        // Pre-allocate copy buffers for lock scope reduction
+        // These allow us to copy input data under lock, then process without lock held
+        copyBufferReal = [[Float]](repeating: [Float](repeating: 0, count: fftSize), count: partitionCount)
+        copyBufferImag = [[Float]](repeating: [Float](repeating: 0, count: fftSize), count: partitionCount)
 
         // Pre-compute partition offsets to avoid modulo computation per partition in hot path
         // offsets[p] = (partitionCount - p) % partitionCount
@@ -330,7 +358,7 @@ public final class Convolution {
         switch mode {
         case .fft:
             return expectedInputSize
-        case .direct, .partitioned:
+        case .direct, .partitioned(_, _):
             return 0  // No practical limit
         }
     }
@@ -464,48 +492,120 @@ public final class Convolution {
             }
 
             // FFT of input block using pre-allocated buffers
-            workInputBlock.withUnsafeBufferPointer { ptr in
-                fft.forward(input: ptr.baseAddress!, outputReal: &workInputReal, outputImag: &workInputImag)
+            // Use MPSGraph FFT when enabled (faster for large block sizes)
+            if useMPSGraphFFT {
+                _ = try? fft.forwardAuto(input: workInputBlock, outputReal: &workInputReal, outputImag: &workInputImag)
+            } else {
+                workInputBlock.withUnsafeBufferPointer { ptr in
+                    fft.forward(input: ptr.baseAddress!, outputReal: &workInputReal, outputImag: &workInputImag)
+                }
             }
 
-            // Store in ring buffer (interleaved real/imag)
+            // Store in ring buffer (split format for vectorized operations)
             // Lock protects concurrent access to inputBuffer and inputWriteIndex
             os_unfair_lock_lock(&stateLock)
             let currentWriteIndex = inputWriteIndex
-            for i in 0..<fftSize {
-                inputBuffer[currentWriteIndex][i * 2] = workInputReal[i]
-                inputBuffer[currentWriteIndex][i * 2 + 1] = workInputImag[i]
+            // Use memcpy for fast buffer copy (split format)
+            inputBufferReal[currentWriteIndex].withUnsafeMutableBufferPointer { dst in
+                workInputReal.withUnsafeBufferPointer { src in
+                    memcpy(dst.baseAddress!, src.baseAddress!, fftSize * MemoryLayout<Float>.stride)
+                }
             }
-            os_unfair_lock_unlock(&stateLock)
-
-            // Reset accumulators (using pre-allocated buffers)
-            for i in 0..<fftSize {
-                workAccumReal[i] = 0
-                workAccumImag[i] = 0
-            }
-
-            // Accumulate convolution across all partitions
-            // Using pre-computed offsets with conditional subtraction instead of modulo
-            // (conditional is ~20x faster than integer division for modulo)
-            // Lock protects reading from inputBuffer which may be modified by memory pressure handler
-            os_unfair_lock_lock(&stateLock)
-            for p in 0..<partitionCount {
-                var bufferIdx = currentWriteIndex + partitionOffsets[p]
-                if bufferIdx >= partitionCount { bufferIdx -= partitionCount }
-                let partition = partitions[p]
-
-                for i in 0..<fftSize {
-                    let inReal = inputBuffer[bufferIdx][i * 2]
-                    let inImag = inputBuffer[bufferIdx][i * 2 + 1]
-
-                    workAccumReal[i] += inReal * partition.real[i] - inImag * partition.imag[i]
-                    workAccumImag[i] += inReal * partition.imag[i] + inImag * partition.real[i]
+            inputBufferImag[currentWriteIndex].withUnsafeMutableBufferPointer { dst in
+                workInputImag.withUnsafeBufferPointer { src in
+                    memcpy(dst.baseAddress!, src.baseAddress!, fftSize * MemoryLayout<Float>.stride)
                 }
             }
             os_unfair_lock_unlock(&stateLock)
 
+            // Reset accumulators using vDSP_vclr (vectorized zero-fill)
+            vDSP_vclr(&workAccumReal, 1, vDSP_Length(fftSize))
+            vDSP_vclr(&workAccumImag, 1, vDSP_Length(fftSize))
+
+            // OPTIMIZATION: Reduced lock scope with copy-out pattern
+            // Copy input buffer data under lock (fast memcpy), then process without lock held.
+            // This reduces lock contention from O(partitionCount * fftSize * 7 vDSP calls) to O(partitionCount * memcpy)
+            os_unfair_lock_lock(&stateLock)
+            for p in 0..<partitionCount {
+                var bufferIdx = currentWriteIndex + partitionOffsets[p]
+                if bufferIdx >= partitionCount { bufferIdx -= partitionCount }
+                // Fast memcpy to copy buffers
+                copyBufferReal[p].withUnsafeMutableBufferPointer { dst in
+                    inputBufferReal[bufferIdx].withUnsafeBufferPointer { src in
+                        memcpy(dst.baseAddress!, src.baseAddress!, fftSize * MemoryLayout<Float>.stride)
+                    }
+                }
+                copyBufferImag[p].withUnsafeMutableBufferPointer { dst in
+                    inputBufferImag[bufferIdx].withUnsafeBufferPointer { src in
+                        memcpy(dst.baseAddress!, src.baseAddress!, fftSize * MemoryLayout<Float>.stride)
+                    }
+                }
+            }
+            os_unfair_lock_unlock(&stateLock)
+
+            // OPTIMIZATION: Use vDSP_zvmul for complex multiply (replaces 5 vDSP calls with 1)
+            // Complex multiply: (a+bi)(c+di) = (ac-bd) + (ad+bc)i
+            // vDSP_zvmul performs this in a single vectorized call using DSPSplitComplex format
+            workMulReal.withUnsafeMutableBufferPointer { mulRealBuf in
+                workMulImag.withUnsafeMutableBufferPointer { mulImagBuf in
+                    workAccumReal.withUnsafeMutableBufferPointer { accumRealBuf in
+                        workAccumImag.withUnsafeMutableBufferPointer { accumImagBuf in
+                            guard let mulReal = mulRealBuf.baseAddress,
+                                  let mulImag = mulImagBuf.baseAddress,
+                                  let accumReal = accumRealBuf.baseAddress,
+                                  let accumImag = accumImagBuf.baseAddress else { return }
+
+                            var mulComplex = DSPSplitComplex(realp: mulReal, imagp: mulImag)
+                            let n = vDSP_Length(fftSize)
+
+                            // Process without lock - all data is in copyBuffer now
+                            for p in 0..<partitionCount {
+                                let partition = partitions[p]
+
+                                copyBufferReal[p].withUnsafeBufferPointer { inRealPtr in
+                                    copyBufferImag[p].withUnsafeBufferPointer { inImagPtr in
+                                        partition.real.withUnsafeBufferPointer { partRealPtr in
+                                            partition.imag.withUnsafeBufferPointer { partImagPtr in
+                                                guard let inReal = inRealPtr.baseAddress,
+                                                      let inImag = inImagPtr.baseAddress,
+                                                      let partReal = partRealPtr.baseAddress,
+                                                      let partImag = partImagPtr.baseAddress else { return }
+
+                                                // Create DSPSplitComplex views for vDSP_zvmul
+                                                var inputComplex = DSPSplitComplex(
+                                                    realp: UnsafeMutablePointer(mutating: inReal),
+                                                    imagp: UnsafeMutablePointer(mutating: inImag)
+                                                )
+                                                var partitionComplex = DSPSplitComplex(
+                                                    realp: UnsafeMutablePointer(mutating: partReal),
+                                                    imagp: UnsafeMutablePointer(mutating: partImag)
+                                                )
+
+                                                // Single call replaces 5 vDSP calls:
+                                                // vDSP_zvmul: mulComplex = inputComplex * partitionComplex
+                                                // conjugate = 1 for standard complex multiply (not conjugate)
+                                                vDSP_zvmul(&inputComplex, 1, &partitionComplex, 1, &mulComplex, 1, n, 1)
+
+                                                // Accumulate result (2 vDSP calls, down from 7 total)
+                                                vDSP_vadd(accumReal, 1, mulReal, 1, accumReal, 1, n)
+                                                vDSP_vadd(accumImag, 1, mulImag, 1, accumImag, 1, n)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Inverse FFT using cached instance and pre-allocated output buffer
-            inverseFft.inverse(inputReal: workAccumReal, inputImag: workAccumImag, output: &workOutputBlock)
+            // Use MPSGraph FFT when enabled (faster for large block sizes)
+            if useMPSGraphFFT {
+                _ = try? inverseFft.inverseAuto(inputReal: workAccumReal, inputImag: workAccumImag, output: &workOutputBlock)
+            } else {
+                inverseFft.inverse(inputReal: workAccumReal, inputImag: workAccumImag, output: &workOutputBlock)
+            }
 
             // Overlap-add to output using vectorized vDSP_vadd (3-5x faster than scalar loop)
             let outputOffset = block * blockSize
@@ -537,7 +637,10 @@ public final class Convolution {
     /// Reset internal state (for partitioned convolution)
     public func reset() {
         os_unfair_lock_lock(&stateLock)
-        inputBuffer = [[Float]](repeating: [Float](repeating: 0, count: fftSize * 2), count: partitionCount)
+        inputBufferReal = [[Float]](repeating: [Float](repeating: 0, count: fftSize), count: partitionCount)
+        inputBufferImag = [[Float]](repeating: [Float](repeating: 0, count: fftSize), count: partitionCount)
+        copyBufferReal = [[Float]](repeating: [Float](repeating: 0, count: fftSize), count: partitionCount)
+        copyBufferImag = [[Float]](repeating: [Float](repeating: 0, count: fftSize), count: partitionCount)
         inputWriteIndex = 0
         os_unfair_lock_unlock(&stateLock)
     }

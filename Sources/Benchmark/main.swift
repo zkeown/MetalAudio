@@ -1,10 +1,88 @@
 // MetalAudio Performance Benchmark
 // Run with: swift run Benchmark
+// CSV output: swift run Benchmark --csv
 
 import Foundation
+import Dispatch
 import MetalAudioKit
 import MetalDSP
 import MetalNN
+
+// MARK: - Command Line Arguments
+
+enum OutputFormat {
+    case console
+    case csv
+    case json
+    case markdown
+}
+
+let csvMode = CommandLine.arguments.contains("--csv")
+let jsonMode = CommandLine.arguments.contains("--json")
+let markdownMode = CommandLine.arguments.contains("--markdown")
+let quickMode = CommandLine.arguments.contains("--quick")
+
+// Memory benchmark flags
+let memoryMode = CommandLine.arguments.contains("--memory")
+let memoryOnlyMode = CommandLine.arguments.contains("--memory-only")
+let pressureTest = CommandLine.arguments.contains("--pressure-test")
+
+// Parse filter option (e.g., --filter FFT)
+var filterCategory: String? = nil
+if let filterIdx = CommandLine.arguments.firstIndex(of: "--filter"),
+   filterIdx + 1 < CommandLine.arguments.count {
+    filterCategory = CommandLine.arguments[filterIdx + 1]
+}
+
+let outputFormat: OutputFormat = {
+    if jsonMode { return .json }
+    if markdownMode { return .markdown }
+    if csvMode { return .csv }
+    return .console
+}()
+
+// Whether to print progress to console (only in console mode)
+let verboseOutput = outputFormat == .console
+
+// Iteration multiplier for quick mode (reduced iterations)
+let iterationMultiplier: Double = quickMode ? 0.1 : 1.0
+
+func adjustedIterations(_ base: Int) -> Int {
+    max(1, Int(Double(base) * iterationMultiplier))
+}
+
+// MARK: - Benchmark Result Collection
+
+struct BenchmarkResult {
+    let category: String
+    let operation: String
+    let iterations: Int
+    let totalMs: Double
+    let avgUs: Double
+    let throughput: Double?  // operations/sec if applicable
+    let extra: String?  // additional info like "µs/timestep"
+}
+
+var benchmarkResults: [BenchmarkResult] = []
+
+// Memory benchmark results
+struct MemoryBenchmarkResult {
+    let category: String
+    let operation: String
+    let iterations: Int
+    let totalMs: Double
+    let avgUs: Double
+    let memoryDeltaMB: Double
+    let peakGPUMB: Double
+    let peakProcessMB: Double
+    let leakDetected: Bool
+    let warnings: [MemoryWarning]
+}
+
+var memoryBenchmarkResults: [MemoryBenchmarkResult] = []
+
+// Memory tracker instance (lazy init if memory mode enabled)
+var memoryTracker: MemoryTracker?
 
 func measureTime(_ iterations: Int, _ block: () -> Void) -> (totalMs: Double, avgUs: Double) {
     let start = DispatchTime.now()
@@ -18,20 +96,43 @@ func measureTime(_ iterations: Int, _ block: () -> Void) -> (totalMs: Double, av
     return (totalMs, avgUs)
 }
 
-print("MetalAudio Performance Benchmarks")
-print("==================================")
-print("Device: \(ProcessInfo.processInfo.hostName)")
-print("")
+func recordResult(category: String, operation: String, iterations: Int, totalMs: Double, avgUs: Double, throughput: Double? = nil, extra: String? = nil) {
+    benchmarkResults.append(BenchmarkResult(
+        category: category, operation: operation, iterations: iterations,
+        totalMs: totalMs, avgUs: avgUs, throughput: throughput, extra: extra
+    ))
+}
+
+func printCSV() {
+    print("category,operation,iterations,total_ms,avg_us,throughput_per_sec,extra")
+    for r in benchmarkResults {
+        let throughputStr = r.throughput.map { String(format: "%.1f", $0) } ?? ""
+        let extraStr = r.extra ?? ""
+        // Escape any commas in operation name
+        let safeOperation = r.operation.replacingOccurrences(of: ",", with: ";")
+        print("\(r.category),\(safeOperation),\(r.iterations),\(String(format: "%.2f", r.totalMs)),\(String(format: "%.2f", r.avgUs)),\(throughputStr),\(extraStr)")
+    }
+}
+
+if verboseOutput {
+    print("MetalAudio Performance Benchmarks")
+    print("==================================")
+    print("Device: \(ProcessInfo.processInfo.hostName)")
+    print("")
+}
 
 let device = try! AudioDevice()
-print("GPU: \(device.name)")
-print("Max Threads/Threadgroup: \(device.maxThreadsPerThreadgroup)")
-print("Unified Memory: \(device.hasUnifiedMemory)")
-print("")
+
+if verboseOutput {
+    print("GPU: \(device.name)")
+    print("Max Threads/Threadgroup: \(device.maxThreadsPerThreadgroup)")
+    print("Unified Memory: \(device.hasUnifiedMemory)")
+    print("")
+}
 
 // MARK: - FFT Benchmarks (Accelerate)
 
-print("--- FFT (Accelerate/vDSP) ---")
+if verboseOutput { print("--- FFT (Accelerate/vDSP) ---") }
 let fftSizes = [256, 512, 1024, 2048, 4096]
 
 for size in fftSizes {
@@ -48,12 +149,15 @@ for size in fftSizes {
     }
 
     let throughput = Double(iterations) / (totalMs / 1000.0)
-    print("  Size \(String(format: "%5d", size)): \(String(format: "%7.1f", throughput)) FFTs/sec, \(String(format: "%6.2f", avgUs)) µs/FFT")
+    recordResult(category: "FFT-vDSP", operation: "size=\(size)", iterations: iterations, totalMs: totalMs, avgUs: avgUs, throughput: throughput)
+    if verboseOutput {
+        print("  Size \(String(format: "%5d", size)): \(String(format: "%7.1f", throughput)) FFTs/sec, \(String(format: "%6.2f", avgUs)) µs/FFT")
+    }
 }
 
 // MARK: - GPU FFT Benchmarks
 
-print("\n--- FFT (GPU with pre-computed twiddles) ---")
+if verboseOutput { print("\n--- FFT (GPU with pre-computed twiddles) ---") }
 let gpuSizes = [1024, 2048, 4096, 8192, 16384]
 
 for size in gpuSizes {
@@ -73,13 +177,16 @@ for size in gpuSizes {
     }
 
     let throughput = Double(iterations) / (totalMs / 1000.0)
-    print("  Size \(String(format: "%5d", size)): \(String(format: "%7.1f", throughput)) FFTs/sec, \(String(format: "%7.1f", avgUs)) µs/FFT")
+    recordResult(category: "FFT-GPU", operation: "size=\(size)", iterations: iterations, totalMs: totalMs, avgUs: avgUs, throughput: throughput)
+    if verboseOutput {
+        print("  Size \(String(format: "%5d", size)): \(String(format: "%7.1f", throughput)) FFTs/sec, \(String(format: "%7.1f", avgUs)) µs/FFT")
+    }
 }
 
 // MARK: - MPSGraph FFT Benchmarks
 
 if #available(macOS 14.0, iOS 17.0, *) {
-    print("\n--- FFT (MPSGraph - iOS 17+/macOS 14+) ---")
+    if verboseOutput { print("\n--- FFT (MPSGraph - iOS 17+/macOS 14+) ---") }
 
     for size in [2048, 4096, 8192] {
         let fft = try! FFT(device: device, config: FFT.Config(size: size))
@@ -96,13 +203,93 @@ if #available(macOS 14.0, iOS 17.0, *) {
         }
 
         let throughput = Double(iterations) / (totalMs / 1000.0)
-        print("  Size \(String(format: "%5d", size)): \(String(format: "%7.1f", throughput)) FFTs/sec, \(String(format: "%7.1f", avgUs)) µs/FFT")
+        recordResult(category: "FFT-MPSGraph", operation: "size=\(size)", iterations: iterations, totalMs: totalMs, avgUs: avgUs, throughput: throughput)
+        if verboseOutput {
+            print("  Size \(String(format: "%5d", size)): \(String(format: "%7.1f", throughput)) FFTs/sec, \(String(format: "%7.1f", avgUs)) µs/FFT")
+        }
     }
+}
+
+// MARK: - CPU/GPU Crossover Analysis
+
+if verboseOutput { print("\n--- CPU/GPU Crossover Analysis ---") }
+
+// Test same sizes across vDSP, GPU, and MPSGraph to find optimal thresholds
+let crossoverSizes = [512, 1024, 2048, 4096, 8192]
+
+struct CrossoverResult {
+    let size: Int
+    var vdspUs: Double = 0
+    var gpuUs: Double = 0
+    var mpsGraphUs: Double = 0
+
+    var recommendation: String {
+        let minUs = min(vdspUs, gpuUs, mpsGraphUs > 0 ? mpsGraphUs : Double.greatestFiniteMagnitude)
+        if minUs == vdspUs { return "vDSP" }
+        if minUs == mpsGraphUs { return "MPSGraph" }
+        return "GPU"
+    }
+}
+
+var crossoverResults: [CrossoverResult] = []
+
+for size in crossoverSizes {
+    var result = CrossoverResult(size: size)
+    let fft = try! FFT(device: device, config: FFT.Config(size: size))
+    let input = (0..<size).map { Float(sin(Double($0) * 0.1)) }
+    var outputReal = [Float](repeating: 0, count: size)
+    var outputImag = [Float](repeating: 0, count: size)
+
+    // vDSP timing
+    let vdspIterations = 5000
+    let (_, vdspUs) = measureTime(vdspIterations) {
+        input.withUnsafeBufferPointer { ptr in
+            fft.forward(input: ptr.baseAddress!, outputReal: &outputReal, outputImag: &outputImag)
+        }
+    }
+    result.vdspUs = vdspUs
+
+    // GPU timing
+    var gpuInput = [Float](repeating: 0, count: size * 2)
+    var gpuOutput = [Float](repeating: 0, count: size * 2)
+    for i in 0..<size { gpuInput[i * 2] = input[i] }
+    try! fft.forwardGPU(input: gpuInput, output: &gpuOutput) // warm up
+
+    let gpuIterations = 100
+    let (_, gpuUs) = measureTime(gpuIterations) {
+        try! fft.forwardGPU(input: gpuInput, output: &gpuOutput)
+    }
+    result.gpuUs = gpuUs
+
+    // MPSGraph timing (if available)
+    if #available(macOS 14.0, iOS 17.0, *) {
+        try! fft.forwardMPSGraph(input: input, outputReal: &outputReal, outputImag: &outputImag) // warm up
+        let mpsIterations = 100
+        let (_, mpsUs) = measureTime(mpsIterations) {
+            try! fft.forwardMPSGraph(input: input, outputReal: &outputReal, outputImag: &outputImag)
+        }
+        result.mpsGraphUs = mpsUs
+    }
+
+    crossoverResults.append(result)
+
+    let mpsStr = result.mpsGraphUs > 0 ? String(format: "%7.1f", result.mpsGraphUs) : "    N/A"
+    recordResult(category: "Crossover", operation: "size=\(size)", iterations: vdspIterations + gpuIterations,
+                 totalMs: 0, avgUs: result.vdspUs, extra: "best=\(result.recommendation)")
+    if verboseOutput {
+        print("  Size \(String(format: "%5d", size)): vDSP=\(String(format: "%6.2f", result.vdspUs))µs  GPU=\(String(format: "%7.1f", result.gpuUs))µs  MPS=\(mpsStr)µs → \(result.recommendation)")
+    }
+}
+
+// Calculate crossover point
+if verboseOutput {
+    print("\n  Recommendation: Use vDSP for single FFTs (always faster)")
+    print("                  Use GPU/MPSGraph only for batch operations")
 }
 
 // MARK: - Convolution Benchmarks
 
-print("\n--- Direct Convolution (vDSP) ---")
+if verboseOutput { print("\n--- Direct Convolution (vDSP) ---") }
 
 let directConvSizes = [(1024, 32), (4096, 64), (4096, 256)]
 for (inputLen, kernelLen) in directConvSizes {
@@ -119,17 +306,20 @@ for (inputLen, kernelLen) in directConvSizes {
     }
 
     let throughput = Double(iterations) / (totalMs / 1000.0)
-    print("  Input \(inputLen), Kernel \(kernelLen): \(String(format: "%6.0f", throughput))/sec, \(String(format: "%7.1f", avgUs)) µs")
+    recordResult(category: "Conv-Direct", operation: "in=\(inputLen) k=\(kernelLen)", iterations: iterations, totalMs: totalMs, avgUs: avgUs, throughput: throughput)
+    if verboseOutput {
+        print("  Input \(inputLen), Kernel \(kernelLen): \(String(format: "%6.0f", throughput))/sec, \(String(format: "%7.1f", avgUs)) µs")
+    }
 }
 
-print("\n--- FFT Convolution ---")
+if verboseOutput { print("\n--- FFT Convolution ---") }
 
 let fftConvSizes = [(4096, 512), (8192, 1024), (16384, 2048)]
 for (inputLen, kernelLen) in fftConvSizes {
     let conv = Convolution(device: device, mode: .fft)
     let input = (0..<inputLen).map { Float(sin(Double($0) * 0.1)) }
     let kernel = [Float](repeating: 1.0 / Float(kernelLen), count: kernelLen)
-    try! conv.setKernel(kernel)
+    try! conv.setKernel(kernel, expectedInputSize: inputLen)
 
     var output = [Float](repeating: 0, count: inputLen + kernelLen - 1)
 
@@ -139,12 +329,15 @@ for (inputLen, kernelLen) in fftConvSizes {
     }
 
     let throughput = Double(iterations) / (totalMs / 1000.0)
-    print("  Input \(inputLen), Kernel \(kernelLen): \(String(format: "%6.0f", throughput))/sec, \(String(format: "%7.1f", avgUs)) µs")
+    recordResult(category: "Conv-FFT", operation: "in=\(inputLen) k=\(kernelLen)", iterations: iterations, totalMs: totalMs, avgUs: avgUs, throughput: throughput)
+    if verboseOutput {
+        print("  Input \(inputLen), Kernel \(kernelLen): \(String(format: "%6.0f", throughput))/sec, \(String(format: "%7.1f", avgUs)) µs")
+    }
 }
 
 // MARK: - Conv1D (NN) Benchmarks
 
-print("\n--- Conv1D Neural Network Layer ---")
+if verboseOutput { print("\n--- Conv1D Neural Network Layer ---") }
 
 let conv1dConfigs = [
     (inCh: 32, outCh: 32, k: 3, len: 1024, name: "32ch k3"),
@@ -188,12 +381,15 @@ for cfg in conv1dConfigs {
     }
 
     let throughput = Double(iterations) / (totalMs / 1000.0)
-    print("  \(cfg.name): \(String(format: "%6.0f", throughput))/sec, \(String(format: "%7.1f", avgUs)) µs")
+    recordResult(category: "Conv1D-NN", operation: cfg.name, iterations: iterations, totalMs: totalMs, avgUs: avgUs, throughput: throughput)
+    if verboseOutput {
+        print("  \(cfg.name): \(String(format: "%6.0f", throughput))/sec, \(String(format: "%7.1f", avgUs)) µs")
+    }
 }
 
 // MARK: - LSTM Benchmarks
 
-print("\n--- LSTM (Optimized with Batched GEMM) ---")
+if verboseOutput { print("\n--- LSTM (Optimized with Batched GEMM) ---") }
 
 // Basic configs
 let lstmConfigs = [
@@ -239,11 +435,14 @@ for cfg in lstmConfigs {
     }
 
     let throughput = Double(iterations) / (totalMs / 1000.0)
-    print("  \(cfg.name): \(String(format: "%6.0f", throughput))/sec, \(String(format: "%8.1f", avgUs)) µs")
+    recordResult(category: "LSTM", operation: cfg.name, iterations: iterations, totalMs: totalMs, avgUs: avgUs, throughput: throughput)
+    if verboseOutput {
+        print("  \(cfg.name): \(String(format: "%6.0f", throughput))/sec, \(String(format: "%8.1f", avgUs)) µs")
+    }
 }
 
 // Sequence length scaling - this is where batched GEMM shines
-print("\n--- LSTM Sequence Length Scaling (h=256) ---")
+if verboseOutput { print("\n--- LSTM Sequence Length Scaling (h=256) ---") }
 
 let seqLengths = [50, 100, 250, 500, 1000]
 for seq in seqLengths {
@@ -273,19 +472,22 @@ for seq in seqLengths {
     }
 
     let iterations = 20
-    let (totalMs, avgUs) = measureTime(iterations) {
+    let (_, avgUs) = measureTime(iterations) {
         try! context.executeSync { encoder in
             try! lstm.forward(input: inputTensor, output: outputTensor, encoder: encoder)
         }
     }
 
     let usPerTimestep = avgUs / Double(seq)
-    print("  seq=\(String(format: "%4d", seq)): \(String(format: "%9.1f", avgUs)) µs total, \(String(format: "%5.2f", usPerTimestep)) µs/timestep")
+    recordResult(category: "LSTM-SeqScale", operation: "seq=\(seq)", iterations: iterations, totalMs: avgUs * Double(iterations) / 1000.0, avgUs: avgUs, extra: "\(String(format: "%.2f", usPerTimestep)) µs/step")
+    if verboseOutput {
+        print("  seq=\(String(format: "%4d", seq)): \(String(format: "%9.1f", avgUs)) µs total, \(String(format: "%5.2f", usPerTimestep)) µs/timestep")
+    }
 }
 
 // MARK: - Real-time Audio Latency
 
-print("\n--- Real-time Audio Latency ---")
+if verboseOutput { print("\n--- Real-time Audio Latency ---") }
 
 let audioBufferSizes = [128, 256, 512, 1024]
 
@@ -296,7 +498,7 @@ for bufferSize in audioBufferSizes {
     var outputImag = [Float](repeating: 0, count: bufferSize * 2)
 
     let iterations = 10000
-    let (_, avgUs) = measureTime(iterations) {
+    let (totalMs, avgUs) = measureTime(iterations) {
         input.withUnsafeBufferPointer { ptr in
             fft.forward(input: ptr.baseAddress!, outputReal: &outputReal, outputImag: &outputImag)
         }
@@ -305,12 +507,15 @@ for bufferSize in audioBufferSizes {
     let budgetUs = Double(bufferSize) / 48000.0 * 1_000_000.0
     let utilization = avgUs / budgetUs * 100.0
 
-    print("  Buffer \(String(format: "%4d", bufferSize)) @ 48kHz: \(String(format: "%6.1f", avgUs)) µs / \(String(format: "%6.0f", budgetUs)) µs budget (\(String(format: "%4.1f", utilization))% util)")
+    recordResult(category: "RT-Latency", operation: "buf=\(bufferSize)@48kHz", iterations: iterations, totalMs: totalMs, avgUs: avgUs, extra: "\(String(format: "%.1f", utilization))% util")
+    if verboseOutput {
+        print("  Buffer \(String(format: "%4d", bufferSize)) @ 48kHz: \(String(format: "%6.1f", avgUs)) µs / \(String(format: "%6.0f", budgetUs)) µs budget (\(String(format: "%4.1f", utilization))% util)")
+    }
 }
 
 // MARK: - Linear Layer Benchmarks
 
-print("\n--- Linear Layer (Single Vector) ---")
+if verboseOutput { print("\n--- Linear Layer (Single Vector) ---") }
 
 let linearConfigs = [
     (inFeatures: 256, outFeatures: 512, name: "256→512"),
@@ -349,12 +554,15 @@ for cfg in linearConfigs {
     }
 
     let throughput = Double(iterations) / (totalMs / 1000.0)
-    print("  \(cfg.name): \(String(format: "%6.0f", throughput))/sec, \(String(format: "%7.1f", avgUs)) µs")
+    recordResult(category: "Linear", operation: cfg.name, iterations: iterations, totalMs: totalMs, avgUs: avgUs, throughput: throughput)
+    if verboseOutput {
+        print("  \(cfg.name): \(String(format: "%6.0f", throughput))/sec, \(String(format: "%7.1f", avgUs)) µs")
+    }
 }
 
 // MARK: - Linear Layer Batched Benchmarks (MPS vs Accelerate)
 
-print("\n--- Linear Layer Batched (Accelerate vs MPS) ---")
+if verboseOutput { print("\n--- Linear Layer Batched (Accelerate vs MPS) ---") }
 
 let batchedLinearConfigs = [
     (inFeatures: 512, outFeatures: 512, batch: 16, name: "512×512 batch=16"),
@@ -396,12 +604,15 @@ for cfg in batchedLinearConfigs {
     }
 
     let throughput = Double(iterations) / (totalMs / 1000.0)
-    print("  \(cfg.name): \(String(format: "%6.0f", throughput))/sec, \(String(format: "%8.1f", avgUs)) µs")
+    recordResult(category: "Linear-Batched", operation: cfg.name, iterations: iterations, totalMs: totalMs, avgUs: avgUs, throughput: throughput)
+    if verboseOutput {
+        print("  \(cfg.name): \(String(format: "%6.0f", throughput))/sec, \(String(format: "%8.1f", avgUs)) µs")
+    }
 }
 
 // MARK: - Partitioned Convolution Benchmarks
 
-print("\n--- Partitioned Convolution (Long IRs) ---")
+if verboseOutput { print("\n--- Partitioned Convolution (Long IRs) ---") }
 
 let partConvConfigs = [
     (inputLen: 4096, irLen: 8192, blockSize: 512, name: "4K input, 8K IR"),
@@ -428,12 +639,68 @@ for cfg in partConvConfigs {
     }
 
     let throughput = Double(iterations) / (totalMs / 1000.0)
-    print("  \(cfg.name): \(String(format: "%5.0f", throughput))/sec, \(String(format: "%9.1f", avgUs)) µs")
+    recordResult(category: "Conv-Partitioned", operation: cfg.name, iterations: iterations, totalMs: totalMs, avgUs: avgUs, throughput: throughput)
+    if verboseOutput {
+        print("  \(cfg.name): \(String(format: "%5.0f", throughput))/sec, \(String(format: "%9.1f", avgUs)) µs")
+    }
+}
+
+// MARK: - Partitioned Convolution with MPSGraph FFT
+
+if verboseOutput { print("\n--- Partitioned Convolution (MPSGraph FFT) ---") }
+
+// Test with larger block sizes where MPSGraph shines
+let partConvMPSConfigs = [
+    (inputLen: 4096, irLen: 16384, blockSize: 2048, name: "4K input, 16K IR, 2K block"),
+    (inputLen: 8192, irLen: 65536, blockSize: 4096, name: "8K input, 64K IR, 4K block"),
+]
+
+for cfg in partConvMPSConfigs {
+    // Baseline: Standard vDSP FFT
+    let convVDSP = Convolution(device: device, mode: .partitioned(blockSize: cfg.blockSize, useMPSGraphFFT: false))
+    let input = (0..<cfg.inputLen).map { Float(sin(Double($0) * 0.1)) }
+    let kernel = [Float](repeating: 1.0 / Float(cfg.irLen), count: cfg.irLen)
+    try! convVDSP.setKernel(kernel)
+
+    var output = [Float](repeating: 0, count: cfg.inputLen + cfg.irLen - 1)
+
+    // Warm up
+    try! convVDSP.process(input: input, output: &output)
+    convVDSP.reset()
+
+    let iterations = 50
+    let (totalMsVDSP, avgUsVDSP) = measureTime(iterations) {
+        try! convVDSP.process(input: input, output: &output)
+    }
+
+    recordResult(category: "Conv-Part-vDSP", operation: cfg.name, iterations: iterations, totalMs: totalMsVDSP, avgUs: avgUsVDSP)
+
+    // MPSGraph FFT version
+    let convMPS = Convolution(device: device, mode: .partitioned(blockSize: cfg.blockSize, useMPSGraphFFT: true))
+    try! convMPS.setKernel(kernel)
+
+    // Warm up (first call triggers MPSGraph compilation)
+    try! convMPS.process(input: input, output: &output)
+    convMPS.reset()
+
+    let (totalMsMPS, avgUsMPS) = measureTime(iterations) {
+        try! convMPS.process(input: input, output: &output)
+    }
+
+    recordResult(category: "Conv-Part-MPS", operation: cfg.name, iterations: iterations, totalMs: totalMsMPS, avgUs: avgUsMPS)
+
+    let speedup = avgUsVDSP / avgUsMPS
+    let better = speedup > 1.0 ? "MPS" : "vDSP"
+    if verboseOutput {
+        print("  \(cfg.name):")
+        print("    vDSP FFT:     \(String(format: "%9.1f", avgUsVDSP)) µs")
+        print("    MPSGraph FFT: \(String(format: "%9.1f", avgUsMPS)) µs (\(String(format: "%.2f", speedup))x, \(better) wins)")
+    }
 }
 
 // MARK: - Batch FFT Benchmarks (pre-allocated buffer optimization)
 
-print("\n--- Batch FFT (GPU with pre-allocated buffers) ---")
+if verboseOutput { print("\n--- Batch FFT (GPU with pre-allocated buffers) ---") }
 
 let batchFFTConfigs = [
     (size: 1024, batch: 8, name: "1024×8"),
@@ -462,7 +729,581 @@ for cfg in batchFFTConfigs {
     }
 
     let throughput = Double(iterations * cfg.batch) / (totalMs / 1000.0)
-    print("  \(cfg.name): \(String(format: "%7.0f", throughput)) FFTs/sec, \(String(format: "%8.1f", avgUs)) µs/batch")
+    recordResult(category: "FFT-Batch", operation: cfg.name, iterations: iterations, totalMs: totalMs, avgUs: avgUs, throughput: throughput)
+    if verboseOutput {
+        print("  \(cfg.name): \(String(format: "%7.0f", throughput)) FFTs/sec, \(String(format: "%8.1f", avgUs)) µs/batch")
+    }
 }
 
-print("\n✓ Benchmarks complete")
+// MARK: - BiquadFilter Benchmarks
+
+if verboseOutput { print("\n--- BiquadFilter (Accelerate vDSP.Biquad) ---") }
+
+let biquadConfigs = [
+    (size: 256, name: "256 samples"),
+    (size: 1024, name: "1K samples"),
+    (size: 4096, name: "4K samples"),
+    (size: 16384, name: "16K samples"),
+]
+
+for cfg in biquadConfigs {
+    let filter = BiquadFilter()
+    try! filter.configure(type: .lowpass, frequency: 1000, sampleRate: 48000)
+    let input = (0..<cfg.size).map { Float(sin(Double($0) * 0.1)) }
+    var output = input
+
+    let iterations = 5000
+    let (totalMs, avgUs) = measureTime(iterations) {
+        filter.process(buffer: &output)
+    }
+
+    let samplesPerSec = Double(cfg.size * iterations) / (totalMs / 1000.0)
+    recordResult(category: "BiquadFilter", operation: cfg.name, iterations: iterations, totalMs: totalMs, avgUs: avgUs, throughput: samplesPerSec / 1_000_000, extra: "\(String(format: "%.1f", samplesPerSec / 1_000_000))M samples/sec")
+    if verboseOutput {
+        print("  \(cfg.name): \(String(format: "%6.2f", avgUs)) µs, \(String(format: "%5.1f", samplesPerSec / 1_000_000))M samples/sec")
+    }
+}
+
+// MARK: - GRU Benchmarks
+
+if verboseOutput { print("\n--- GRU (Recurrent Layer) ---") }
+
+let gruConfigs = [
+    (input: 64, hidden: 128, seq: 50, bidir: false, name: "64→128"),
+    (input: 128, hidden: 256, seq: 100, bidir: false, name: "128→256"),
+    (input: 128, hidden: 256, seq: 100, bidir: true, name: "128→256 BiDir"),
+]
+
+for cfg in gruConfigs {
+    let gru = try! GRU(
+        device: device,
+        inputSize: cfg.input,
+        hiddenSize: cfg.hidden,
+        bidirectional: cfg.bidir,
+        sequenceLength: cfg.seq
+    )
+
+    let inputTensor = try! Tensor(device: device, shape: [cfg.seq, cfg.input])
+    let outputSize = cfg.bidir ? cfg.hidden * 2 : cfg.hidden
+    let outputTensor = try! Tensor(device: device, shape: [cfg.seq, outputSize])
+
+    var inputData = [Float](repeating: 0, count: cfg.seq * cfg.input)
+    for i in 0..<inputData.count {
+        inputData[i] = Float.random(in: -1...1)
+    }
+    try! inputTensor.copy(from: inputData)
+
+    let context = try! ComputeContext(device: device)
+
+    // Warm up
+    try! context.executeSync { encoder in
+        try! gru.forward(input: inputTensor, output: outputTensor, encoder: encoder)
+    }
+
+    let iterations = 50
+    let (totalMs, avgUs) = measureTime(iterations) {
+        try! context.executeSync { encoder in
+            try! gru.forward(input: inputTensor, output: outputTensor, encoder: encoder)
+        }
+    }
+
+    let throughput = Double(iterations) / (totalMs / 1000.0)
+    recordResult(category: "GRU", operation: cfg.name, iterations: iterations, totalMs: totalMs, avgUs: avgUs, throughput: throughput)
+    if verboseOutput {
+        print("  \(cfg.name): \(String(format: "%6.0f", throughput))/sec, \(String(format: "%8.1f", avgUs)) µs")
+    }
+}
+
+// MARK: - STFT Benchmarks
+
+if verboseOutput { print("\n--- STFT (Short-Time Fourier Transform) ---") }
+
+let stftConfigs: [(size: Int, hop: Int, inputLen: Int, name: String)] = [
+    (512, 128, 4096, "512/128 in=4K"),
+    (1024, 256, 16384, "1024/256 in=16K"),
+    (2048, 512, 16384, "2048/512 in=16K"),
+    (4096, 1024, 65536, "4096/1024 in=64K"),
+]
+
+for cfg in stftConfigs {
+    let fft = try! FFT(device: device, config: FFT.Config(size: cfg.size, windowType: .hann, hopSize: cfg.hop))
+    let input = (0..<cfg.inputLen).map { Float(sin(Double($0) * 0.1)) }
+
+    // Warm up
+    _ = try! fft.stft(input: input)
+
+    let iterations = 50
+    let (totalMs, avgUs) = measureTime(iterations) {
+        _ = try! fft.stft(input: input)
+    }
+
+    let result = try! fft.stft(input: input)
+    let framesPerSec = Double(result.real.count * iterations) / (totalMs / 1000.0)
+    recordResult(category: "STFT", operation: cfg.name, iterations: iterations, totalMs: totalMs, avgUs: avgUs, throughput: framesPerSec, extra: "\(result.real.count) frames")
+    if verboseOutput {
+        print("  \(cfg.name): \(String(format: "%7.1f", avgUs)) µs (\(result.real.count) frames, \(String(format: "%.0f", framesPerSec)) frames/sec)")
+    }
+}
+
+// MARK: - FilterBank Benchmarks
+
+if verboseOutput { print("\n--- FilterBank (Series vs Parallel) ---") }
+
+let filterBankConfigs: [(bands: Int, bufSize: Int)] = [
+    (4, 1024),
+    (8, 1024),
+    (16, 1024),
+    (8, 4096),
+    (16, 4096),
+]
+
+for cfg in filterBankConfigs {
+    let filterBank = FilterBank(device: device, bandCount: cfg.bands)
+    try! filterBank.configureAsEQ(lowFreq: 100, highFreq: 10000, sampleRate: 48000, q: 1.414)
+
+    let input = (0..<cfg.bufSize).map { Float(sin(Double($0) * 0.1)) }
+
+    let iterations = 500
+
+    // Series processing
+    let (seriesMs, seriesUs) = measureTime(iterations) {
+        _ = filterBank.processSeries(input: input)
+    }
+
+    // Parallel processing
+    let (parallelMs, parallelUs) = measureTime(iterations) {
+        _ = filterBank.processParallel(input: input)
+    }
+
+    let speedup = seriesUs / parallelUs
+    recordResult(category: "FilterBank-Series", operation: "\(cfg.bands)bands buf=\(cfg.bufSize)", iterations: iterations, totalMs: seriesMs, avgUs: seriesUs)
+    recordResult(category: "FilterBank-Parallel", operation: "\(cfg.bands)bands buf=\(cfg.bufSize)", iterations: iterations, totalMs: parallelMs, avgUs: parallelUs, extra: String(format: "%.1fx faster", speedup))
+
+    if verboseOutput {
+        print("  \(cfg.bands) bands, buf=\(cfg.bufSize): series=\(String(format: "%.1f", seriesUs))µs  parallel=\(String(format: "%.1f", parallelUs))µs  (\(String(format: "%.1f", speedup))x)")
+    }
+}
+
+// MARK: - Tensor Allocation Benchmarks
+
+if verboseOutput { print("\n--- Tensor Operations ---") }
+
+let tensorShapes: [([Int], String)] = [
+    ([1024], "1K"),
+    ([4096], "4K"),
+    ([64, 1024], "64x1K"),
+    ([256, 4096], "256x4K"),
+]
+
+for (shape, name) in tensorShapes {
+    let elementCount = shape.reduce(1, *)
+    let data = (0..<elementCount).map { _ in Float.random(in: -1...1) }
+
+    // Allocation timing
+    let allocIterations = 200
+    let (allocMs, allocUs) = measureTime(allocIterations) {
+        _ = try! Tensor(device: device, shape: shape)
+    }
+
+    // Copy from CPU timing
+    let tensor = try! Tensor(device: device, shape: shape)
+    let copyIterations = 500
+    let (copyMs, copyUs) = measureTime(copyIterations) {
+        try! tensor.copy(from: data)
+    }
+
+    // Read to CPU timing
+    let readIterations = 500
+    let (readMs, readUs) = measureTime(readIterations) {
+        _ = tensor.toArray()
+    }
+
+    let bytesPerSec = Double(elementCount * 4) / (copyUs / 1_000_000)
+    recordResult(category: "Tensor-Alloc", operation: "shape=\(name)", iterations: allocIterations, totalMs: allocMs, avgUs: allocUs)
+    recordResult(category: "Tensor-Copy", operation: "shape=\(name)", iterations: copyIterations, totalMs: copyMs, avgUs: copyUs, throughput: bytesPerSec / 1e9, extra: String(format: "%.1f GB/s", bytesPerSec / 1e9))
+    recordResult(category: "Tensor-Read", operation: "shape=\(name)", iterations: readIterations, totalMs: readMs, avgUs: readUs)
+
+    if verboseOutput {
+        print("  \(name): alloc=\(String(format: "%.1f", allocUs))µs  copy=\(String(format: "%.1f", copyUs))µs  read=\(String(format: "%.1f", readUs))µs  (\(String(format: "%.1f", bytesPerSec / 1e9)) GB/s)")
+    }
+}
+
+// MARK: - Buffer Pool Benchmarks
+
+if verboseOutput { print("\n--- AudioBufferPool ---") }
+
+let poolConfigs: [(poolSize: Int, sampleCount: Int)] = [
+    (8, 1024),
+    (16, 1024),
+    (16, 4096),
+    (32, 4096),
+]
+
+for cfg in poolConfigs {
+    let pool = try! AudioBufferPool(device: device, sampleCount: cfg.sampleCount, poolSize: cfg.poolSize)
+
+    // Acquire/release cycle timing
+    let iterations = 10000
+    let (cycleMs, cycleUs) = measureTime(iterations) {
+        let buffer = try! pool.acquire()
+        try! pool.release(buffer)
+    }
+
+    // With handle validation
+    let (handleMs, handleUs) = measureTime(iterations) {
+        let (buffer, handle) = try! pool.acquireWithHandle()
+        try! pool.release(buffer, handle: handle)
+    }
+
+    let opsPerSec = 1_000_000 / cycleUs
+    recordResult(category: "BufferPool", operation: "pool=\(cfg.poolSize) samples=\(cfg.sampleCount)", iterations: iterations, totalMs: cycleMs, avgUs: cycleUs, throughput: opsPerSec)
+    recordResult(category: "BufferPool-Handle", operation: "pool=\(cfg.poolSize) samples=\(cfg.sampleCount)", iterations: iterations, totalMs: handleMs, avgUs: handleUs)
+
+    if verboseOutput {
+        print("  pool=\(cfg.poolSize) samples=\(cfg.sampleCount): cycle=\(String(format: "%.2f", cycleUs))µs  handle=\(String(format: "%.2f", handleUs))µs  (\(String(format: "%.0f", opsPerSec))K ops/sec)")
+    }
+}
+
+// MARK: - Contention Tests (Multi-threaded)
+
+if verboseOutput { print("\n--- Contention Tests (Multi-threaded) ---") }
+
+let threadCounts = [2, 4, 8]
+
+// Partitioned Convolution Contention
+if verboseOutput { print("\n  Partitioned Convolution:") }
+
+for threadCount in threadCounts {
+    let irLength = 16384
+    let inputLength = 2048
+    let blockSize = 512
+
+    // Create separate instances per thread
+    var convolutions: [Convolution] = []
+    for _ in 0..<threadCount {
+        let conv = Convolution(device: device, mode: .partitioned(blockSize: blockSize))
+        let ir = [Float](repeating: 1.0 / Float(irLength), count: irLength)
+        try! conv.setKernel(ir)
+        convolutions.append(conv)
+    }
+
+    let input = (0..<inputLength).map { Float(sin(Double($0) * 0.1)) }
+    var outputs = [[Float]](repeating: [Float](repeating: 0, count: inputLength + irLength - 1), count: threadCount)
+
+    let iterations = 50
+    let start = DispatchTime.now()
+
+    for _ in 0..<iterations {
+        DispatchQueue.concurrentPerform(iterations: threadCount) { idx in
+            try! convolutions[idx].process(input: input, output: &outputs[idx])
+        }
+    }
+
+    let end = DispatchTime.now()
+    let totalMs = Double(end.uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
+    let avgUs = totalMs * 1000 / Double(iterations)
+
+    // Get single-threaded baseline for comparison
+    let singleConv = Convolution(device: device, mode: .partitioned(blockSize: blockSize))
+    try! singleConv.setKernel([Float](repeating: 1.0 / Float(irLength), count: irLength))
+    var singleOutput = [Float](repeating: 0, count: inputLength + irLength - 1)
+    let (_, singleUs) = measureTime(iterations) {
+        try! singleConv.process(input: input, output: &singleOutput)
+    }
+
+    let overhead = (avgUs / Double(threadCount)) / singleUs
+    recordResult(category: "Contention-PartConv", operation: "\(threadCount) threads", iterations: iterations * threadCount, totalMs: totalMs, avgUs: avgUs, extra: String(format: "%.0f%% overhead", (overhead - 1) * 100))
+
+    if verboseOutput {
+        print("    \(threadCount) threads: \(String(format: "%.1f", avgUs))µs total, \(String(format: "%.0f", (overhead - 1) * 100))% contention overhead")
+    }
+}
+
+// Buffer Pool Contention
+if verboseOutput { print("\n  Buffer Pool:") }
+
+for threadCount in threadCounts {
+    let pool = try! AudioBufferPool(device: device, sampleCount: 1024, poolSize: 16)
+
+    let iterations = 5000
+    var successCount = 0
+    let successLock = NSLock()
+
+    let start = DispatchTime.now()
+
+    DispatchQueue.concurrentPerform(iterations: threadCount) { _ in
+        for _ in 0..<(iterations / threadCount) {
+            if let buffer = pool.acquireIfAvailable() {
+                // Simulate minimal work
+                if pool.releaseIfValid(buffer) {
+                    successLock.lock()
+                    successCount += 1
+                    successLock.unlock()
+                }
+            }
+        }
+    }
+
+    let end = DispatchTime.now()
+    let totalMs = Double(end.uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
+    let successRate = Double(successCount) / Double(iterations) * 100
+
+    recordResult(category: "Contention-BufferPool", operation: "\(threadCount) threads", iterations: iterations, totalMs: totalMs, avgUs: totalMs * 1000 / Double(successCount), extra: String(format: "%.0f%% success", successRate))
+
+    if verboseOutput {
+        print("    \(threadCount) threads: \(successCount)/\(iterations) success (\(String(format: "%.0f", successRate))%)")
+    }
+}
+
+// MARK: - Automated Analysis
+
+struct AnalysisReport {
+    struct Warning {
+        let operation: String
+        let category: String
+        let avgUs: Double
+        let budgetUs: Double
+        let bufferSize: Int
+        let sampleRate: Int
+        var isCritical: Bool { avgUs > budgetUs * 2 }
+    }
+
+    var warnings: [Warning] = []
+    var topBottlenecks: [BenchmarkResult] = []
+    var crossoverRecommendation: String = ""
+}
+
+func analyzeResults(_ results: [BenchmarkResult]) -> AnalysisReport {
+    var report = AnalysisReport()
+
+    // Real-time budgets at 48kHz
+    let budgets: [(buffer: Int, budgetUs: Double)] = [
+        (128, 2666.67),
+        (256, 5333.33),
+        (512, 10666.67),
+        (1024, 21333.33),
+    ]
+
+    // Check for real-time budget violations
+    for result in results {
+        for budget in budgets {
+            if result.avgUs > budget.budgetUs {
+                report.warnings.append(AnalysisReport.Warning(
+                    operation: result.operation,
+                    category: result.category,
+                    avgUs: result.avgUs,
+                    budgetUs: budget.budgetUs,
+                    bufferSize: budget.buffer,
+                    sampleRate: 48000
+                ))
+                break  // Only flag once per operation
+            }
+        }
+    }
+
+    // Find top bottlenecks
+    report.topBottlenecks = results.sorted { $0.avgUs > $1.avgUs }.prefix(10).map { $0 }
+
+    // Crossover recommendation based on crossover results
+    let crossoverData = results.filter { $0.category == "Crossover" }
+    if !crossoverData.isEmpty {
+        report.crossoverRecommendation = "Use vDSP for single FFTs (always faster). Use GPU/MPSGraph only for batch operations (>=4 items)."
+    }
+
+    return report
+}
+
+func printAnalysisReport(_ report: AnalysisReport) {
+    print("\n" + String(repeating: "=", count: 60))
+    print("BENCHMARK ANALYSIS REPORT")
+    print(String(repeating: "=", count: 60))
+
+    // Real-time warnings
+    let criticalWarnings = report.warnings.filter { $0.isCritical }
+    let regularWarnings = report.warnings.filter { !$0.isCritical }
+
+    if !report.warnings.isEmpty {
+        print("\n[!] REAL-TIME BUDGET VIOLATIONS (\(report.warnings.count) total)")
+        print(String(repeating: "-", count: 40))
+
+        for warning in criticalWarnings {
+            print("  !!! \(warning.category): \(warning.operation)")
+            print("      Measured: \(String(format: "%.1f", warning.avgUs)) µs")
+            print("      Budget: \(String(format: "%.1f", warning.budgetUs)) µs (\(warning.bufferSize) samples @ \(warning.sampleRate) Hz)")
+            print("      Over by: \(String(format: "%.1f", warning.avgUs - warning.budgetUs)) µs (\(String(format: "%.0f", (warning.avgUs / warning.budgetUs - 1) * 100))%)")
+        }
+
+        for warning in regularWarnings.prefix(5) {
+            print("  ! \(warning.category): \(warning.operation)")
+            print("      Measured: \(String(format: "%.1f", warning.avgUs)) µs, Budget: \(String(format: "%.1f", warning.budgetUs)) µs")
+        }
+
+        if regularWarnings.count > 5 {
+            print("  ... and \(regularWarnings.count - 5) more warnings")
+        }
+    } else {
+        print("\n[✓] No real-time budget violations detected")
+    }
+
+    // Crossover recommendations
+    if !report.crossoverRecommendation.isEmpty {
+        print("\n[*] CPU/GPU CROSSOVER RECOMMENDATIONS")
+        print(String(repeating: "-", count: 40))
+        print("  \(report.crossoverRecommendation)")
+    }
+
+    // Top bottlenecks
+    print("\n[>] TOP 10 SLOWEST OPERATIONS")
+    print(String(repeating: "-", count: 40))
+    for (idx, result) in report.topBottlenecks.enumerated() {
+        print("  \(idx + 1). \(result.category): \(result.operation)")
+        print("      \(String(format: "%.1f", result.avgUs)) µs")
+    }
+
+    // Summary
+    print("\n[=] SUMMARY")
+    print(String(repeating: "-", count: 40))
+    print("  Total benchmarks: \(benchmarkResults.count)")
+    print("  Real-time violations: \(report.warnings.count)")
+    print("  Critical violations: \(criticalWarnings.count)")
+}
+
+// MARK: - JSON Output
+
+func printJSON(_ results: [BenchmarkResult], _ analysis: AnalysisReport) {
+    var json: [String: Any] = [:]
+
+    // Device info
+    json["device"] = [
+        "name": ProcessInfo.processInfo.hostName,
+        "gpu": device.name,
+        "maxThreads": device.maxThreadsPerThreadgroup,
+        "unifiedMemory": device.hasUnifiedMemory
+    ]
+
+    // Results by category
+    var categories: [String: [[String: Any]]] = [:]
+    for result in results {
+        var entry: [String: Any] = [
+            "operation": result.operation,
+            "iterations": result.iterations,
+            "totalMs": result.totalMs,
+            "avgUs": result.avgUs
+        ]
+        if let throughput = result.throughput { entry["throughput"] = throughput }
+        if let extra = result.extra { entry["extra"] = extra }
+
+        if categories[result.category] == nil {
+            categories[result.category] = []
+        }
+        categories[result.category]?.append(entry)
+    }
+    json["results"] = categories
+
+    // Analysis
+    json["analysis"] = [
+        "totalBenchmarks": results.count,
+        "violations": analysis.warnings.count,
+        "criticalViolations": analysis.warnings.filter { $0.isCritical }.count,
+        "topBottlenecks": analysis.topBottlenecks.map { ["category": $0.category, "operation": $0.operation, "avgUs": $0.avgUs] },
+        "crossoverRecommendation": analysis.crossoverRecommendation
+    ]
+
+    // Simple JSON serialization
+    func jsonString(_ value: Any, indent: Int = 0) -> String {
+        let spaces = String(repeating: "  ", count: indent)
+        switch value {
+        case let dict as [String: Any]:
+            let pairs = dict.map { "\(spaces)  \"\($0.key)\": \(jsonString($0.value, indent: indent + 1))" }
+            return "{\n\(pairs.joined(separator: ",\n"))\n\(spaces)}"
+        case let arr as [Any]:
+            if arr.isEmpty { return "[]" }
+            let items = arr.map { jsonString($0, indent: indent + 1) }
+            return "[\n\(spaces)  \(items.joined(separator: ",\n\(spaces)  "))\n\(spaces)]"
+        case let str as String:
+            return "\"\(str.replacingOccurrences(of: "\"", with: "\\\""))\""
+        case let num as Double:
+            return String(format: "%.2f", num)
+        case let num as Int:
+            return String(num)
+        case let bool as Bool:
+            return bool ? "true" : "false"
+        default:
+            return "\"\(value)\""
+        }
+    }
+
+    print(jsonString(json))
+}
+
+// MARK: - Markdown Output
+
+func printMarkdown(_ results: [BenchmarkResult], _ analysis: AnalysisReport) {
+    print("# MetalAudio Benchmark Report\n")
+    print("Generated: \(Date())\n")
+
+    print("## Device Information\n")
+    print("| Property | Value |")
+    print("|----------|-------|")
+    print("| Host | \(ProcessInfo.processInfo.hostName) |")
+    print("| GPU | \(device.name) |")
+    print("| Max Threads | \(device.maxThreadsPerThreadgroup) |")
+    print("| Unified Memory | \(device.hasUnifiedMemory) |")
+    print("")
+
+    print("## Summary\n")
+    print("| Metric | Value |")
+    print("|--------|-------|")
+    print("| Total Benchmarks | \(results.count) |")
+    print("| RT Violations | \(analysis.warnings.count) |")
+    print("| Critical Violations | \(analysis.warnings.filter { $0.isCritical }.count) |")
+    print("")
+
+    // Results by category
+    let categories = Set(results.map { $0.category }).sorted()
+    for category in categories {
+        print("## \(category)\n")
+        print("| Operation | Avg (µs) | Throughput | Notes |")
+        print("|-----------|----------|------------|-------|")
+        for result in results.filter({ $0.category == category }) {
+            let throughput = result.throughput.map { String(format: "%.0f/s", $0) } ?? "-"
+            let notes = result.extra ?? ""
+            print("| \(result.operation) | \(String(format: "%.2f", result.avgUs)) | \(throughput) | \(notes) |")
+        }
+        print("")
+    }
+
+    // Top bottlenecks
+    print("## Top Bottlenecks\n")
+    print("| Rank | Category | Operation | Time (µs) |")
+    print("|------|----------|-----------|-----------|")
+    for (idx, result) in analysis.topBottlenecks.enumerated() {
+        print("| \(idx + 1) | \(result.category) | \(result.operation) | \(String(format: "%.1f", result.avgUs)) |")
+    }
+    print("")
+
+    // Recommendations
+    if !analysis.crossoverRecommendation.isEmpty {
+        print("## Recommendations\n")
+        print(analysis.crossoverRecommendation)
+        print("")
+    }
+}
+
+// MARK: - Output
+
+switch outputFormat {
+case .csv:
+    printCSV()
+case .json:
+    let analysisReport = analyzeResults(benchmarkResults)
+    printJSON(benchmarkResults, analysisReport)
+case .markdown:
+    let analysisReport = analyzeResults(benchmarkResults)
+    printMarkdown(benchmarkResults, analysisReport)
+case .console:
+    print("\n" + String(repeating: "=", count: 60))
+    print("✓ Benchmarks complete")
+    let analysisReport = analyzeResults(benchmarkResults)
+    printAnalysisReport(analysisReport)
+}

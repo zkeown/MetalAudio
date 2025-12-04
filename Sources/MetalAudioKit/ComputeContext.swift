@@ -71,6 +71,26 @@ public final class ComputeContext: @unchecked Sendable {
         }
     }
 
+    /// GPU timing information from a command buffer execution
+    ///
+    /// Use this to separate GPU kernel execution time from CPU overhead (buffer setup,
+    /// command encoding, synchronization). Useful for benchmarking and optimization.
+    public struct GPUTimingInfo {
+        /// Time GPU spent executing kernels (in seconds)
+        public let gpuTime: TimeInterval
+        /// Total wall-clock time including CPU overhead (in seconds)
+        public let wallTime: TimeInterval
+        /// CPU overhead = wallTime - gpuTime (in seconds)
+        public var cpuOverhead: TimeInterval { wallTime - gpuTime }
+
+        /// GPU time in microseconds (µs) for display
+        public var gpuMicroseconds: Double { gpuTime * 1_000_000 }
+        /// Wall time in microseconds (µs) for display
+        public var wallMicroseconds: Double { wallTime * 1_000_000 }
+        /// CPU overhead in microseconds (µs) for display
+        public var overheadMicroseconds: Double { cpuOverhead * 1_000_000 }
+    }
+
     /// Initialize compute context
     /// - Parameters:
     ///   - device: Audio device
@@ -166,6 +186,98 @@ public final class ComputeContext: @unchecked Sendable {
         }
 
         return result
+    }
+
+    /// Execute a compute operation synchronously with GPU timing information
+    ///
+    /// This method captures Metal's GPU timestamps to separate kernel execution time
+    /// from CPU overhead (buffer setup, command encoding, synchronization wait).
+    ///
+    /// - Parameters:
+    ///   - timeout: Maximum time to wait for GPU completion (nil = use defaultGPUTimeout)
+    ///   - encode: Closure to encode compute commands
+    /// - Returns: Tuple of (result, timing info)
+    /// - Throws: `MetalAudioError.gpuTimeout` if timeout is exceeded
+    ///
+    /// ## Usage
+    /// ```swift
+    /// let (result, timing) = try context.executeSyncWithTiming { encoder in
+    ///     // encode commands
+    ///     return someResult
+    /// }
+    /// print("GPU: \(timing.gpuMicroseconds)µs, Wall: \(timing.wallMicroseconds)µs")
+    /// ```
+    public func executeSyncWithTiming<T>(
+        timeout: TimeInterval? = nil,
+        _ encode: (MTLComputeCommandEncoder) throws -> T
+    ) throws -> (result: T, timing: GPUTimingInfo) {
+        let wallStart = CFAbsoluteTimeGetCurrent()
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            throw MetalAudioError.commandQueueCreationFailed
+        }
+
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalAudioError.commandQueueCreationFailed
+        }
+
+        let result = try encode(encoder)
+        encoder.endEncoding()
+
+        let effectiveTimeout = timeout ?? Self.defaultGPUTimeout
+
+        // Capture GPU timing from completed handler
+        var gpuStartTime: CFAbsoluteTime = 0
+        var gpuEndTime: CFAbsoluteTime = 0
+        let semaphore = DispatchSemaphore(value: 0)
+
+        commandBuffer.addCompletedHandler { buffer in
+            gpuStartTime = buffer.gpuStartTime
+            gpuEndTime = buffer.gpuEndTime
+            semaphore.signal()
+        }
+
+        commandBuffer.commit()
+
+        let waitResult = semaphore.wait(timeout: .now() + effectiveTimeout)
+        let wallEnd = CFAbsoluteTimeGetCurrent()
+
+        if waitResult == .timedOut {
+            #if DEBUG
+            print("[MetalAudio] Warning: GPU timeout after \(effectiveTimeout)s. Command buffer still executing on GPU.")
+            #endif
+            throw MetalAudioError.gpuTimeout(effectiveTimeout)
+        }
+        guard commandBuffer.status == .completed else {
+            throw MetalAudioError.gpuTimeout(effectiveTimeout)
+        }
+
+        let timing = GPUTimingInfo(
+            gpuTime: gpuEndTime - gpuStartTime,
+            wallTime: wallEnd - wallStart
+        )
+
+        return (result, timing)
+    }
+
+    /// Execute a compute operation synchronously with GPU timing (void return)
+    ///
+    /// Convenience overload for operations that don't return a value.
+    ///
+    /// - Parameters:
+    ///   - timeout: Maximum time to wait for GPU completion
+    ///   - encode: Closure to encode compute commands
+    /// - Returns: GPU timing information
+    @discardableResult
+    public func executeSyncWithTiming(
+        timeout: TimeInterval? = nil,
+        _ encode: (MTLComputeCommandEncoder) throws -> Void
+    ) throws -> GPUTimingInfo {
+        let (_, timing) = try executeSyncWithTiming(timeout: timeout) { encoder -> Void in
+            try encode(encoder)
+            return ()
+        }
+        return timing
     }
 
     /// Execute a compute operation asynchronously with completion handler
