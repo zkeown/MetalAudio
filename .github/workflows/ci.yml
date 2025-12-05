@@ -75,9 +75,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # iPhone 16 Pro - latest pre-installed simulator on macos-15
+          # iPhone 16 Pro with iOS 26.1 - available on macos-15
           - device: "iPhone 16 Pro"
-            ios: "18.1"
+            ios: "26.1"
             xcode: "16.1"
             macos: "15"
 
