@@ -2,11 +2,6 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Workflow Preferences
-
-- **Commits**: The user prefers to handle git commits themselves. Do not commit unless explicitly asked.
-- **Pushes**: Same as commits - let the user handle pushes unless explicitly requested.
-
 ## Build Commands
 
 ```bash
