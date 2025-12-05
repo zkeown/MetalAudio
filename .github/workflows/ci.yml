@@ -122,6 +122,13 @@ jobs:
           xcrun simctl create "iPhone 8" "com.apple.CoreSimulator.SimDeviceType.iPhone-8" "com.apple.CoreSimulator.SimRuntime.iOS-16-4" || true
           xcrun simctl list devices | grep "iPhone 8"
 
+      - name: Create iPhone 17 Pro Simulator
+        if: matrix.device == 'iPhone 17 Pro'
+        run: |
+          # Create iPhone 17 Pro device if it doesn't exist
+          xcrun simctl create "iPhone 17 Pro" "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro" "com.apple.CoreSimulator.SimRuntime.iOS-26-1" || true
+          xcrun simctl list devices | grep "iPhone 17 Pro"
+
       - name: Cache Swift packages
         uses: actions/cache@v4
         with:
