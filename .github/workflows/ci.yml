@@ -106,7 +106,7 @@ jobs:
       - name: Build and Test on iOS Simulator
         run: |
           xcodebuild test \
-            -scheme MetalAudio \
+            -scheme MetalAudio-Package \
             -destination "platform=iOS Simulator,name=${{ matrix.device }},OS=${{ matrix.ios }}" \
             -skipPackagePluginValidation \
             CODE_SIGNING_ALLOWED=NO
