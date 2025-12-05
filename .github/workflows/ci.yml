@@ -56,7 +56,7 @@ jobs:
             > coverage.lcov
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@cb6530fbecd68d5f1ee7a3dcd113450ea8d5d6d4 # v4.6.0
+        uses: codecov/codecov-action@1e68e06f1dbfde0e4cefc87efeba9e4643565303 # v4.6.0
         with:
           files: coverage.lcov
           fail_ci_if_error: false
