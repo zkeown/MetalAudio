@@ -69,20 +69,18 @@ jobs:
   # Build & Test - iOS Simulator
   # =============================================================================
   test-ios:
-    name: Test iOS ${{ matrix.ios }} (${{ matrix.device }})
+    name: Test iOS (${{ matrix.device }})
     runs-on: macos-${{ matrix.macos }}
     strategy:
       fail-fast: false
       matrix:
         include:
           # iPhone SE 3rd gen (A15) - oldest available device in CI
-          - ios: "18.4"
-            device: "iPhone SE (3rd generation)"
+          - device: "iPhone SE (3rd generation)"
             xcode: "16.1"
             macos: "15"
           # iPhone 16 Pro (A18 Pro) - latest flagship
-          - ios: "18.4"
-            device: "iPhone 16 Pro"
+          - device: "iPhone 16 Pro"
             xcode: "16.1"
             macos: "15"
 
@@ -99,15 +97,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .build
-          key: ios-${{ matrix.ios }}-spm-${{ hashFiles('Package.resolved') }}
+          key: ios-${{ matrix.device }}-spm-${{ hashFiles('Package.resolved') }}
           restore-keys: |
-            ios-${{ matrix.ios }}-spm-
+            ios-${{ matrix.device }}-spm-
+
+      - name: List Available Simulators
+        run: xcrun simctl list devices available | grep -E "iPhone|iPad" | head -20
 
       - name: Build and Test on iOS Simulator
         run: |
           xcodebuild test \
             -scheme MetalAudio-Package \
-            -destination "platform=iOS Simulator,name=${{ matrix.device }},OS=${{ matrix.ios }}" \
+            -destination "platform=iOS Simulator,name=${{ matrix.device }}" \
             -skipPackagePluginValidation \
             CODE_SIGNING_ALLOWED=NO
 
