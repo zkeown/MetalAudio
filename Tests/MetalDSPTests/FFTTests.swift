@@ -2388,21 +2388,27 @@ final class FFTvDSPComparisonTests: XCTestCase {
         var real = [Float](repeating: 0, count: size / 2)
         var imag = [Float](repeating: 0, count: size / 2)
 
-        // Pack input into split complex (even indices -> real, odd -> imag)
-        var splitComplex = DSPSplitComplex(realp: &real, imagp: &imag)
-        input.withUnsafeBufferPointer { ptr in
-            ptr.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: size / 2) { complexPtr in
-                vDSP_ctoz(complexPtr, 2, &splitComplex, 1, vDSP_Length(size / 2))
+        // Pack input into split complex and perform FFT using proper pointer scope
+        real.withUnsafeMutableBufferPointer { realPtr in
+            imag.withUnsafeMutableBufferPointer { imagPtr in
+                var splitComplex = DSPSplitComplex(realp: realPtr.baseAddress!, imagp: imagPtr.baseAddress!)
+
+                // Pack input (even indices -> real, odd -> imag)
+                input.withUnsafeBufferPointer { ptr in
+                    ptr.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: size / 2) { complexPtr in
+                        vDSP_ctoz(complexPtr, 2, &splitComplex, 1, vDSP_Length(size / 2))
+                    }
+                }
+
+                // Perform in-place FFT
+                vDSP_fft_zrip(setup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
+
+                // vDSP_fft_zrip scales output by 2.0 - divide to match standard DFT convention
+                var scale: Float = 0.5
+                vDSP_vsmul(realPtr.baseAddress!, 1, &scale, realPtr.baseAddress!, 1, vDSP_Length(size / 2))
+                vDSP_vsmul(imagPtr.baseAddress!, 1, &scale, imagPtr.baseAddress!, 1, vDSP_Length(size / 2))
             }
         }
-
-        // Perform in-place FFT
-        vDSP_fft_zrip(setup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
-
-        // vDSP_fft_zrip scales output by 2.0 - divide to match standard DFT convention
-        var scale: Float = 0.5
-        vDSP_vsmul(real, 1, &scale, &real, 1, vDSP_Length(size / 2))
-        vDSP_vsmul(imag, 1, &scale, &imag, 1, vDSP_Length(size / 2))
 
         // Expand from packed format to full size for comparison
         // vDSP_fft_zrip packs DC in real[0] and Nyquist in imag[0]

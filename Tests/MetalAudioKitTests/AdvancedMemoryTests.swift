@@ -18,14 +18,14 @@ final class MappedTensorTests: XCTestCase {
         let tensor = try MappedTensor(shape: [10])
 
         // Write data
-        try tensor.withUnsafeMutableBufferPointer { ptr in
+        tensor.withUnsafeMutableBufferPointer { ptr in
             for i in 0..<10 {
                 ptr[i] = Float(i)
             }
         }
 
         // Read back
-        try tensor.withUnsafeBufferPointer { ptr in
+        tensor.withUnsafeBufferPointer { ptr in
             for i in 0..<10 {
                 XCTAssertEqual(ptr[i], Float(i))
             }
@@ -39,7 +39,7 @@ final class MappedTensorTests: XCTestCase {
         // Create and write
         do {
             let tensor = try MappedTensor(shape: [100], backingFile: tempPath, shared: true)
-            try tensor.withUnsafeMutableBufferPointer { ptr in
+            tensor.withUnsafeMutableBufferPointer { ptr in
                 for i in 0..<100 {
                     ptr[i] = Float(i) * 0.5
                 }
@@ -52,7 +52,7 @@ final class MappedTensorTests: XCTestCase {
 
         // Read back in new mapping
         let tensor2 = try MappedTensor(shape: [100], backingFile: tempPath, shared: false)
-        try tensor2.withUnsafeBufferPointer { ptr in
+        tensor2.withUnsafeBufferPointer { ptr in
             XCTAssertEqual(ptr[50], 25.0, accuracy: 0.001)
         }
     }
@@ -72,7 +72,7 @@ final class MappedTensorTests: XCTestCase {
         let tensor = try MappedTensor(shape: [1000])
 
         // Touch all pages to ensure resident
-        try tensor.withUnsafeMutableBufferPointer { ptr in
+        tensor.withUnsafeMutableBufferPointer { ptr in
             for i in stride(from: 0, to: 1000, by: 100) {
                 ptr[i] = 1.0
             }
@@ -87,7 +87,7 @@ final class MappedTensorTests: XCTestCase {
         let device = try AudioDevice()
         let mapped = try MappedTensor(shape: [10])
 
-        try mapped.withUnsafeMutableBufferPointer { ptr in
+        mapped.withUnsafeMutableBufferPointer { ptr in
             for i in 0..<10 { ptr[i] = Float(i) }
         }
 
@@ -107,7 +107,7 @@ final class MappedTensorTests: XCTestCase {
         let mapped = try MappedTensor(shape: [10])
         try mapped.copyFromTensor(tensor)
 
-        try mapped.withUnsafeBufferPointer { ptr in
+        mapped.withUnsafeBufferPointer { ptr in
             for i in 0..<10 {
                 XCTAssertEqual(ptr[i], Float(i), accuracy: 0.001)
             }
@@ -164,7 +164,7 @@ final class MappedTensorTests: XCTestCase {
         // Create shared mapping and write value
         do {
             let shared = try MappedTensor(shape: [10], backingFile: tempPath, shared: true)
-            try shared.withUnsafeMutableBufferPointer { ptr in
+            shared.withUnsafeMutableBufferPointer { ptr in
                 ptr[0] = 42.0
             }
             shared.sync()
@@ -175,19 +175,19 @@ final class MappedTensorTests: XCTestCase {
             let privateTensor = try MappedTensor(shape: [10], backingFile: tempPath, shared: false)
 
             // Should see original value
-            try privateTensor.withUnsafeBufferPointer { ptr in
+            privateTensor.withUnsafeBufferPointer { ptr in
                 XCTAssertEqual(ptr[0], 42.0, accuracy: 0.001)
             }
 
             // Modify in private mapping
-            try privateTensor.withUnsafeMutableBufferPointer { ptr in
+            privateTensor.withUnsafeMutableBufferPointer { ptr in
                 ptr[0] = 99.0
             }
         }
 
         // Read back with new mapping - should still be original value (private didn't persist)
         let verify = try MappedTensor(shape: [10], backingFile: tempPath, shared: false)
-        try verify.withUnsafeBufferPointer { ptr in
+        verify.withUnsafeBufferPointer { ptr in
             XCTAssertEqual(ptr[0], 42.0, accuracy: 0.001, "Private mapping should not persist changes")
         }
     }
@@ -688,7 +688,7 @@ final class AdvancedMemoryIntegrationTests: XCTestCase {
         let weights = try MappedTensor(shape: [512, 512])
 
         // Initialize weights
-        try weights.withUnsafeMutableBufferPointer { ptr in
+        weights.withUnsafeMutableBufferPointer { ptr in
             for i in 0..<ptr.count {
                 ptr[i] = Float.random(in: -1...1)
             }
@@ -706,27 +706,21 @@ final class AdvancedMemoryIntegrationTests: XCTestCase {
     }
 
     func testSpeculativeBufferWorkflow() throws {
-        // Simulate workflow: audio buffer that's used intermittently
         let buffer = try SpeculativeBuffer(device: device.device, byteSize: 4096)
         let manager = SpeculativeBufferManager.shared
-
         manager.register(buffer)
 
-        // Use buffer
         for _ in 0..<5 {
-            try buffer.withContents { ptr in
-                // Process audio...
-            }
+            try buffer.withContents { _ in }
         }
 
-        // Later, system detects buffer is cold and evicts
-        // (simulated by direct call)
         buffer.speculativeDeallocate()
 
-        // When needed again, buffer reallocates transparently
-        try buffer.withContents { _ in
-            XCTAssertTrue(buffer.isAllocated)
-        }
+        // Re-access buffer - should reallocate transparently
+        try buffer.withContents { _ in }
+
+        // Assert AFTER the closure to avoid deadlock (isAllocated acquires lock)
+        XCTAssertTrue(buffer.isAllocated)
 
         manager.unregister(buffer)
     }

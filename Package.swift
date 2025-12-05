@@ -58,6 +58,7 @@ let package = Package(
             name: "MetalDSP",
             dependencies: ["MetalAudioKit"],
             path: "Sources/MetalDSP",
+            exclude: ["CLAUDE.md"],
             resources: [
                 .copy("Shaders"),
             ],
@@ -71,6 +72,7 @@ let package = Package(
             name: "MetalNN",
             dependencies: ["MetalAudioKit"],
             path: "Sources/MetalNN",
+            exclude: ["CLAUDE.md"],
             resources: [
                 .copy("Shaders"),
             ],

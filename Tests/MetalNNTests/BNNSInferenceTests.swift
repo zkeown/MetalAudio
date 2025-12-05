@@ -120,7 +120,7 @@ final class BNNSInferenceInitTests: XCTestCase {
         }
     }
 
-    func testInitWithInvalidDirectory() {
+    func testInitWithInvalidDirectory() throws {
         // Create a temporary empty directory (not a valid mlmodelc)
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("invalid_model_\(UUID().uuidString).mlmodelc")
@@ -136,7 +136,7 @@ final class BNNSInferenceInitTests: XCTestCase {
             }
         } catch {
             // If we can't create the temp dir, skip this test
-            XCTSkip("Could not create temp directory")
+            throw XCTSkip("Could not create temp directory")
         }
     }
 

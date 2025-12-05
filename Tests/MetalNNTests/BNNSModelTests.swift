@@ -423,7 +423,7 @@ final class ChunkedInferenceModelTests: XCTestCase {
         let chunked = ChunkedInference(inference: inference, config: config)
 
         // Create input buffer
-        var input = [Float](repeating: 0.5, count: 64)
+        let input = [Float](repeating: 0.5, count: 64)
         var output = [Float](repeating: 0, count: 64)
 
         // Process
@@ -458,7 +458,7 @@ final class ChunkedInferenceModelTests: XCTestCase {
 
         // Process multiple chunks
         for i in 0..<10 {
-            var input = [Float](repeating: Float(i) * 0.1, count: chunkSize)
+            let input = [Float](repeating: Float(i) * 0.1, count: chunkSize)
             var output = [Float](repeating: 0, count: chunkSize)
 
             let processed = input.withUnsafeBufferPointer { inPtr in

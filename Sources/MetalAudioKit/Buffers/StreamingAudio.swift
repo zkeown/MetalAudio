@@ -399,7 +399,7 @@ public enum MappedAudioError: Error, CustomStringConvertible {
 /// // In audio callback:
 /// let samples = ring.consume(count: 512)
 /// ```
-public final class StreamingRingBuffer {
+public final class StreamingRingBuffer: @unchecked Sendable {
 
     /// The source audio file
     public let file: MappedAudioFile
