@@ -19,6 +19,26 @@
             "target": "Benchmark",
             "configuration": "release",
             "preLaunchTask": "swift: Build Release Benchmark"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:MetalAudio}",
+            "name": "Debug RealtimeAudioDemo",
+            "target": "RealtimeAudioDemo",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug RealtimeAudioDemo"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:MetalAudio}",
+            "name": "Release RealtimeAudioDemo",
+            "target": "RealtimeAudioDemo",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release RealtimeAudioDemo"
         }
     ]
 }

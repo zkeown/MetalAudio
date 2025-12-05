@@ -1,0 +1,79 @@
+# Release Drafter configuration
+# https://github.com/release-drafter/release-drafter
+
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+
+categories:
+  - title: '🚀 Features'
+    labels:
+      - 'feature'
+      - 'enhancement'
+  - title: '🐛 Bug Fixes'
+    labels:
+      - 'fix'
+      - 'bugfix'
+      - 'bug'
+  - title: '🧰 Maintenance'
+    labels:
+      - 'chore'
+      - 'maintenance'
+      - 'dependencies'
+  - title: '📚 Documentation'
+    labels:
+      - 'documentation'
+      - 'docs'
+  - title: '⚡ Performance'
+    labels:
+      - 'performance'
+  - title: '🤖 Claude Automation'
+    labels:
+      - 'claude-automation'
+
+change-template: '- $TITLE @$AUTHOR (#$NUMBER)'
+change-title-escapes: '\<*_&'
+
+version-resolver:
+  major:
+    labels:
+      - 'major'
+      - 'breaking'
+  minor:
+    labels:
+      - 'minor'
+      - 'feature'
+      - 'enhancement'
+  patch:
+    labels:
+      - 'patch'
+      - 'fix'
+      - 'bugfix'
+  default: patch
+
+autolabeler:
+  - label: 'documentation'
+    files:
+      - '*.md'
+      - 'docs/**/*'
+  - label: 'bug'
+    branch:
+      - '/fix\/.+/'
+    title:
+      - '/fix/i'
+  - label: 'feature'
+    branch:
+      - '/feature\/.+/'
+  - label: 'chore'
+    branch:
+      - '/chore\/.+/'
+  - label: 'dependencies'
+    files:
+      - 'Package.swift'
+      - 'Package.resolved'
+
+template: |
+  ## What's Changed
+
+  $CHANGES
+
+  **Full Changelog**: https://github.com/$OWNER/$REPOSITORY/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION

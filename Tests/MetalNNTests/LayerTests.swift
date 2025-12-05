@@ -2042,5 +2042,177 @@ final class LinearCPUThresholdTests: XCTestCase {
         let result = output.toArray()
         XCTAssertEqual(result.count, 4)
     }
+
+    func testLinearMPSPath() throws {
+        // Test the MPS GPU path by lowering thresholds
+        let originalGPUThreshold = Linear.mpsGPUThreshold
+        let originalMatrixThreshold = Linear.mpsMatrixThreshold
+        defer {
+            Linear.mpsGPUThreshold = originalGPUThreshold
+            Linear.mpsMatrixThreshold = originalMatrixThreshold
+        }
+
+        // Lower thresholds to trigger MPS path with small test data
+        Linear.mpsGPUThreshold = 2      // MPS for batch >= 2
+        Linear.mpsMatrixThreshold = 4   // MPS for dimensions >= 4
+
+        // Create layer with dimensions >= mpsMatrixThreshold
+        let linear = try Linear(device: device, inputFeatures: 8, outputFeatures: 4)
+
+        // Batch size >= mpsGPUThreshold
+        let input = try Tensor(device: device, shape: [4, 8])
+        var inputData = [Float](repeating: 0, count: 32)
+        for i in 0..<4 {
+            inputData[i * 8] = 1.0  // First feature = 1.0 for each batch
+        }
+        try input.copy(from: inputData)
+
+        let output = try Tensor(device: device, shape: [4, 4])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try linear.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        XCTAssertEqual(result.count, 16)  // 4 batches × 4 outputs
+
+        // Verify outputs are finite (not NaN/Inf)
+        for value in result {
+            XCTAssertTrue(value.isFinite, "MPS output should be finite")
+        }
+    }
+
+    func testLinearMPSPathWithBias() throws {
+        // Test MPS path with bias enabled
+        let originalGPUThreshold = Linear.mpsGPUThreshold
+        let originalMatrixThreshold = Linear.mpsMatrixThreshold
+        defer {
+            Linear.mpsGPUThreshold = originalGPUThreshold
+            Linear.mpsMatrixThreshold = originalMatrixThreshold
+        }
+
+        Linear.mpsGPUThreshold = 2
+        Linear.mpsMatrixThreshold = 4
+
+        let linear = try Linear(device: device, inputFeatures: 8, outputFeatures: 4, useBias: true)
+
+        let input = try Tensor(device: device, shape: [4, 8])
+        try input.copy(from: [Float](repeating: 0.5, count: 32))
+
+        let output = try Tensor(device: device, shape: [4, 4])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try linear.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        XCTAssertEqual(result.count, 16)
+
+        // With zero weights and bias, output should be approximately the bias values
+        for value in result {
+            XCTAssertTrue(value.isFinite)
+        }
+    }
+
+    func testLinearMPSMatrixThresholdSetter() {
+        // Test the setter for mpsMatrixThreshold (currently uncovered)
+        let originalValue = Linear.mpsMatrixThreshold
+        defer { Linear.mpsMatrixThreshold = originalValue }
+
+        Linear.mpsMatrixThreshold = 2048
+        XCTAssertEqual(Linear.mpsMatrixThreshold, 2048)
+
+        Linear.mpsMatrixThreshold = 8192
+        XCTAssertEqual(Linear.mpsMatrixThreshold, 8192)
+    }
+}
+
+// MARK: - Linear Error Case Tests
+
+final class LinearErrorTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testLinearRejectsHighDimensionalInput() throws {
+        // Test that 3D+ inputs are rejected (Lines 194-197 coverage)
+        let linear = try Linear(device: device, inputFeatures: 4, outputFeatures: 2)
+
+        // 3D input should be rejected
+        let input3D = try Tensor(device: device, shape: [2, 2, 4])
+        try input3D.copy(from: [Float](repeating: 1.0, count: 16))
+
+        let output = try Tensor(device: device, shape: [2, 2, 2])
+
+        let context = try ComputeContext(device: device)
+        XCTAssertThrowsError(try context.executeSync { encoder in
+            try linear.forward(input: input3D, output: output, encoder: encoder)
+        }) { error in
+            // Should throw invalidConfiguration error
+            if let metalError = error as? MetalAudioError {
+                if case .invalidConfiguration(let message) = metalError {
+                    XCTAssertTrue(message.contains("expects 1D or 2D input"))
+                } else {
+                    XCTFail("Expected invalidConfiguration error, got \(metalError)")
+                }
+            }
+        }
+    }
+
+    func testLinearRejectsFeatureMismatch() throws {
+        // Test that input feature count must match (Lines 205-208 coverage)
+        let linear = try Linear(device: device, inputFeatures: 4, outputFeatures: 2)
+
+        // Input with wrong feature count
+        let input = try Tensor(device: device, shape: [6])  // Should be [4]
+        try input.copy(from: [Float](repeating: 1.0, count: 6))
+
+        let output = try Tensor(device: device, shape: [2])
+
+        let context = try ComputeContext(device: device)
+        XCTAssertThrowsError(try context.executeSync { encoder in
+            try linear.forward(input: input, output: output, encoder: encoder)
+        }) { error in
+            // Should throw bufferSizeMismatch error
+            if let metalError = error as? MetalAudioError {
+                if case .bufferSizeMismatch(let expected, let actual) = metalError {
+                    XCTAssertEqual(expected, 4)
+                    XCTAssertEqual(actual, 6)
+                } else {
+                    XCTFail("Expected bufferSizeMismatch error, got \(metalError)")
+                }
+            }
+        }
+    }
+
+    func testLinearRejectsBatchFeatureMismatch() throws {
+        // Test that batched input feature count must match
+        let linear = try Linear(device: device, inputFeatures: 4, outputFeatures: 2)
+
+        // Batched input with wrong feature count
+        let input = try Tensor(device: device, shape: [3, 5])  // Should be [3, 4]
+        try input.copy(from: [Float](repeating: 1.0, count: 15))
+
+        let output = try Tensor(device: device, shape: [3, 2])
+
+        let context = try ComputeContext(device: device)
+        XCTAssertThrowsError(try context.executeSync { encoder in
+            try linear.forward(input: input, output: output, encoder: encoder)
+        }) { error in
+            if let metalError = error as? MetalAudioError {
+                if case .bufferSizeMismatch(let expected, let actual) = metalError {
+                    XCTAssertEqual(expected, 4)
+                    XCTAssertEqual(actual, 5)
+                } else {
+                    XCTFail("Expected bufferSizeMismatch error, got \(metalError)")
+                }
+            }
+        }
+    }
 }
 

@@ -1,0 +1,20 @@
+# CODEOWNERS - Defines who must review changes to specific files
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owner for all files
+* @zkeown
+
+# Critical infrastructure - require owner review
+.github/ @zkeown
+Package.swift @zkeown
+Package.resolved @zkeown
+
+# Security-sensitive files
+SECURITY.md @zkeown
+Sources/*/Shaders/*.metal @zkeown
+
+# Core thread-safety and real-time audio code
+Sources/MetalAudioKit/AudioDevice.swift @zkeown
+Sources/MetalAudioKit/ComputeContext.swift @zkeown
+Sources/MetalNN/BNNSInference.swift @zkeown
+Sources/MetalNN/BNNSStreamingInference.swift @zkeown
