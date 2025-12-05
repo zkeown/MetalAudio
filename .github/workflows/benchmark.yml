@@ -37,21 +37,31 @@ jobs:
 
       - name: Run Benchmarks
         run: |
-          timeout 120 .build/release/Benchmark --format json > benchmark-results.json || true
+          # Run with --quick flag in CI to reduce time, use --json for output
+          timeout 180 .build/release/Benchmark --quick --json > benchmark-raw.json 2>&1 || true
+
+          # Transform to github-action-benchmark format
+          # Expected: [{"name": "...", "unit": "µs", "value": 123.45}, ...]
+          if [ -s benchmark-raw.json ]; then
+            jq '[.results | to_entries[] | .value[] | {name: "\(.operation)", unit: "µs", value: .avgUs}]' benchmark-raw.json > benchmark-results.json 2>/dev/null || echo "[]" > benchmark-results.json
+          else
+            echo "[]" > benchmark-results.json
+          fi
+
+          echo "Benchmark results:"
           cat benchmark-results.json
 
       - name: Store Benchmark Results
+        if: ${{ hashFiles('benchmark-results.json') != '' }}
         uses: benchmark-action/github-action-benchmark@d48d326b4ca9ba73ca0cd0d59f108f9e02a381c7 # v1.20.4
         with:
           name: MetalAudio Benchmarks
           tool: 'customSmallerIsBetter'
           output-file-path: benchmark-results.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          # Store results in gh-pages branch
           auto-push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-          # Comment on PRs with comparison
           comment-on-alert: true
           alert-threshold: '150%'
           fail-on-alert: false
-          # Keep history
           max-items-in-chart: 50
+          skip-fetch-gh-pages: ${{ github.event_name == 'pull_request' }}
