@@ -22,13 +22,13 @@ final class HardwareProfileTests: XCTestCase {
         let profile = device.hardwareProfile
 
         // Should detect some valid family on any supported device
-        #if os(macOS)
-        XCTAssertNotEqual(profile.gpuFamily, .unknown,
-                          "GPU family should be detected. Device: \(profile.deviceName)")
-        #else
-        // On iOS simulator, GPU family detection may return .unknown
+        #if targetEnvironment(simulator)
+        // On simulator, GPU family detection may return .unknown
         // which is acceptable - just verify the property exists
         XCTAssertNotNil(profile.gpuFamily)
+        #else
+        XCTAssertNotEqual(profile.gpuFamily, .unknown,
+                          "GPU family should be detected. Device: \(profile.deviceName)")
         #endif
 
         // Apple Silicon should have unified memory

@@ -180,11 +180,11 @@ final class MemoryTrackerTests: XCTestCase {
         // Snapshot should have valid values
         XCTAssertGreaterThan(snapshot.timestamp, 0)
         // System should have some available memory
-        #if os(macOS)
-        XCTAssertGreaterThan(snapshot.systemAvailable, 0)
-        #else
-        // On iOS simulator, os_proc_available_memory() returns 0
+        #if targetEnvironment(simulator)
+        // On simulator, os_proc_available_memory() returns 0
         XCTAssertGreaterThanOrEqual(snapshot.systemAvailable, 0)
+        #else
+        XCTAssertGreaterThan(snapshot.systemAvailable, 0)
         #endif
     }
 

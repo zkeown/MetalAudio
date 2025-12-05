@@ -908,13 +908,13 @@ final class ExtendedAudioDeviceTests: XCTestCase {
         let profile = device.hardwareProfile
 
         // Check that we get valid GPU family
-        // Note: iOS simulator returns .unknown since it doesn't have real GPU family
+        // Note: iOS simulator returns .unknown since it uses emulated Metal
         let gpuFamily = profile.gpuFamily
-        #if os(macOS)
-        XCTAssertNotEqual(gpuFamily, .unknown, "GPU family should be detected")
-        #else
-        // On iOS simulator, unknown is acceptable
+        #if targetEnvironment(simulator)
+        // On simulator, unknown is acceptable
         XCTAssertNotNil(gpuFamily, "GPU family should exist")
+        #else
+        XCTAssertNotEqual(gpuFamily, .unknown, "GPU family should be detected")
         #endif
     }
 
@@ -1594,11 +1594,11 @@ final class HardwareProfileExtendedTests: XCTestCase {
         // Thread execution width should be 32 for all Apple GPUs
         XCTAssertEqual(profile.threadExecutionWidth, 32)
 
-        // Working set size should be positive (0 on iOS simulator is acceptable)
-        #if os(macOS)
-        XCTAssertGreaterThan(profile.recommendedWorkingSetSize, 0)
-        #else
+        // Working set size should be positive (0 on simulator is acceptable)
+        #if targetEnvironment(simulator)
         XCTAssertGreaterThanOrEqual(profile.recommendedWorkingSetSize, 0)
+        #else
+        XCTAssertGreaterThan(profile.recommendedWorkingSetSize, 0)
         #endif
     }
 }
