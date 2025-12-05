@@ -69,20 +69,24 @@ jobs:
   # Build & Test - iOS Simulator
   # =============================================================================
   test-ios:
-    name: Test iOS (${{ matrix.device }})
+    name: Test iOS ${{ matrix.ios }} (${{ matrix.device }})
     runs-on: macos-${{ matrix.macos }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # iPhone SE 3rd gen (A15) - oldest available device in CI
-          - device: "iPhone SE (3rd generation)"
+          # iPhone 8 (A11) - minimum hardware target with iOS 16
+          - device: "iPhone 8"
+            ios: "16.4"
             xcode: "16.1"
             macos: "15"
-          # iPhone 16 Pro (A18 Pro) - latest flagship
-          - device: "iPhone 16 Pro"
+            needs_runtime: true
+          # iPhone 17 Pro (A19 Pro) - latest flagship with iOS 26
+          - device: "iPhone 17 Pro"
+            ios: "26.1"
             xcode: "16.1"
             macos: "15"
+            needs_runtime: false
 
     steps:
       - name: Checkout
@@ -92,6 +96,31 @@ jobs:
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: ${{ matrix.xcode }}
+
+      - name: Download iOS ${{ matrix.ios }} Runtime
+        if: matrix.needs_runtime
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          # Create API key file
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "$APPLE_API_KEY" > ~/.appstoreconnect/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8
+
+          # Download iOS 16.4 runtime
+          echo "Downloading iOS ${{ matrix.ios }} runtime..."
+          xcodebuild -downloadPlatform iOS
+
+          # List available runtimes to verify
+          xcrun simctl list runtimes | grep -i ios
+
+      - name: Create iPhone 8 Simulator
+        if: matrix.device == 'iPhone 8'
+        run: |
+          # Create iPhone 8 device if it doesn't exist
+          xcrun simctl create "iPhone 8" "com.apple.CoreSimulator.SimDeviceType.iPhone-8" "com.apple.CoreSimulator.SimRuntime.iOS-16-4" || true
+          xcrun simctl list devices | grep "iPhone 8"
 
       - name: Cache Swift packages
         uses: actions/cache@v4
@@ -111,7 +140,7 @@ jobs:
         run: |
           xcodebuild test \
             -scheme MetalAudio-Package \
-            -destination "platform=iOS Simulator,name=${{ matrix.device }},OS=18.4" \
+            -destination "platform=iOS Simulator,name=${{ matrix.device }},OS=${{ matrix.ios }}" \
             -skipPackagePluginValidation \
             CODE_SIGNING_ALLOWED=NO
 
