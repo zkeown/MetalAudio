@@ -61,15 +61,17 @@ jobs:
   # =============================================================================
   test-ios:
     name: Test iOS (${{ matrix.device }})
-    runs-on: macos-26
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - device: "iPhone 17 Pro"
             ios: "26.1"
+            runner: macos-26
           - device: "iPhone 8"
-            ios: "16.7"
+            ios: "16.4"
+            runner: macos-14
 
     steps:
       - name: Checkout
