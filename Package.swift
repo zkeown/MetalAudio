@@ -94,7 +94,7 @@ let package = Package(
         ),
         .testTarget(
             name: "MetalDSPTests",
-            dependencies: ["MetalDSP", "MetalAudioKit"],
+            dependencies: ["MetalDSP", "MetalAudioKit", "MetalNN"],
             path: "Tests/MetalDSPTests"
         ),
         .testTarget(
