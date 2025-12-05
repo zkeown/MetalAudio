@@ -1,3 +1,5 @@
+// BNNS Graph API requires iOS 18+ / macOS 15+ SDK (Swift 6 / Xcode 16)
+#if compiler(>=6.0)
 import Foundation
 import Accelerate
 import MetalAudioKit
@@ -550,3 +552,4 @@ public extension InferenceQueue {
         }
     }
 }
+#endif  // compiler(>=6.0)

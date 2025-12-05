@@ -1,3 +1,5 @@
+// BNNS Graph API requires iOS 18+ / macOS 15+ SDK (Swift 6 / Xcode 16)
+#if compiler(>=6.0)
 import Foundation
 import MetalAudioKit
 
@@ -418,3 +420,4 @@ extension HybridPipeline: MemoryPressureResponder {
         }
     }
 }
+#endif  // compiler(>=6.0)
