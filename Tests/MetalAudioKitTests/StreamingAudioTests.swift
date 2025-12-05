@@ -411,10 +411,19 @@ final class StreamingRingBufferTests: XCTestCase {
         let ring = StreamingRingBuffer(file: file, bufferSize: 4096)
         ring.prefetchAhead = 1024
 
+        // Helper to wait for samples with timeout (CI environments may be slow)
+        func waitForSamples(timeout: TimeInterval = 2.0) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if ring.availableCount > 0 { return true }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            return ring.availableCount > 0
+        }
+
         // First cycle
         ring.startStreaming()
-        Thread.sleep(forTimeInterval: 0.1)
-        XCTAssertGreaterThan(ring.availableCount, 0, "Should have samples after first start")
+        XCTAssertTrue(waitForSamples(), "Should have samples after first start")
         ring.stopStreaming()
 
         // Reset position
@@ -422,8 +431,7 @@ final class StreamingRingBufferTests: XCTestCase {
 
         // Second cycle
         ring.startStreaming()
-        Thread.sleep(forTimeInterval: 0.1)
-        XCTAssertGreaterThan(ring.availableCount, 0, "Should have samples after second start")
+        XCTAssertTrue(waitForSamples(), "Should have samples after second start")
         ring.stopStreaming()
     }
 

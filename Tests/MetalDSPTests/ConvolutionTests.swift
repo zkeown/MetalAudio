@@ -558,8 +558,14 @@ final class ConvolutionCrossValidationTests: XCTestCase {
         try conv.process(input: signal, output: &ourOutput)
 
         // vDSP reference - same kernel orientation
+        // vDSP_conv requires input to have at least outputSize + kernelSize - 1 elements
+        // so we pad the signal with zeros (same as our implementation)
+        var paddedSignal = signal
+        let paddingNeeded = (kernelSize - 1) * 2  // Same padding as our implementation
+        paddedSignal.append(contentsOf: repeatElement(Float(0), count: paddingNeeded))
+
         var vdspOutput = [Float](repeating: 0, count: outputSize)
-        vDSP_conv(signal, 1, kernel, 1, &vdspOutput, 1,
+        vDSP_conv(paddedSignal, 1, kernel, 1, &vdspOutput, 1,
                   vDSP_Length(outputSize), vDSP_Length(kernelSize))
 
         // Compute RMS error
