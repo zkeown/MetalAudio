@@ -289,15 +289,25 @@ open class AudioUnitScaffold: AUAudioUnit {
         }
         set {
             guard let state = newValue else { return }
+
+            // Collect updates to apply
+            var updates: [(AUParameterAddress, AUValue)] = []
+
+            // Update internal values under lock
             os_unfair_lock_lock(&parameterLock)
             for (key, value) in state {
                 if let address = AUParameterAddress(key),
                    let floatValue = value as? AUValue {
                     parameterValues[address] = floatValue
-                    _parameterTree?.parameter(withAddress: address)?.value = floatValue
+                    updates.append((address, floatValue))
                 }
             }
             os_unfair_lock_unlock(&parameterLock)
+
+            // Update parameter tree outside lock to avoid deadlock
+            for (address, value) in updates {
+                _parameterTree?.parameter(withAddress: address)?.value = value
+            }
         }
     }
 
@@ -445,12 +455,18 @@ open class AudioUnitScaffold: AUAudioUnit {
             // Apply factory preset
             if preset.number >= 0,
                let factory = config.factoryPresets.first(where: { $0.number == preset.number }) {
+                // Update internal values under lock
                 os_unfair_lock_lock(&parameterLock)
                 for (address, value) in factory.values {
                     parameterValues[address] = value
-                    _parameterTree?.parameter(withAddress: address)?.value = value
                 }
                 os_unfair_lock_unlock(&parameterLock)
+
+                // Update parameter tree outside lock to avoid deadlock
+                // (setting value triggers implementorValueObserver which also locks)
+                for (address, value) in factory.values {
+                    _parameterTree?.parameter(withAddress: address)?.value = value
+                }
             }
         }
     }

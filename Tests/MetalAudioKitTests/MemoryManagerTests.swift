@@ -320,3 +320,225 @@ final class AudioBufferPoolBudgetTests: XCTestCase {
         XCTAssertNil(pool.memoryBudget)
     }
 }
+
+// MARK: - Additional MemoryManager Tests
+
+final class MemoryManagerAdditionalTests: XCTestCase {
+
+    var manager: MemoryManager!
+
+    override func setUp() {
+        super.setUp()
+        manager = MemoryManager.shared
+        manager.globalMemoryBudget = nil
+        manager.stopPeriodicMaintenance()
+        manager.stopDebugMonitoring()
+    }
+
+    override func tearDown() {
+        manager.globalMemoryBudget = nil
+        manager.stopPeriodicMaintenance()
+        manager.stopDebugMonitoring()
+        manager.debugCallback = nil
+        super.tearDown()
+    }
+
+    func testTotalRegisteredMemoryUsage() throws {
+        let device = try AudioDevice()
+        let pool = try AudioBufferPool(device: device, sampleCount: 1024, poolSize: 4)
+
+        let initialUsage = manager.totalRegisteredMemoryUsage
+
+        manager.register(pool)
+
+        // Pool should contribute to total usage
+        let newUsage = manager.totalRegisteredMemoryUsage
+        XCTAssertEqual(newUsage, initialUsage + pool.currentMemoryUsage)
+
+        manager.unregister(pool)
+    }
+
+    func testIsOverBudgetWhenActuallyOver() throws {
+        let device = try AudioDevice()
+        // Create a pool with known memory usage
+        let pool = try AudioBufferPool(device: device, sampleCount: 1024, poolSize: 8)
+
+        manager.register(pool)
+
+        // Set budget lower than current usage
+        // Pool uses: 8 * 1024 * 4 = 32768 bytes
+        manager.globalMemoryBudget = 1000  // Much less than pool uses
+
+        XCTAssertTrue(manager.isOverBudget, "Should be over budget when usage exceeds limit")
+
+        manager.unregister(pool)
+    }
+
+    func testEnforceGlobalBudget() throws {
+        let device = try AudioDevice()
+        let pool = try AudioBufferPool(device: device, sampleCount: 1024, poolSize: 8)
+
+        manager.register(pool)
+
+        // Set budget lower than current usage
+        manager.globalMemoryBudget = 1000
+
+        XCTAssertTrue(manager.isOverBudget)
+
+        // Enforce budget - this triggers critical pressure
+        manager.enforceGlobalBudget()
+
+        // Pool should have shrunk due to critical pressure
+        // (May not be exactly under budget, but should have responded)
+        XCTAssertLessThan(pool.availableCount, 8, "Pool should shrink under pressure")
+
+        manager.unregister(pool)
+    }
+
+    func testEnforceGlobalBudgetWhenNotOver() throws {
+        // When not over budget, enforceGlobalBudget should be a no-op
+        manager.globalMemoryBudget = 1_000_000_000  // 1GB - way over anything we'd use
+
+        // Should not crash or do anything
+        manager.enforceGlobalBudget()
+
+        XCTAssertFalse(manager.isOverBudget)
+    }
+
+    func testStartDebugMonitoringWithoutDevice() {
+        XCTAssertFalse(manager.isDebugMonitoringActive)
+
+        // Start without device (device: nil is default)
+        manager.startDebugMonitoring(interval: 60)
+
+        XCTAssertTrue(manager.isDebugMonitoringActive)
+    }
+
+    func testDebugCallbackWithWatermarks() throws {
+        let device = try AudioDevice()
+        let expectation = expectation(description: "Debug callback with watermarks")
+
+        var receivedWatermarks: MemoryWatermarks?
+        manager.debugCallback = { _, watermarks in
+            receivedWatermarks = watermarks
+            expectation.fulfill()
+        }
+
+        manager.startDebugMonitoring(device: device.device, interval: 0.1)
+
+        waitForExpectations(timeout: 2)
+
+        // Watermarks should be provided when device is available
+        XCTAssertNotNil(receivedWatermarks)
+    }
+
+    func testRestartPeriodicMaintenance() {
+        manager.startPeriodicMaintenance(interval: 60)
+        XCTAssertTrue(manager.isPeriodicMaintenanceActive)
+
+        // Restart with different interval
+        manager.startPeriodicMaintenance(interval: 30)
+        XCTAssertTrue(manager.isPeriodicMaintenanceActive)
+
+        // Should still be active (old timer cancelled, new one started)
+        manager.stopPeriodicMaintenance()
+        XCTAssertFalse(manager.isPeriodicMaintenanceActive)
+    }
+
+    func testRestartDebugMonitoring() throws {
+        let device = try AudioDevice()
+
+        manager.startDebugMonitoring(device: device.device, interval: 60)
+        XCTAssertTrue(manager.isDebugMonitoringActive)
+
+        // Restart with different interval
+        manager.startDebugMonitoring(device: device.device, interval: 30)
+        XCTAssertTrue(manager.isDebugMonitoringActive)
+
+        // Should still be active
+        manager.stopDebugMonitoring()
+        XCTAssertFalse(manager.isDebugMonitoringActive)
+    }
+
+    func testConcurrentRegistration() throws {
+        let iterations = 50
+        let expectation = expectation(description: "Concurrent registration")
+        expectation.expectedFulfillmentCount = 4
+
+        var devices: [AudioDevice] = []
+        for _ in 0..<iterations {
+            devices.append(try AudioDevice())
+        }
+
+        let initialCount = manager.registeredCount
+
+        // Multiple threads registering/unregistering concurrently
+        for threadNum in 0..<4 {
+            DispatchQueue.global().async {
+                for i in 0..<iterations {
+                    let device = devices[i]
+                    if threadNum % 2 == 0 {
+                        self.manager.register(device)
+                    } else {
+                        self.manager.unregister(device)
+                    }
+                }
+                expectation.fulfill()
+            }
+        }
+
+        waitForExpectations(timeout: 10)
+
+        // Clean up - unregister all
+        for device in devices {
+            manager.unregister(device)
+        }
+
+        XCTAssertEqual(manager.registeredCount, initialCount)
+    }
+
+    func testOsUnfairLockWithLock() {
+        var lock = os_unfair_lock()
+
+        // Test that withLock executes and returns value
+        let result = lock.withLock {
+            return 42
+        }
+
+        XCTAssertEqual(result, 42)
+
+        // Test that it works with throwing closures
+        struct TestError: Error {}
+
+        XCTAssertThrowsError(try lock.withLock {
+            throw TestError()
+        })
+    }
+
+    func testPerformMaintenanceWithOverBudgetComponent() throws {
+        let device = try AudioDevice()
+        let pool = try AudioBufferPool(device: device, sampleCount: 1024, poolSize: 8)
+
+        manager.register(pool)
+
+        // Pool starts with 8 buffers, each 4096 bytes = 32768 total
+        let initialCount = pool.availableCount
+        XCTAssertEqual(initialCount, 8)
+
+        // Set budget to 20KB - less than 32KB but still allows some buffers
+        // This lets the pool stay partially filled but still be "over budget"
+        pool.setMemoryBudget(20 * 1024)
+
+        // Pool should have shrunk but still have some buffers
+        XCTAssertGreaterThan(pool.availableCount, 0, "Pool should still have buffers")
+        XCTAssertLessThanOrEqual(pool.availableCount, 5, "Pool should have shrunk to fit budget")
+
+        // Perform maintenance - also shrinks pool to 50%
+        manager.performMaintenance()
+
+        // Pool should have shrunk further
+        XCTAssertLessThan(pool.availableCount, initialCount)
+
+        manager.unregister(pool)
+    }
+}

@@ -89,6 +89,57 @@ final class ShaderDiskCacheTests: XCTestCase {
         cache.entryTTL = 60 * 60  // 1 hour
         XCTAssertEqual(cache.entryTTL, 60 * 60)
     }
+
+    func testPruneExpired() {
+        // Initially empty
+        let statsBefore = cache.statistics
+        XCTAssertEqual(statsBefore.entryCount, 0)
+
+        // Prune on empty cache should not crash
+        cache.pruneExpired()
+
+        let statsAfter = cache.statistics
+        XCTAssertEqual(statsAfter.entryCount, 0)
+    }
+
+    @available(macOS 11.0, iOS 14.0, *)
+    func testStatisticsAfterSave() throws {
+        let testSource = """
+            #include <metal_stdlib>
+            using namespace metal;
+            kernel void stats_test(device float* data [[buffer(0)]]) {
+                data[0] = 1.0;
+            }
+            """
+
+        // Compile and save
+        let pipeline = try device.makeComputePipeline(source: testSource, functionName: "stats_test")
+        cache.savePipeline(pipeline, source: testSource, functionName: "stats_test")
+
+        // Stats should reflect the entry
+        let stats = cache.statistics
+        XCTAssertEqual(stats.entryCount, 1)
+        XCTAssertGreaterThan(stats.totalBytes, 0)
+        XCTAssertNotNil(stats.oldestEntry)
+    }
+
+    func testDefaultCacheDirectory() throws {
+        // Create cache with default directory (no custom directory)
+        let defaultCache = ShaderDiskCache(device: device.device)
+
+        XCTAssertNotNil(defaultCache)
+
+        // Verify the cache directory contains "MetalShaderCache"
+        XCTAssertTrue(defaultCache.cacheDirectory.path.contains("MetalShaderCache"))
+    }
+
+    func testCacheDirectoryProperty() {
+        XCTAssertEqual(cache.cacheDirectory, cacheDirectory)
+    }
+
+    func testDeviceProperty() {
+        XCTAssertEqual(cache.device.name, device.device.name)
+    }
 }
 
 // MARK: - ShaderPrecompiler Tests
@@ -249,5 +300,119 @@ final class ShaderPrecompilerTests: XCTestCase {
         }
 
         waitForExpectations(timeout: 1)
+    }
+
+    func testWaitForCompletionReturnsTrue() {
+        let testSource = """
+            #include <metal_stdlib>
+            using namespace metal;
+            kernel void wait_ret_test(device float* data [[buffer(0)]]) {
+                data[0] = 1.0;
+            }
+            """
+
+        precompiler.register(source: testSource, functionName: "wait_ret_test")
+        precompiler.startPrecompilation()
+
+        // Should complete within timeout
+        let completed = precompiler.waitForCompletion(timeout: 10)
+        XCTAssertTrue(completed, "Should return true when compilation completes")
+        XCTAssertFalse(precompiler.isPrecompiling)
+    }
+
+    func testWaitForCompletionWithoutPrecompilation() {
+        // When not precompiling, should return true immediately
+        let completed = precompiler.waitForCompletion(timeout: 1)
+        XCTAssertTrue(completed, "Should return true when not precompiling")
+    }
+
+    func testDoublePrecompilationGuard() {
+        let expectation = expectation(description: "First precompilation")
+
+        let testSource = """
+            #include <metal_stdlib>
+            using namespace metal;
+            kernel void double_test(device float* data [[buffer(0)]]) {
+                data[0] = 1.0;
+            }
+            """
+
+        precompiler.register(source: testSource, functionName: "double_test")
+
+        // Start first precompilation
+        precompiler.startPrecompilation { _, _ in
+            expectation.fulfill()
+        }
+
+        // Trying to start second precompilation should be ignored
+        // (guard !isCompiling returns early)
+        precompiler.startPrecompilation { _, _ in
+            XCTFail("Second precompilation should not call completion")
+        }
+
+        waitForExpectations(timeout: 10)
+    }
+
+    func testPrecompilerWithDiskCacheEnabled() throws {
+        // Create precompiler with disk cache enabled
+        let precompWithCache = ShaderPrecompiler(device: device, enableDiskCache: true)
+
+        if #available(macOS 11.0, iOS 14.0, *) {
+            XCTAssertNotNil(precompWithCache.diskCache)
+        }
+
+        XCTAssertEqual(precompWithCache.compiledShaderCount, 0)
+    }
+
+    func testPrecompilerDiskCacheNilOnOlderOS() {
+        // Disk cache should be nil if disabled
+        let precompNoDisk = ShaderPrecompiler(device: device, enableDiskCache: false)
+        XCTAssertNil(precompNoDisk.diskCache)
+    }
+
+    func testMultipleShaderPrecompilation() {
+        let expectation = expectation(description: "Multiple shaders")
+
+        let source1 = """
+            #include <metal_stdlib>
+            using namespace metal;
+            kernel void multi_test1(device float* data [[buffer(0)]]) { data[0] = 1.0; }
+            """
+        let source2 = """
+            #include <metal_stdlib>
+            using namespace metal;
+            kernel void multi_test2(device float* data [[buffer(0)]]) { data[0] = 2.0; }
+            """
+
+        precompiler.register(source: source1, functionName: "multi_test1")
+        precompiler.register(source: source2, functionName: "multi_test2")
+
+        precompiler.startPrecompilation { success, failed in
+            XCTAssertEqual(success, 2)
+            XCTAssertEqual(failed, 0)
+            expectation.fulfill()
+        }
+
+        waitForExpectations(timeout: 15)
+        XCTAssertEqual(precompiler.compiledShaderCount, 2)
+    }
+
+    func testGetPipelineCachesResult() throws {
+        let testSource = """
+            #include <metal_stdlib>
+            using namespace metal;
+            kernel void cache_result_test(device float* data [[buffer(0)]]) {
+                data[0] = 1.0;
+            }
+            """
+
+        // First call compiles
+        let pipeline1 = try precompiler.getPipeline(source: testSource, functionName: "cache_result_test")
+
+        // Second call should return cached
+        let pipeline2 = try precompiler.getPipeline(source: testSource, functionName: "cache_result_test")
+
+        // Both should be the same object
+        XCTAssertTrue(pipeline1 === pipeline2, "Second call should return cached pipeline")
     }
 }

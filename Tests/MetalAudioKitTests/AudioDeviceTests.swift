@@ -305,6 +305,36 @@ final class AudioBufferExtendedTests: XCTestCase {
         }
         XCTAssertTrue(didThrow, "Should have thrown error for size mismatch")
     }
+
+    // MARK: - contents<T>() Type Size Mismatch Tests
+
+    func testContentsTypeSizeMismatch() throws {
+        // Create a small buffer (4 bytes = 1 float)
+        let buffer = try AudioBuffer(device: device, sampleCount: 1, channelCount: 1, format: .float32)
+
+        // Try to access as a larger type that would require more bytes
+        // SIMD4<Float> requires 16 bytes but buffer only has 4
+        XCTAssertThrowsError(try buffer.contents() as UnsafeMutablePointer<SIMD4<Float>>) { error in
+            guard case MetalAudioError.typeSizeMismatch = error else {
+                XCTFail("Expected typeSizeMismatch error, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testContentsTypeSizeMismatchWithDouble() throws {
+        // Create a buffer with 1 float (4 bytes)
+        let buffer = try AudioBuffer(device: device, sampleCount: 1, channelCount: 1, format: .float32)
+
+        // Try to access as Double which requires 8 bytes per element
+        // Buffer has 4 bytes, requesting 1 Double (8 bytes) should fail
+        XCTAssertThrowsError(try buffer.contents() as UnsafeMutablePointer<Double>) { error in
+            guard case MetalAudioError.typeSizeMismatch = error else {
+                XCTFail("Expected typeSizeMismatch error, got \(error)")
+                return
+            }
+        }
+    }
 }
 
 // MARK: - Extended AudioBufferPool Tests
@@ -1949,6 +1979,22 @@ final class AudioDeviceThermalTests: XCTestCase {
         XCTAssertLessThan(fair.rawValue, serious.rawValue)
         XCTAssertLessThan(serious.rawValue, critical.rawValue)
     }
+
+    func testThermalStateEnumComparable() {
+        // Test that the custom ThermalState enum is Comparable
+        XCTAssertTrue(ThermalState.nominal < ThermalState.fair)
+        XCTAssertTrue(ThermalState.fair < ThermalState.serious)
+        XCTAssertTrue(ThermalState.serious < ThermalState.critical)
+        XCTAssertFalse(ThermalState.critical < ThermalState.nominal)
+        XCTAssertFalse(ThermalState.nominal < ThermalState.nominal)
+    }
+
+    func testThermalStateEnumRawValues() {
+        XCTAssertEqual(ThermalState.nominal.rawValue, 0)
+        XCTAssertEqual(ThermalState.fair.rawValue, 1)
+        XCTAssertEqual(ThermalState.serious.rawValue, 2)
+        XCTAssertEqual(ThermalState.critical.rawValue, 3)
+    }
 }
 
 // MARK: - Tensor Half-Precision Tests
@@ -2403,6 +2449,8 @@ final class MetalAudioErrorTests: XCTestCase {
             .deviceNotFound,
             .deviceLost,
             .commandQueueCreationFailed,
+            .commandBufferCreationFailed,
+            .commandEncoderCreationFailed,
             .libraryNotFound,
             .functionNotFound("testFunc"),
             .pipelineCreationFailed("test reason"),
@@ -2410,12 +2458,14 @@ final class MetalAudioErrorTests: XCTestCase {
             .bufferSizeMismatch(expected: 100, actual: 50),
             .shaderLoadFailed("test"),
             .gpuTimeout(30.0),
+            .gpuExecutionError("test execution error"),
             .indexOutOfBounds(index: [5], shape: [3]),
             .invalidConfiguration("test"),
             .integerOverflow(operation: "test"),
             .bufferTooLarge(requested: Int.max / 2, maxAllowed: 1000),
             .typeSizeMismatch(requestedBytes: 100, bufferBytes: 50),
-            .invalidPointer
+            .invalidPointer,
+            .bufferOverflow("test overflow")
         ]
 
         for error in errors {
@@ -2443,6 +2493,26 @@ final class MetalAudioErrorTests: XCTestCase {
     func testBufferAllocationFailedDescription() {
         let error = MetalAudioError.bufferAllocationFailed(4096)
         XCTAssertTrue(error.errorDescription?.contains("4096") ?? false)
+    }
+
+    func testBufferOverflowDescription() {
+        let error = MetalAudioError.bufferOverflow("write exceeded capacity")
+        XCTAssertTrue(error.errorDescription?.contains("write exceeded capacity") ?? false)
+    }
+
+    func testGpuExecutionErrorDescription() {
+        let error = MetalAudioError.gpuExecutionError("shader failed")
+        XCTAssertTrue(error.errorDescription?.contains("shader failed") ?? false)
+    }
+
+    func testCommandBufferCreationFailedDescription() {
+        let error = MetalAudioError.commandBufferCreationFailed
+        XCTAssertTrue(error.errorDescription?.contains("command buffer") ?? false)
+    }
+
+    func testCommandEncoderCreationFailedDescription() {
+        let error = MetalAudioError.commandEncoderCreationFailed
+        XCTAssertTrue(error.errorDescription?.contains("encoder") ?? false)
     }
 }
 
@@ -2509,6 +2579,96 @@ final class AudioBufferSafeCopyTests: XCTestCase {
 
         XCTAssertThrowsError(try buffer.safeCopyFromCPU(testData, context: context, fenceValue: fenceValue)) { error in
             XCTAssertTrue(error is MetalAudioError, "Should throw MetalAudioError")
+        }
+    }
+
+    // MARK: - safeToArray Tests
+
+    func testSafeToArray() throws {
+        let buffer = try AudioBuffer(device: device, sampleCount: 4, channelCount: 1)
+        let testData: [Float] = [1.0, 2.0, 3.0, 4.0]
+        try buffer.copyFromCPU(testData)
+
+        let fenceValue = try context.executeSync { _ in UInt64(0) }
+
+        let result = try buffer.safeToArray(context: context, fenceValue: fenceValue)
+        XCTAssertEqual(result, testData, "safeToArray should return correct data")
+    }
+
+    func testSafeToArrayEmpty() throws {
+        let buffer = try AudioBuffer(device: device, sampleCount: 1, channelCount: 1)
+        let testData: [Float] = [42.0]
+        try buffer.copyFromCPU(testData)
+
+        let fenceValue = try context.executeSync { _ in UInt64(0) }
+
+        let result = try buffer.safeToArray(context: context, fenceValue: fenceValue)
+        XCTAssertEqual(result, testData, "safeToArray should work for single-element buffer")
+    }
+
+    // MARK: - safeCopyToCPU Tests
+
+    func testSafeCopyToCPURawPointer() throws {
+        let buffer = try AudioBuffer(device: device, sampleCount: 4, channelCount: 1)
+        let testData: [Float] = [10.0, 20.0, 30.0, 40.0]
+        try buffer.copyFromCPU(testData)
+
+        let fenceValue = try context.executeSync { _ in UInt64(0) }
+
+        var destination = [Float](repeating: 0, count: 4)
+        try destination.withUnsafeMutableBytes { ptr in
+            guard let base = ptr.baseAddress else { return }
+            try buffer.safeCopyToCPU(base, size: 16, context: context, fenceValue: fenceValue)
+        }
+
+        XCTAssertEqual(destination, testData, "safeCopyToCPU raw pointer should copy data correctly")
+    }
+
+    func testSafeCopyToCPUTypedBuffer() throws {
+        let buffer = try AudioBuffer(device: device, sampleCount: 4, channelCount: 1)
+        let testData: [Float] = [100.0, 200.0, 300.0, 400.0]
+        try buffer.copyFromCPU(testData)
+
+        let fenceValue = try context.executeSync { _ in UInt64(0) }
+
+        var destination = [Float](repeating: 0, count: 4)
+        try destination.withUnsafeMutableBytes { ptr in
+            let rawPtr = UnsafeMutableRawBufferPointer(ptr)
+            try buffer.safeCopyToCPU(rawPtr, size: 16, context: context, fenceValue: fenceValue)
+        }
+
+        XCTAssertEqual(destination, testData, "safeCopyToCPU typed buffer should copy data correctly")
+    }
+
+    func testSafeCopyToCPUSizeMismatchSource() throws {
+        let buffer = try AudioBuffer(device: device, sampleCount: 2, channelCount: 1)
+
+        let fenceValue = try context.executeSync { _ in UInt64(0) }
+
+        var destination = [Float](repeating: 0, count: 4)
+        try destination.withUnsafeMutableBytes { ptr in
+            guard let base = ptr.baseAddress else { return }
+            // Request more bytes than source buffer contains
+            XCTAssertThrowsError(try buffer.safeCopyToCPU(base, size: 32, context: context, fenceValue: fenceValue)) { error in
+                XCTAssertTrue(error is MetalAudioError)
+            }
+        }
+    }
+
+    func testSafeCopyToCPUSizeMismatchDestination() throws {
+        let buffer = try AudioBuffer(device: device, sampleCount: 4, channelCount: 1)
+        let testData: [Float] = [1.0, 2.0, 3.0, 4.0]
+        try buffer.copyFromCPU(testData)
+
+        let fenceValue = try context.executeSync { _ in UInt64(0) }
+
+        var smallDestination = [Float](repeating: 0, count: 2)
+        try smallDestination.withUnsafeMutableBytes { ptr in
+            let rawPtr = UnsafeMutableRawBufferPointer(ptr)
+            // Request more bytes than destination can hold
+            XCTAssertThrowsError(try buffer.safeCopyToCPU(rawPtr, size: 16, context: context, fenceValue: fenceValue)) { error in
+                XCTAssertTrue(error is MetalAudioError)
+            }
         }
     }
 }
@@ -2993,5 +3153,299 @@ final class AudioBufferPoolMemoryTests: XCTestCase {
         // Now try to release the buffer - should still work since it wasn't retired
         let released = pool.releaseIfValid(buffer)
         XCTAssertTrue(released, "Buffer in use during shrink should still be releasable")
+    }
+}
+
+// MARK: - AudioBuffer Wrapping Tests
+
+final class AudioBufferWrappingTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testInitWithMTLBuffer() throws {
+        // Create a raw MTLBuffer
+        let byteSize = 16 // 4 floats
+        guard let mtlBuffer = device.device.makeBuffer(
+            length: byteSize,
+            options: device.preferredStorageMode
+        ) else {
+            throw XCTSkip("Could not create MTLBuffer")
+        }
+
+        // Wrap it in AudioBuffer
+        let audioBuffer = try AudioBuffer(
+            buffer: mtlBuffer,
+            sampleCount: 4,
+            channelCount: 1,
+            format: .float32
+        )
+
+        XCTAssertEqual(audioBuffer.sampleCount, 4)
+        XCTAssertEqual(audioBuffer.channelCount, 1)
+        XCTAssertEqual(audioBuffer.format, .float32)
+        XCTAssertEqual(audioBuffer.byteSize, 16)
+    }
+
+    func testInitWithMTLBufferSizeMismatch() throws {
+        // Create a small MTLBuffer
+        let byteSize = 8 // Only 2 floats
+        guard let mtlBuffer = device.device.makeBuffer(
+            length: byteSize,
+            options: device.preferredStorageMode
+        ) else {
+            throw XCTSkip("Could not create MTLBuffer")
+        }
+
+        // Try to wrap with larger sample count - should throw
+        XCTAssertThrowsError(try AudioBuffer(
+            buffer: mtlBuffer,
+            sampleCount: 4,  // Needs 16 bytes but buffer is only 8
+            channelCount: 1,
+            format: .float32
+        )) { error in
+            guard case MetalAudioError.bufferSizeMismatch = error else {
+                XCTFail("Expected bufferSizeMismatch error, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testInitWithMTLBufferMultiChannel() throws {
+        // Create buffer for 4 samples * 2 channels * 4 bytes = 32 bytes
+        let byteSize = 32
+        guard let mtlBuffer = device.device.makeBuffer(
+            length: byteSize,
+            options: device.preferredStorageMode
+        ) else {
+            throw XCTSkip("Could not create MTLBuffer")
+        }
+
+        let audioBuffer = try AudioBuffer(
+            buffer: mtlBuffer,
+            sampleCount: 4,
+            channelCount: 2,
+            format: .float32
+        )
+
+        XCTAssertEqual(audioBuffer.sampleCount, 4)
+        XCTAssertEqual(audioBuffer.channelCount, 2)
+        XCTAssertEqual(audioBuffer.byteSize, 32)
+    }
+
+    func testInitWithMTLBufferDifferentFormats() throws {
+        // Test Float16: 4 samples * 1 channel * 2 bytes = 8 bytes
+        guard let float16Buffer = device.device.makeBuffer(
+            length: 8,
+            options: device.preferredStorageMode
+        ) else {
+            throw XCTSkip("Could not create MTLBuffer")
+        }
+
+        let float16Audio = try AudioBuffer(
+            buffer: float16Buffer,
+            sampleCount: 4,
+            channelCount: 1,
+            format: .float16
+        )
+        XCTAssertEqual(float16Audio.format, .float16)
+        XCTAssertEqual(float16Audio.byteSize, 8)
+
+        // Test Int16: same size as Float16
+        guard let int16Buffer = device.device.makeBuffer(
+            length: 8,
+            options: device.preferredStorageMode
+        ) else {
+            throw XCTSkip("Could not create MTLBuffer")
+        }
+
+        let int16Audio = try AudioBuffer(
+            buffer: int16Buffer,
+            sampleCount: 4,
+            channelCount: 1,
+            format: .int16
+        )
+        XCTAssertEqual(int16Audio.format, .int16)
+
+        // Test Int32: 4 samples * 1 channel * 4 bytes = 16 bytes
+        guard let int32Buffer = device.device.makeBuffer(
+            length: 16,
+            options: device.preferredStorageMode
+        ) else {
+            throw XCTSkip("Could not create MTLBuffer")
+        }
+
+        let int32Audio = try AudioBuffer(
+            buffer: int32Buffer,
+            sampleCount: 4,
+            channelCount: 1,
+            format: .int32
+        )
+        XCTAssertEqual(int32Audio.format, .int32)
+        XCTAssertEqual(int32Audio.byteSize, 16)
+    }
+
+    func testInitWithMTLBufferDataPreserved() throws {
+        // Create buffer and write data to it
+        let byteSize = 16
+        guard let mtlBuffer = device.device.makeBuffer(
+            length: byteSize,
+            options: device.preferredStorageMode
+        ) else {
+            throw XCTSkip("Could not create MTLBuffer")
+        }
+
+        // Write test data directly to MTLBuffer
+        let testData: [Float] = [1.0, 2.0, 3.0, 4.0]
+        testData.withUnsafeBytes { ptr in
+            guard let base = ptr.baseAddress else { return }
+            memcpy(mtlBuffer.contents(), base, byteSize)
+        }
+
+        // Wrap in AudioBuffer
+        let audioBuffer = try AudioBuffer(
+            buffer: mtlBuffer,
+            sampleCount: 4,
+            channelCount: 1,
+            format: .float32
+        )
+
+        // Verify data is accessible through AudioBuffer
+        let result = audioBuffer.toArray()
+        XCTAssertEqual(result, testData, "Data should be preserved when wrapping MTLBuffer")
+    }
+}
+
+// MARK: - AudioBuffer Overflow Tests
+
+final class AudioBufferOverflowTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testInitIntegerOverflowSampleTimesChannel() throws {
+        // Int.max / 2 * 2 would overflow
+        let hugeSampleCount = Int.max / 2 + 1
+
+        XCTAssertThrowsError(try AudioBuffer(
+            device: device,
+            sampleCount: hugeSampleCount,
+            channelCount: 2,
+            format: .float32
+        )) { error in
+            guard case MetalAudioError.integerOverflow = error else {
+                XCTFail("Expected integerOverflow error, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testInitIntegerOverflowByteSizeCalculation() throws {
+        // Large enough that samples * channels * bytesPerSample overflows
+        // Int.max / 4 samples * 1 channel * 4 bytes would overflow
+        let largeSampleCount = Int.max / 4 + 1
+
+        XCTAssertThrowsError(try AudioBuffer(
+            device: device,
+            sampleCount: largeSampleCount,
+            channelCount: 1,
+            format: .float32  // 4 bytes per sample
+        )) { error in
+            guard case MetalAudioError.integerOverflow = error else {
+                XCTFail("Expected integerOverflow error, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testWrappingInitIntegerOverflowSampleTimesChannel() throws {
+        // Create a small buffer - the overflow happens during validation, not allocation
+        guard let mtlBuffer = device.device.makeBuffer(
+            length: 16,
+            options: device.preferredStorageMode
+        ) else {
+            throw XCTSkip("Could not create MTLBuffer")
+        }
+
+        let hugeSampleCount = Int.max / 2 + 1
+
+        XCTAssertThrowsError(try AudioBuffer(
+            buffer: mtlBuffer,
+            sampleCount: hugeSampleCount,
+            channelCount: 2,
+            format: .float32
+        )) { error in
+            guard case MetalAudioError.integerOverflow = error else {
+                XCTFail("Expected integerOverflow error, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testWrappingInitIntegerOverflowByteSizeCalculation() throws {
+        guard let mtlBuffer = device.device.makeBuffer(
+            length: 16,
+            options: device.preferredStorageMode
+        ) else {
+            throw XCTSkip("Could not create MTLBuffer")
+        }
+
+        let largeSampleCount = Int.max / 4 + 1
+
+        XCTAssertThrowsError(try AudioBuffer(
+            buffer: mtlBuffer,
+            sampleCount: largeSampleCount,
+            channelCount: 1,
+            format: .float32
+        )) { error in
+            guard case MetalAudioError.integerOverflow = error else {
+                XCTFail("Expected integerOverflow error, got \(error)")
+                return
+            }
+        }
+    }
+}
+
+// MARK: - AudioBuffer Size Limit Tests
+
+final class AudioBufferSizeLimitTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testInitBufferTooLarge() throws {
+        // Request a buffer larger than device maximum
+        let maxBufferLength = device.device.maxBufferLength
+
+        // Calculate sample count that would exceed max (without overflow)
+        // maxBufferLength / 4 + 1 samples * 1 channel * 4 bytes > maxBufferLength
+        let tooManySamples = maxBufferLength / 4 + 1
+
+        // Only run if this won't cause overflow (which would be caught first)
+        let (_, overflow) = tooManySamples.multipliedReportingOverflow(by: 4)
+        guard !overflow else {
+            throw XCTSkip("Sample count would overflow before hitting buffer limit")
+        }
+
+        XCTAssertThrowsError(try AudioBuffer(
+            device: device,
+            sampleCount: tooManySamples,
+            channelCount: 1,
+            format: .float32
+        )) { error in
+            guard case MetalAudioError.bufferTooLarge = error else {
+                XCTFail("Expected bufferTooLarge error, got \(error)")
+                return
+            }
+        }
     }
 }

@@ -235,6 +235,209 @@ final class RingBufferTests: XCTestCase {
         XCTAssertEqual(outRight, right)
     }
 
+    // MARK: - Wraparound Edge Cases
+
+    func testPeekWithWraparound() {
+        let ring = RingBuffer(capacity: 8)
+
+        // Fill buffer near the end
+        let first: [Float] = [1, 2, 3, 4, 5, 6]
+        ring.write(first)
+
+        // Read some to advance read position to index 5
+        _ = ring.read(count: 5)
+
+        // Write more - this wraps around
+        let second: [Float] = [7, 8, 9, 10]
+        ring.write(second)
+
+        // Now data spans: [9, 10, _, _, _, 6, 7, 8] with read at 5
+        // Peek should handle wraparound correctly
+        var peeked = [Float](repeating: 0, count: 5)
+        let peekCount = ring.peek(into: &peeked, count: 5)
+        XCTAssertEqual(peekCount, 5)
+        XCTAssertEqual(peeked, [6, 7, 8, 9, 10])
+
+        // Peek doesn't consume
+        XCTAssertEqual(ring.availableToRead, 5)
+    }
+
+    func testSkipWithWraparound() {
+        let ring = RingBuffer(capacity: 8)
+
+        // Fill buffer near the end
+        let first: [Float] = [1, 2, 3, 4, 5, 6]
+        ring.write(first)
+
+        // Read some to advance read position
+        _ = ring.read(count: 4)
+
+        // Write more - this wraps around
+        let second: [Float] = [7, 8, 9, 10]
+        ring.write(second)
+
+        // Available: [5, 6, 7, 8, 9, 10]
+        XCTAssertEqual(ring.availableToRead, 6)
+
+        // Skip 4, spanning wraparound
+        let skipped = ring.skip(count: 4)
+        XCTAssertEqual(skipped, 4)
+        XCTAssertEqual(ring.availableToRead, 2)
+
+        // Read remaining
+        let output = ring.read(count: 2)
+        XCTAssertEqual(output, [9, 10])
+    }
+
+    // MARK: - Closure Wraparound Tests
+
+    func testWriteClosureAtWraparound() {
+        let ring = RingBuffer(capacity: 8)
+
+        // Fill and read to position write pointer near end
+        ring.write([1, 2, 3, 4, 5, 6])
+        _ = ring.read(count: 6)
+
+        // Write position is now at 6, only 2 contiguous slots available before wrap
+        XCTAssertEqual(ring.availableToWrite, 8)
+
+        // Closure write - should only get contiguous region (2 slots)
+        let written = ring.write(maxCount: 5) { buffer in
+            // Buffer should only have 2 elements (contiguous region)
+            XCTAssertEqual(buffer.count, 2)
+            buffer[0] = 100
+            buffer[1] = 200
+            return 2
+        }
+        XCTAssertEqual(written, 2)
+        XCTAssertEqual(ring.availableToRead, 2)
+
+        let output = ring.read(count: 2)
+        XCTAssertEqual(output, [100, 200])
+    }
+
+    func testReadClosureAtWraparound() {
+        let ring = RingBuffer(capacity: 8)
+
+        // Set up wraparound: write, read some, write more
+        ring.write([1, 2, 3, 4, 5, 6])
+        _ = ring.read(count: 5)
+        ring.write([7, 8, 9, 10, 11])
+
+        // Data is now: [9, 10, 11, _, _, 6, 7, 8] with read at 5
+        // Available: [6, 7, 8, 9, 10, 11]
+        XCTAssertEqual(ring.availableToRead, 6)
+
+        // Closure read - should only get contiguous region (3 slots: 6, 7, 8)
+        var sum: Float = 0
+        let consumed = ring.read(maxCount: 6) { buffer in
+            // Buffer should only have 3 elements (contiguous to end)
+            XCTAssertEqual(buffer.count, 3)
+            for i in 0..<buffer.count {
+                sum += buffer[i]
+            }
+            return buffer.count
+        }
+        XCTAssertEqual(consumed, 3)
+        XCTAssertEqual(sum, 21)  // 6 + 7 + 8
+        XCTAssertEqual(ring.availableToRead, 3)
+    }
+
+    // MARK: - Stereo Edge Cases
+
+    func testStereoOverflow() {
+        let stereo = StereoRingBuffer(capacity: 4)
+
+        // Fill the buffer
+        var input: [Float] = [1, 2, 3, 4, 5, 6, 7, 8]  // 4 stereo frames
+        let written1 = stereo.writeInterleaved(&input, frameCount: 4)
+        XCTAssertEqual(written1, 4)
+        XCTAssertEqual(stereo.availableToWrite, 0)
+
+        // Try to write more - should return 0
+        var more: [Float] = [9, 10, 11, 12]
+        let written2 = stereo.writeInterleaved(&more, frameCount: 2)
+        XCTAssertEqual(written2, 0)
+    }
+
+    func testStereoUnderflow() {
+        let stereo = StereoRingBuffer(capacity: 1024)
+
+        // Read from empty buffer
+        var output = [Float](repeating: 0, count: 10)
+        let read = stereo.readInterleaved(into: &output, frameCount: 5)
+        XCTAssertEqual(read, 0)
+    }
+
+    func testStereoReset() {
+        let stereo = StereoRingBuffer(capacity: 1024)
+
+        // Write some data
+        var input: [Float] = [1, 2, 3, 4, 5, 6]
+        stereo.writeInterleaved(&input, frameCount: 3)
+        XCTAssertEqual(stereo.availableToRead, 3)
+
+        // Reset
+        stereo.reset()
+        XCTAssertEqual(stereo.availableToRead, 0)
+        XCTAssertEqual(stereo.availableToWrite, 1024)
+    }
+
+    func testStereoPartialWrite() {
+        let stereo = StereoRingBuffer(capacity: 4)
+
+        // Fill partially
+        var input: [Float] = [1, 2, 3, 4]  // 2 stereo frames
+        let written = stereo.writeInterleaved(&input, frameCount: 2)
+        XCTAssertEqual(written, 2)
+        XCTAssertEqual(stereo.availableToWrite, 2)
+        XCTAssertEqual(stereo.availableToRead, 2)
+
+        // Write more than available
+        var more: [Float] = [5, 6, 7, 8, 9, 10]  // 3 frames, only 2 fit
+        let written2 = stereo.writeInterleaved(&more, frameCount: 3)
+        XCTAssertEqual(written2, 2)
+        XCTAssertEqual(stereo.availableToWrite, 0)
+    }
+
+    // MARK: - State Transition Tests
+
+    func testIsEmptyTransitions() {
+        let ring = RingBuffer(capacity: 8)
+
+        XCTAssertTrue(ring.isEmpty)
+
+        ring.write([1.0])
+        XCTAssertFalse(ring.isEmpty)
+
+        _ = ring.read(count: 1)
+        XCTAssertTrue(ring.isEmpty)
+
+        ring.write([1, 2, 3])
+        XCTAssertFalse(ring.isEmpty)
+
+        ring.reset()
+        XCTAssertTrue(ring.isEmpty)
+    }
+
+    func testIsFullTransitions() {
+        let ring = RingBuffer(capacity: 4)
+
+        XCTAssertFalse(ring.isFull)
+
+        ring.write([1, 2, 3, 4])
+        XCTAssertTrue(ring.isFull)
+
+        _ = ring.read(count: 1)
+        XCTAssertFalse(ring.isFull)
+
+        ring.write([5])
+        XCTAssertTrue(ring.isFull)
+
+        ring.reset()
+        XCTAssertFalse(ring.isFull)
+    }
+
     // MARK: - Performance
 
     func testWriteReadPerformance() {

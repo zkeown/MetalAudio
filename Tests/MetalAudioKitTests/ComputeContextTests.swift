@@ -159,6 +159,248 @@ final class ComputeContextExecutionTests: XCTestCase {
     func testDefaultGPUTimeout() {
         XCTAssertEqual(ComputeContext.defaultGPUTimeout, 2.0)
     }
+
+    func testExecuteSyncWithTimingReturnsValue() throws {
+        let (result, timing) = try context.executeSyncWithTiming { encoder in
+            return 42
+        }
+
+        XCTAssertEqual(result, 42)
+        // Timing should have valid values
+        XCTAssertGreaterThanOrEqual(timing.wallTime, 0)
+        // GPU time may be 0 for trivial operations
+        XCTAssertGreaterThanOrEqual(timing.gpuTime, 0)
+    }
+
+    func testExecuteSyncWithTimingVoid() throws {
+        var executed = false
+
+        let timing = try context.executeSyncWithTiming { encoder in
+            executed = true
+        }
+
+        XCTAssertTrue(executed)
+        XCTAssertGreaterThanOrEqual(timing.wallTime, 0)
+    }
+
+    func testExecuteSyncWithTimingCustomTimeout() throws {
+        let (result, timing) = try context.executeSyncWithTiming(timeout: 5.0) { encoder in
+            return "test"
+        }
+
+        XCTAssertEqual(result, "test")
+        XCTAssertGreaterThanOrEqual(timing.wallTime, 0)
+    }
+
+    func testExecuteAsyncBlocking() throws {
+        let expectation = expectation(description: "Async completion")
+        var completionError: Error?
+
+        context.executeAsyncBlocking({ encoder in
+            // Simple operation
+        }, completion: { error in
+            completionError = error
+            expectation.fulfill()
+        })
+
+        wait(for: [expectation], timeout: 5.0)
+        XCTAssertNil(completionError, "Should complete without error")
+    }
+
+    func testExecuteAsyncBlockingWithError() throws {
+        let expectation = expectation(description: "Async error completion")
+        var receivedError: Error?
+
+        context.executeAsyncBlocking({ encoder in
+            throw MetalAudioError.invalidConfiguration("test error")
+        }, completion: { error in
+            receivedError = error
+            expectation.fulfill()
+        })
+
+        wait(for: [expectation], timeout: 5.0)
+        XCTAssertNotNil(receivedError, "Should receive error from encode closure")
+    }
+}
+
+// MARK: - ComputeContext Triple Buffer Clear Tests
+
+final class ComputeContextTripleBufferClearTests: XCTestCase {
+
+    var device: AudioDevice!
+    var context: ComputeContext!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+        context = try ComputeContext(device: device)
+    }
+
+    func testClearTripleBufferingWithoutSetup() throws {
+        // Should return true (nothing to clear, immediate success)
+        let result = context.clearTripleBuffering()
+        XCTAssertTrue(result, "Clearing without setup should succeed immediately")
+    }
+
+    func testClearTripleBufferingAfterSetup() throws {
+        try context.setupTripleBuffering(bufferSize: 1024)
+
+        // Clear should succeed
+        let result = context.clearTripleBuffering()
+        XCTAssertTrue(result, "Clearing after setup should succeed")
+
+        // After clearing, withWriteBuffer should return nil
+        let writeResult: Int? = context.withWriteBuffer { _ in 42 }
+        XCTAssertNil(writeResult, "After clearing, withWriteBuffer should return nil")
+    }
+
+    func testClearTripleBufferingUnsafe() throws {
+        try context.setupTripleBuffering(bufferSize: 1024)
+
+        // Unsafe clear should always work
+        context.clearTripleBufferingUnsafe()
+
+        // After clearing, withWriteBuffer should return nil
+        let writeResult: Int? = context.withWriteBuffer { _ in 42 }
+        XCTAssertNil(writeResult, "After unsafe clear, withWriteBuffer should return nil")
+    }
+
+    func testClearTripleBufferingUnsafeWithoutSetup() throws {
+        // Should not crash even without setup
+        context.clearTripleBufferingUnsafe()
+
+        let writeResult: Int? = context.withWriteBuffer { _ in 42 }
+        XCTAssertNil(writeResult)
+    }
+
+    func testSetupAfterClear() throws {
+        try context.setupTripleBuffering(bufferSize: 512)
+        let result = context.clearTripleBuffering()
+        XCTAssertTrue(result)
+
+        // Should be able to setup again
+        try context.setupTripleBuffering(bufferSize: 1024)
+
+        let writeResult: Int? = context.withWriteBuffer { _ in 99 }
+        XCTAssertEqual(writeResult, 99, "Should work after re-setup")
+    }
+}
+
+// MARK: - ComputeContext Register Command Buffer Tests
+
+final class ComputeContextRegisterCommandBufferTests: XCTestCase {
+
+    var device: AudioDevice!
+    var context: ComputeContext!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+        context = try ComputeContext(device: device)
+    }
+
+    func testRegisterTripleBufferCommandBuffer() throws {
+        try context.setupTripleBuffering(bufferSize: 1024)
+
+        // Create a command buffer
+        guard let commandBuffer = device.commandQueue.makeCommandBuffer() else {
+            XCTFail("Failed to create command buffer")
+            return
+        }
+
+        // Register it (this should increment tripleBufferGPUCommandsInFlight)
+        context.registerTripleBufferCommandBuffer(commandBuffer)
+
+        // Add a simple encoder
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            XCTFail("Failed to create encoder")
+            return
+        }
+        encoder.endEncoding()
+
+        let expectation = expectation(description: "Command buffer completion")
+        commandBuffer.addCompletedHandler { _ in
+            expectation.fulfill()
+        }
+        commandBuffer.commit()
+
+        wait(for: [expectation], timeout: 5.0)
+
+        // After completion, clear should succeed
+        let clearResult = context.clearTripleBuffering()
+        XCTAssertTrue(clearResult, "Clear should succeed after GPU completes")
+    }
+
+    func testRegisterMultipleCommandBuffers() throws {
+        try context.setupTripleBuffering(bufferSize: 1024)
+
+        var expectations: [XCTestExpectation] = []
+
+        for i in 0..<3 {
+            guard let commandBuffer = device.commandQueue.makeCommandBuffer() else {
+                XCTFail("Failed to create command buffer \(i)")
+                return
+            }
+
+            context.registerTripleBufferCommandBuffer(commandBuffer)
+
+            guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+                XCTFail("Failed to create encoder \(i)")
+                return
+            }
+            encoder.endEncoding()
+
+            let exp = expectation(description: "Command buffer \(i) completion")
+            commandBuffer.addCompletedHandler { _ in
+                exp.fulfill()
+            }
+            expectations.append(exp)
+            commandBuffer.commit()
+        }
+
+        wait(for: expectations, timeout: 5.0)
+
+        // All completed, clear should work
+        let clearResult = context.clearTripleBuffering()
+        XCTAssertTrue(clearResult)
+    }
+}
+
+// MARK: - ComputeContext Async Tests
+
+final class ComputeContextAsyncExecutionTests: XCTestCase {
+
+    var device: AudioDevice!
+    var context: ComputeContext!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+        context = try ComputeContext(device: device)
+    }
+
+    func testAsyncExecuteWithTimeout() async throws {
+        let result: Int = try await context.execute(timeout: 5.0) { encoder in
+            return 42
+        }
+
+        XCTAssertEqual(result, 42)
+    }
+
+    func testAsyncExecuteWithTimeoutString() async throws {
+        let result: String = try await context.execute(timeout: 3.0) { encoder in
+            return "async result"
+        }
+
+        XCTAssertEqual(result, "async result")
+    }
+
+    func testAsyncExecuteVoid() async throws {
+        var executed = false
+
+        try await context.execute { encoder in
+            executed = true
+        }
+
+        XCTAssertTrue(executed)
+    }
 }
 
 // MARK: - ComputeContext Dispatch Calculation Tests

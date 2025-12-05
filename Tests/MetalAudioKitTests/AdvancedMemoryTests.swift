@@ -98,6 +98,99 @@ final class MappedTensorTests: XCTestCase {
             XCTAssertEqual(data[i], Float(i), accuracy: 0.001)
         }
     }
+
+    func testCopyFromTensor() throws {
+        let device = try AudioDevice()
+        let tensor = try Tensor(device: device, shape: [10])
+        try tensor.copy(from: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map { Float($0) })
+
+        let mapped = try MappedTensor(shape: [10])
+        try mapped.copyFromTensor(tensor)
+
+        try mapped.withUnsafeBufferPointer { ptr in
+            for i in 0..<10 {
+                XCTAssertEqual(ptr[i], Float(i), accuracy: 0.001)
+            }
+        }
+    }
+
+    func testCopyFromTensorSizeMismatch() throws {
+        let device = try AudioDevice()
+        let tensor = try Tensor(device: device, shape: [5])  // 5 elements
+        let mapped = try MappedTensor(shape: [10])  // 10 elements
+
+        XCTAssertThrowsError(try mapped.copyFromTensor(tensor)) { error in
+            guard case MappedTensorError.sizeMismatch(let expected, let actual) = error else {
+                XCTFail("Expected sizeMismatch error, got \(error)")
+                return
+            }
+            XCTAssertEqual(expected, 10)
+            XCTAssertEqual(actual, 5)
+        }
+    }
+
+    func testMappedTensorErrorDescriptions() {
+        let mmapError = MappedTensorError.mmapFailed(errno: 12)
+        XCTAssertTrue(mmapError.description.contains("mmap"))
+
+        let fileError = MappedTensorError.fileOpenFailed(path: "/test/path", errno: 2)
+        XCTAssertTrue(fileError.description.contains("/test/path"))
+
+        let truncateError = MappedTensorError.truncateFailed(errno: 28)
+        XCTAssertTrue(truncateError.description.contains("ftruncate"))
+
+        let sizeError = MappedTensorError.sizeMismatch(expected: 100, actual: 50)
+        XCTAssertTrue(sizeError.description.contains("100"))
+        XCTAssertTrue(sizeError.description.contains("50"))
+    }
+
+    func testFileOpenFailedError() {
+        // Try to open in a non-existent directory
+        let invalidPath = "/nonexistent/directory/test.dat"
+
+        XCTAssertThrowsError(try MappedTensor(shape: [10], backingFile: invalidPath)) { error in
+            guard case MappedTensorError.fileOpenFailed(let path, _) = error else {
+                XCTFail("Expected fileOpenFailed error, got \(error)")
+                return
+            }
+            XCTAssertEqual(path, invalidPath)
+        }
+    }
+
+    func testPrivateVsSharedMapping() throws {
+        let tempPath = NSTemporaryDirectory() + "test_private_\(UUID().uuidString).dat"
+        defer { try? FileManager.default.removeItem(atPath: tempPath) }
+
+        // Create shared mapping and write value
+        do {
+            let shared = try MappedTensor(shape: [10], backingFile: tempPath, shared: true)
+            try shared.withUnsafeMutableBufferPointer { ptr in
+                ptr[0] = 42.0
+            }
+            shared.sync()
+        }
+
+        // Create private mapping and modify
+        do {
+            let privateTensor = try MappedTensor(shape: [10], backingFile: tempPath, shared: false)
+
+            // Should see original value
+            try privateTensor.withUnsafeBufferPointer { ptr in
+                XCTAssertEqual(ptr[0], 42.0, accuracy: 0.001)
+            }
+
+            // Modify in private mapping
+            try privateTensor.withUnsafeMutableBufferPointer { ptr in
+                ptr[0] = 99.0
+            }
+        }
+
+        // Read back with new mapping - should still be original value (private didn't persist)
+        let verify = try MappedTensor(shape: [10], backingFile: tempPath, shared: false)
+        try verify.withUnsafeBufferPointer { ptr in
+            XCTAssertEqual(ptr[0], 42.0, accuracy: 0.001, "Private mapping should not persist changes")
+        }
+    }
 }
 
 // MARK: - AudioAllocatorZone Tests
@@ -246,6 +339,51 @@ final class AudioAllocatorZoneTests: XCTestCase {
 
         XCTAssertEqual(afterCritical, 0, "Critical should purge all")
     }
+
+    func testConcurrentAllocDeallocate() {
+        let zone = AudioAllocatorZone()
+        let iterations = 50
+        let expectation = expectation(description: "Concurrent operations")
+        expectation.expectedFulfillmentCount = 4
+
+        for _ in 0..<4 {
+            DispatchQueue.global().async {
+                for _ in 0..<iterations {
+                    if let ptr = zone.allocate(byteSize: 4096) {
+                        // Small amount of work
+                        ptr.storeBytes(of: 42, as: Int.self)
+                        zone.deallocate(ptr, byteSize: 4096)
+                    }
+                }
+                expectation.fulfill()
+            }
+        }
+
+        waitForExpectations(timeout: 10)
+
+        // Should have recorded all allocations
+        XCTAssertEqual(zone.totalAllocations, iterations * 4)
+    }
+
+    func testNormalPressureNoOp() {
+        let zone = AudioAllocatorZone()
+
+        // Fill freelist
+        var ptrs: [UnsafeMutableRawPointer] = []
+        for _ in 0..<5 {
+            ptrs.append(zone.allocate(byteSize: 4096)!)
+        }
+        for ptr in ptrs {
+            zone.deallocate(ptr, byteSize: 4096)
+        }
+
+        let bytesBefore = zone.freelistBytes
+
+        zone.didReceiveMemoryPressure(level: .normal)
+
+        let bytesAfter = zone.freelistBytes
+        XCTAssertEqual(bytesBefore, bytesAfter, "Normal pressure should not change freelist")
+    }
 }
 
 // MARK: - SpeculativeBuffer Tests
@@ -358,6 +496,59 @@ final class SpeculativeBufferTests: XCTestCase {
         XCTAssertEqual(mtlBuffer.length, 4096)
         XCTAssertTrue(buffer.isAllocated)
     }
+
+    func testConcurrentAccess() throws {
+        let buffer = try SpeculativeBuffer(device: device.device, byteSize: 4096)
+        let iterations = 50
+        let expectation = expectation(description: "Concurrent buffer access")
+        expectation.expectedFulfillmentCount = 4
+
+        for _ in 0..<4 {
+            DispatchQueue.global().async {
+                for _ in 0..<iterations {
+                    do {
+                        try buffer.withContents { ptr in
+                            ptr.storeBytes(of: 42, as: Int.self)
+                        }
+                    } catch {
+                        XCTFail("Unexpected error: \(error)")
+                    }
+                }
+                expectation.fulfill()
+            }
+        }
+
+        waitForExpectations(timeout: 10)
+
+        // All accesses should be recorded (init doesn't count as access)
+        XCTAssertEqual(buffer.totalAccesses, UInt64(iterations * 4))
+    }
+
+    func testWithContentsThrows() throws {
+        let buffer = try SpeculativeBuffer(device: device.device, byteSize: 4096)
+        struct TestError: Error {}
+
+        XCTAssertThrowsError(try buffer.withContents { _ in
+            throw TestError()
+        })
+
+        // Buffer should still be allocated after error
+        XCTAssertTrue(buffer.isAllocated)
+    }
+
+    func testSecondsSinceLastAccessInfinity() throws {
+        // Create a buffer but don't access it after creation
+        let buffer = try SpeculativeBuffer(device: device.device, byteSize: 4096)
+
+        // Deallocate to reset state
+        buffer.speculativeDeallocate()
+
+        // Access to reallocate - this will set lastAccessTime
+        try buffer.withContents { _ in }
+
+        // Should have a valid (non-infinity) time
+        XCTAssertLessThan(buffer.secondsSinceLastAccess, Double.infinity)
+    }
 }
 
 // MARK: - SpeculativeBufferManager Tests
@@ -442,6 +633,21 @@ final class SpeculativeBufferManagerTests: XCTestCase {
         // Threshold should be temporarily aggressive
         // Buffer might be evicted if cold
 
+        manager.didReceiveMemoryPressure(level: .normal)
+        XCTAssertEqual(manager.evictionThreshold, .cold)
+
+        manager.unregister(buffer)
+    }
+
+    func testMemoryPressureWarning() throws {
+        let buffer = try SpeculativeBuffer(device: device.device, byteSize: 4096)
+        manager.register(buffer)
+
+        // Warning should set threshold to warm
+        manager.didReceiveMemoryPressure(level: .warning)
+        XCTAssertEqual(manager.evictionThreshold, .warm)
+
+        // Reset
         manager.didReceiveMemoryPressure(level: .normal)
         XCTAssertEqual(manager.evictionThreshold, .cold)
 

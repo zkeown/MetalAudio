@@ -196,6 +196,111 @@ final class MappedAudioFileTests: XCTestCase {
         let expectedSum: Float = (0..<100).reduce(0) { $0 + Float($1) }
         XCTAssertEqual(sum, expectedSum, accuracy: 0.001)
     }
+
+    // MARK: - Error Cases
+
+    func testFileOpenFailed() {
+        let nonExistentPath = "/nonexistent/path/to/file.raw"
+
+        XCTAssertThrowsError(try MappedAudioFile(path: nonExistentPath, sampleRate: 44100)) { error in
+            guard case MappedAudioError.fileOpenFailed = error else {
+                XCTFail("Expected fileOpenFailed error, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testMappedAudioErrorDescriptions() {
+        // Test all error description strings are non-empty and contain relevant info
+        let fileOpenError = MappedAudioError.fileOpenFailed(path: "/test/path", errno: 2)
+        XCTAssertTrue(fileOpenError.description.contains("/test/path"))
+
+        let statError = MappedAudioError.statFailed(errno: 1)
+        XCTAssertTrue(statError.description.contains("fstat"))
+
+        let mmapError = MappedAudioError.mmapFailed(errno: 12)
+        XCTAssertTrue(mmapError.description.contains("mmap"))
+
+        let headerError = MappedAudioError.headerReadFailed
+        XCTAssertTrue(headerError.description.contains("header"))
+
+        let wavError = MappedAudioError.invalidWAVFormat("test reason")
+        XCTAssertTrue(wavError.description.contains("test reason"))
+    }
+
+    // MARK: - Edge Cases
+
+    func testReadSamplesBeyondEnd() throws {
+        let testPath = tempDirectory.appendingPathComponent("test_beyond.raw").path
+        let samples = [Float](repeating: 1.0, count: 100)
+        let data = samples.withUnsafeBytes { Data($0) }
+        try data.write(to: URL(fileURLWithPath: testPath))
+
+        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44100)
+
+        // Request more samples than available starting near end
+        let result = mapped.readSamples(offset: 90, count: 50)
+        XCTAssertEqual(result.count, 10, "Should only return 10 samples (100 - 90)")
+    }
+
+    func testReadSamplesAtBoundary() throws {
+        let testPath = tempDirectory.appendingPathComponent("test_boundary.raw").path
+        let samples = [Float](repeating: 1.0, count: 100)
+        let data = samples.withUnsafeBytes { Data($0) }
+        try data.write(to: URL(fileURLWithPath: testPath))
+
+        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44100)
+
+        // Read exactly at the end
+        let result = mapped.readSamples(offset: 100, count: 10)
+        XCTAssertEqual(result.count, 0, "Should return empty array at end")
+    }
+
+    func testReadSamplesZeroCount() throws {
+        let testPath = tempDirectory.appendingPathComponent("test_zero.raw").path
+        let samples = [Float](repeating: 1.0, count: 100)
+        let data = samples.withUnsafeBytes { Data($0) }
+        try data.write(to: URL(fileURLWithPath: testPath))
+
+        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44100)
+
+        let result = mapped.readSamples(offset: 0, count: 0)
+        XCTAssertEqual(result.count, 0, "Zero count should return empty array")
+    }
+
+    func testReadInterleavedBeyondEnd() throws {
+        let testPath = tempDirectory.appendingPathComponent("test_interleaved_beyond.raw").path
+        let frameCount = 50
+        let samples = [Float](repeating: 1.0, count: frameCount * 2)
+        let data = samples.withUnsafeBytes { Data($0) }
+        try data.write(to: URL(fileURLWithPath: testPath))
+
+        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44100, channelCount: 2)
+
+        // Request more frames than available
+        let result = mapped.readInterleavedSamples(offset: 45, count: 20)
+        XCTAssertEqual(result.count, 10, "Should return 5 frames * 2 channels = 10 samples")
+    }
+
+    func testAdviseRegionVariants() throws {
+        let testPath = tempDirectory.appendingPathComponent("test_advise_region.raw").path
+        let samples = [Float](repeating: 1.0, count: 10000)
+        let data = samples.withUnsafeBytes { Data($0) }
+        try data.write(to: URL(fileURLWithPath: testPath))
+
+        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44100)
+
+        // Test all advice types on regions (should not crash)
+        mapped.adviseRegion(offset: 0, count: 1000, advice: .sequential)
+        mapped.adviseRegion(offset: 1000, count: 1000, advice: .random)
+        mapped.adviseRegion(offset: 2000, count: 1000, advice: .willneed)
+        mapped.adviseRegion(offset: 3000, count: 1000, advice: .dontneed)
+        mapped.adviseRegion(offset: 4000, count: 1000, advice: .normal)
+
+        // Should still be readable
+        let result = mapped.readSamples(offset: 0, count: 100)
+        XCTAssertEqual(result.count, 100)
+    }
 }
 
 // MARK: - StreamingRingBuffer Tests
@@ -276,5 +381,117 @@ final class StreamingRingBufferTests: XCTestCase {
         XCTAssertEqual(ring.availableCount, 0)
 
         ring.stopStreaming()
+    }
+
+    // MARK: - Edge Cases
+
+    func testConsumeFromEmptyBuffer() throws {
+        let testPath = tempDirectory.appendingPathComponent("ring_empty.raw").path
+        let samples = [Float](repeating: 1.0, count: 1000)
+        let data = samples.withUnsafeBytes { Data($0) }
+        try data.write(to: URL(fileURLWithPath: testPath))
+
+        let file = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let ring = StreamingRingBuffer(file: file, bufferSize: 4096)
+
+        // Don't start streaming - buffer is empty
+        let consumed = ring.consume(count: 100)
+        XCTAssertEqual(consumed.count, 0, "Should return empty array from empty buffer")
+    }
+
+    func testMultipleStartStopCycles() throws {
+        let testPath = tempDirectory.appendingPathComponent("ring_cycles.raw").path
+        var samples = [Float](repeating: 0, count: 10000)
+        for i in 0..<10000 { samples[i] = Float(i) }
+
+        let data = samples.withUnsafeBytes { Data($0) }
+        try data.write(to: URL(fileURLWithPath: testPath))
+
+        let file = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let ring = StreamingRingBuffer(file: file, bufferSize: 4096)
+        ring.prefetchAhead = 1024
+
+        // First cycle
+        ring.startStreaming()
+        Thread.sleep(forTimeInterval: 0.1)
+        XCTAssertGreaterThan(ring.availableCount, 0, "Should have samples after first start")
+        ring.stopStreaming()
+
+        // Reset position
+        ring.seek(to: 0)
+
+        // Second cycle
+        ring.startStreaming()
+        Thread.sleep(forTimeInterval: 0.1)
+        XCTAssertGreaterThan(ring.availableCount, 0, "Should have samples after second start")
+        ring.stopStreaming()
+    }
+
+    func testSeekBeyondEnd() throws {
+        let testPath = tempDirectory.appendingPathComponent("ring_seek_beyond.raw").path
+        let samples = [Float](repeating: 1.0, count: 1000)
+        let data = samples.withUnsafeBytes { Data($0) }
+        try data.write(to: URL(fileURLWithPath: testPath))
+
+        let file = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let ring = StreamingRingBuffer(file: file, bufferSize: 4096)
+
+        // Seek beyond end - should clamp to file end
+        ring.seek(to: 50000)
+
+        // Should not crash, buffer should be empty
+        XCTAssertEqual(ring.availableCount, 0)
+    }
+
+    func testSeekToZero() throws {
+        let testPath = tempDirectory.appendingPathComponent("ring_seek_zero.raw").path
+        var samples = [Float](repeating: 0, count: 10000)
+        for i in 0..<10000 { samples[i] = Float(i) }
+
+        let data = samples.withUnsafeBytes { Data($0) }
+        try data.write(to: URL(fileURLWithPath: testPath))
+
+        let file = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let ring = StreamingRingBuffer(file: file, bufferSize: 4096)
+        ring.prefetchAhead = 1024
+
+        ring.startStreaming()
+        Thread.sleep(forTimeInterval: 0.1)
+
+        // Consume some data to advance position
+        let initialCount = ring.availableCount
+        _ = ring.consume(count: 500)
+
+        // Seek back to start - this should clear buffer and reset file position
+        ring.seek(to: 0)
+        XCTAssertEqual(ring.availableCount, 0, "Seek should clear buffer")
+
+        // Wait for refill from new position
+        Thread.sleep(forTimeInterval: 0.15)
+
+        // Verify streaming resumed (has samples available)
+        XCTAssertGreaterThan(ring.availableCount, 0, "Should have samples after seek and refill")
+
+        ring.stopStreaming()
+
+        // Note: Due to async nature, we can't reliably assert exact sample values
+        // The key behaviors tested are: seek clears buffer, streaming resumes
+        _ = initialCount  // Suppress unused warning
+    }
+
+    func testSeekNegative() throws {
+        let testPath = tempDirectory.appendingPathComponent("ring_seek_neg.raw").path
+        let samples = [Float](repeating: 1.0, count: 1000)
+        let data = samples.withUnsafeBytes { Data($0) }
+        try data.write(to: URL(fileURLWithPath: testPath))
+
+        let file = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let ring = StreamingRingBuffer(file: file, bufferSize: 4096)
+
+        // Seek to negative - should clamp to 0
+        ring.seek(to: -100)
+
+        // Should not crash
+        XCTAssertEqual(ring.availableCount, 0)
     }
 }

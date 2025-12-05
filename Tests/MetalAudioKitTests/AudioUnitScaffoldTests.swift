@@ -359,4 +359,576 @@ final class AudioUnitScaffoldTests: XCTestCase {
         XCTAssertEqual(output[2], 0.5, accuracy: 0.001)
         XCTAssertEqual(output[3], 0.5, accuracy: 0.001)
     }
+
+    // MARK: - Bus Array Tests
+
+    func testInputBusses() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x62757331,  // "bus1"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: AudioUnitScaffold.Configuration()
+        )
+
+        let inputBusses = audioUnit.inputBusses
+        XCTAssertEqual(inputBusses.count, 1)
+        XCTAssertNotNil(inputBusses[0].format)
+        XCTAssertEqual(inputBusses[0].format.channelCount, 2) // Default stereo
+    }
+
+    func testOutputBusses() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x62757332,  // "bus2"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: AudioUnitScaffold.Configuration()
+        )
+
+        let outputBusses = audioUnit.outputBusses
+        XCTAssertEqual(outputBusses.count, 1)
+        XCTAssertNotNil(outputBusses[0].format)
+        XCTAssertEqual(outputBusses[0].format.sampleRate, 48000) // Default sample rate
+    }
+
+    func testBussesWithCustomChannelCount() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x62757333,  // "bus3"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let config = AudioUnitScaffold.Configuration(channelCount: 1) // Mono
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: config
+        )
+
+        XCTAssertEqual(audioUnit.inputBusses[0].format.channelCount, 1)
+        XCTAssertEqual(audioUnit.outputBusses[0].format.channelCount, 1)
+    }
+
+    // MARK: - Factory Presets Tests
+
+    func testFactoryPresetsGeneration() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x70727374,  // "prst"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let config = AudioUnitScaffold.Configuration(
+            parameters: [.gain(address: 1)],
+            factoryPresets: [
+                AudioUnitScaffold.PresetDef(name: "Warm", number: 0, values: [1: 0.7]),
+                AudioUnitScaffold.PresetDef(name: "Bright", number: 1, values: [1: 1.3]),
+                AudioUnitScaffold.PresetDef(name: "Clean", number: 2, values: [1: 1.0])
+            ]
+        )
+
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: config
+        )
+
+        let presets = audioUnit.factoryPresets
+        XCTAssertNotNil(presets)
+        XCTAssertEqual(presets?.count, 3)
+        XCTAssertEqual(presets?[0].name, "Warm")
+        XCTAssertEqual(presets?[0].number, 0)
+        XCTAssertEqual(presets?[1].name, "Bright")
+        XCTAssertEqual(presets?[1].number, 1)
+        XCTAssertEqual(presets?[2].name, "Clean")
+        XCTAssertEqual(presets?[2].number, 2)
+    }
+
+    func testFactoryPresetsEmptyWhenNoneConfigured() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x6E6F7072,  // "nopr"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: AudioUnitScaffold.Configuration()
+        )
+
+        let presets = audioUnit.factoryPresets
+        XCTAssertNotNil(presets)
+        XCTAssertTrue(presets?.isEmpty ?? false)
+    }
+
+    // MARK: - Full State Serialization Tests
+
+    func testFullStateGet() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x73746174,  // "stat"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let config = AudioUnitScaffold.Configuration(
+            parameters: [
+                .gain(address: 1),
+                .mix(address: 2)
+            ]
+        )
+
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: config
+        )
+
+        // Set some values
+        audioUnit.setParameterValue(0.75, for: 1)
+        audioUnit.setParameterValue(0.25, for: 2)
+
+        // Get full state
+        let state = audioUnit.fullState
+        XCTAssertNotNil(state)
+
+        // Verify values are in state
+        XCTAssertEqual(Double(state?["1"] as? AUValue ?? 0), 0.75, accuracy: 0.001)
+        XCTAssertEqual(Double(state?["2"] as? AUValue ?? 0), 0.25, accuracy: 0.001)
+    }
+
+    func testFullStateSet() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x73747332,  // "sts2"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let config = AudioUnitScaffold.Configuration(
+            parameters: [
+                .gain(address: 1),
+                .mix(address: 2)
+            ]
+        )
+
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: config
+        )
+
+        // Set state
+        audioUnit.fullState = [
+            "1": AUValue(0.33),
+            "2": AUValue(0.66)
+        ]
+
+        // Verify values were applied
+        XCTAssertEqual(audioUnit.parameterValue(for: 1), 0.33, accuracy: 0.001)
+        XCTAssertEqual(audioUnit.parameterValue(for: 2), 0.66, accuracy: 0.001)
+    }
+
+    func testFullStateRoundTrip() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x72747270,  // "rtrp"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let config = AudioUnitScaffold.Configuration(
+            parameters: [.gain(address: 1), .mix(address: 2), .frequency(address: 10)]
+        )
+
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: config
+        )
+
+        // Set values
+        audioUnit.setParameterValue(1.5, for: 1)
+        audioUnit.setParameterValue(0.8, for: 2)
+        audioUnit.setParameterValue(5000, for: 10)
+
+        // Get state
+        let state = audioUnit.fullState
+
+        // Create new instance
+        let audioUnit2 = try AudioUnitScaffold(
+            componentDescription: description,
+            config: config
+        )
+
+        // Apply state
+        audioUnit2.fullState = state
+
+        // Verify round trip
+        XCTAssertEqual(audioUnit2.parameterValue(for: 1), 1.5, accuracy: 0.001)
+        XCTAssertEqual(audioUnit2.parameterValue(for: 2), 0.8, accuracy: 0.001)
+        XCTAssertEqual(audioUnit2.parameterValue(for: 10), 5000, accuracy: 0.1)
+    }
+
+    func testFullStateSetWithNil() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x6E696C73,  // "nils"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let config = AudioUnitScaffold.Configuration(parameters: [.gain(address: 1)])
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: config
+        )
+
+        audioUnit.setParameterValue(0.5, for: 1)
+
+        // Setting nil should not crash and not change values
+        audioUnit.fullState = nil
+        XCTAssertEqual(audioUnit.parameterValue(for: 1), 0.5, accuracy: 0.001)
+    }
+
+    // MARK: - Current Preset Application Tests
+
+    func testApplyFactoryPreset() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x61707072,  // "appr"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let config = AudioUnitScaffold.Configuration(
+            parameters: [.gain(address: 1), .mix(address: 2)],
+            factoryPresets: [
+                AudioUnitScaffold.PresetDef(name: "Half", number: 0, values: [1: 0.5, 2: 0.5]),
+                AudioUnitScaffold.PresetDef(name: "Full", number: 1, values: [1: 2.0, 2: 1.0])
+            ]
+        )
+
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: config
+        )
+
+        // Apply first preset
+        let preset0 = AUAudioUnitPreset()
+        preset0.number = 0
+        preset0.name = "Half"
+        audioUnit.currentPreset = preset0
+
+        XCTAssertEqual(audioUnit.parameterValue(for: 1), 0.5, accuracy: 0.001)
+        XCTAssertEqual(audioUnit.parameterValue(for: 2), 0.5, accuracy: 0.001)
+
+        // Apply second preset
+        let preset1 = AUAudioUnitPreset()
+        preset1.number = 1
+        preset1.name = "Full"
+        audioUnit.currentPreset = preset1
+
+        XCTAssertEqual(audioUnit.parameterValue(for: 1), 2.0, accuracy: 0.001)
+        XCTAssertEqual(audioUnit.parameterValue(for: 2), 1.0, accuracy: 0.001)
+    }
+
+    func testApplyNonExistentPresetDoesNotCrash() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x6E6F6578,  // "noex"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let config = AudioUnitScaffold.Configuration(
+            parameters: [.gain(address: 1)],
+            factoryPresets: [
+                AudioUnitScaffold.PresetDef(name: "Only", number: 0, values: [1: 0.5])
+            ]
+        )
+
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: config
+        )
+
+        audioUnit.setParameterValue(1.0, for: 1)
+
+        // Apply non-existent preset - should not crash or change values
+        let preset = AUAudioUnitPreset()
+        preset.number = 99
+        preset.name = "NonExistent"
+        audioUnit.currentPreset = preset
+
+        // Value should remain unchanged
+        XCTAssertEqual(audioUnit.parameterValue(for: 1), 1.0, accuracy: 0.001)
+    }
+
+    func testApplyUserPresetDoesNotApplyFactoryValues() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x75737270,  // "usrp"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let config = AudioUnitScaffold.Configuration(
+            parameters: [.gain(address: 1)],
+            factoryPresets: [
+                AudioUnitScaffold.PresetDef(name: "Factory", number: 0, values: [1: 0.5])
+            ]
+        )
+
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: config
+        )
+
+        audioUnit.setParameterValue(1.5, for: 1)
+
+        // User presets have negative numbers
+        let userPreset = AUAudioUnitPreset()
+        userPreset.number = -1
+        userPreset.name = "User Preset"
+        audioUnit.currentPreset = userPreset
+
+        // Value should remain unchanged (user presets don't auto-apply factory values)
+        XCTAssertEqual(audioUnit.parameterValue(for: 1), 1.5, accuracy: 0.001)
+    }
+
+    // MARK: - Render Resource Lifecycle Tests
+
+    func testAllocateRenderResources() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x616C6C63,  // "allc"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: AudioUnitScaffold.Configuration()
+        )
+
+        // Should not throw
+        try audioUnit.allocateRenderResources()
+    }
+
+    func testDeallocateRenderResources() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x64616C63,  // "dalc"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: AudioUnitScaffold.Configuration()
+        )
+
+        try audioUnit.allocateRenderResources()
+
+        // Should not crash
+        audioUnit.deallocateRenderResources()
+    }
+
+    func testAllocateDeallocateCycle() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x6379636C,  // "cycl"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: AudioUnitScaffold.Configuration()
+        )
+
+        // Multiple allocate/deallocate cycles should work
+        for _ in 0..<3 {
+            try audioUnit.allocateRenderResources()
+            audioUnit.deallocateRenderResources()
+        }
+    }
+
+    // MARK: - Latency Calculation Tests
+
+    func testLatencyCalculation() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x6C617463,  // "latc"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let config = AudioUnitScaffold.Configuration(latencySamples: 480)
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: config
+        )
+
+        // Default sample rate is 48000
+        // Expected latency: 480 / 48000 = 0.01 seconds
+        let expectedLatency = 480.0 / 48000.0
+        XCTAssertEqual(audioUnit.latency, expectedLatency, accuracy: 0.0001)
+    }
+
+    func testLatencyZeroWhenNoLatencyConfigured() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x7A6C6174,  // "zlat"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: AudioUnitScaffold.Configuration(latencySamples: 0)
+        )
+
+        XCTAssertEqual(audioUnit.latency, 0.0)
+    }
+
+    // MARK: - Internal Render Block Tests
+
+    func testInternalRenderBlockExists() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x726E6472,  // "rndr"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: AudioUnitScaffold.Configuration()
+        )
+
+        try audioUnit.allocateRenderResources()
+
+        let renderBlock = audioUnit.internalRenderBlock
+        XCTAssertNotNil(renderBlock)
+    }
+
+    // MARK: - Parameter Tree Observer Tests
+
+    func testParameterTreeObserverUpdatesValue() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x6F627376,  // "obsv"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let config = AudioUnitScaffold.Configuration(
+            parameters: [.gain(address: 1)]
+        )
+
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: config
+        )
+
+        // Set value through parameter tree
+        audioUnit.parameterTree?.parameter(withAddress: 1)?.value = 1.75
+
+        // Verify internal state was updated
+        XCTAssertEqual(audioUnit.parameterValue(for: 1), 1.75, accuracy: 0.001)
+    }
+
+    func testParameterTreeProviderReturnsCurrentValue() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x70726F76,  // "prov"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let config = AudioUnitScaffold.Configuration(
+            parameters: [.gain(address: 1)]
+        )
+
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: config
+        )
+
+        // Set value through internal method
+        audioUnit.setParameterValue(0.42, for: 1)
+
+        // Read through parameter tree
+        let treeValue = audioUnit.parameterTree?.parameter(withAddress: 1)?.value ?? 0
+        XCTAssertEqual(Double(treeValue), 0.42, accuracy: 0.001)
+    }
+
+    // MARK: - Empty Parameter Configuration Tests
+
+    func testNoParameterTree() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x6E6F7074,  // "nopt"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let config = AudioUnitScaffold.Configuration(parameters: [])
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: config
+        )
+
+        // Parameter tree should be nil when no parameters
+        XCTAssertNil(audioUnit.parameterTree)
+    }
+
+    func testParameterValueForUnknownAddressReturnsZero() throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: 0x756E6B6E,  // "unkn"
+            componentManufacturer: 0x64656D6F,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        let config = AudioUnitScaffold.Configuration(parameters: [.gain(address: 1)])
+        let audioUnit = try AudioUnitScaffold(
+            componentDescription: description,
+            config: config
+        )
+
+        // Querying unknown address should return 0
+        XCTAssertEqual(audioUnit.parameterValue(for: 999), 0.0)
+    }
 }

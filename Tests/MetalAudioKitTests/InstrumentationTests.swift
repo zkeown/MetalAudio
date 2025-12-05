@@ -91,6 +91,58 @@ final class AudioSignpostTests: XCTestCase {
 
         XCTAssertTrue(executed)
     }
+
+    func testBeginWithFormatArgs() {
+        let signpost = AudioSignpost.gpu
+
+        // Should not crash with format args
+        let id = signpost.begin("GPU Op", "size: %d", 1024)
+        signpost.end("GPU Op", id: id)
+    }
+
+    func testEndWithFormatArgs() {
+        let signpost = AudioSignpost.memory
+
+        let id = signpost.begin("Allocation")
+        // Should not crash with format args on end
+        signpost.end("Allocation", id: id, "bytes: %d", 4096)
+    }
+
+    func testMeasureThrows() {
+        struct TestError: Error {}
+
+        XCTAssertThrowsError(try AudioSignpost.dsp.measure("Throwing Op") {
+            throw TestError()
+        })
+    }
+
+    func testMeasureWithSizeThrows() {
+        struct TestError: Error {}
+
+        XCTAssertThrowsError(try AudioSignpost.gpu.measure("Throwing Op", size: 1024) {
+            throw TestError()
+        })
+    }
+
+    func testBeginReturnsInvalidWhenDisabled() {
+        AudioSignpost.isEnabled = false
+        defer { AudioSignpost.isEnabled = true }
+
+        let id = AudioSignpost.audio.begin("Test")
+        XCTAssertEqual(id, .invalid, "Should return .invalid when disabled")
+
+        // End should handle invalid ID gracefully
+        AudioSignpost.audio.end("Test", id: id)
+    }
+
+    func testEventIgnoredWhenDisabled() {
+        AudioSignpost.isEnabled = false
+        defer { AudioSignpost.isEnabled = true }
+
+        // Should not crash when disabled
+        AudioSignpost.memory.event("Test Event")
+        AudioSignpost.memory.event("Test Event", message: "with message")
+    }
 }
 
 // MARK: - ScopedSignpost Tests
@@ -117,6 +169,20 @@ final class ScopedSignpostTests: XCTestCase {
 
         let result = doWork()
         XCTAssertEqual(result, 42)
+    }
+
+    func testScopedSignpostWhenDisabled() {
+        AudioSignpost.isEnabled = false
+        defer { AudioSignpost.isEnabled = true }
+
+        var executed = false
+
+        do {
+            let _ = ScopedSignpost(.audio, "Disabled Scoped")
+            executed = true
+        }
+
+        XCTAssertTrue(executed, "Should complete even when signposts disabled")
     }
 }
 
@@ -196,6 +262,62 @@ final class PerfStatsTests: XCTestCase {
         XCTAssertTrue(summary.contains("3 samples"))
         XCTAssertTrue(summary.contains("avg:"))
     }
+
+    func testEmptyMinMax() {
+        let stats = PerfStats(name: "Empty")
+
+        // No samples - should return 0 for both
+        XCTAssertEqual(stats.minMs, 0, "minMs should be 0 with no samples")
+        XCTAssertEqual(stats.maxMs, 0, "maxMs should be 0 with no samples")
+    }
+
+    func testEmptySummary() {
+        let stats = PerfStats(name: "Empty")
+
+        let summary = stats.summary()
+
+        XCTAssertTrue(summary.contains("Empty"))
+        XCTAssertTrue(summary.contains("0 samples"))
+    }
+
+    func testConcurrentAccess() {
+        let stats = PerfStats(name: "Concurrent")
+        let iterations = 100
+        let expectation = expectation(description: "Concurrent operations")
+        expectation.expectedFulfillmentCount = 4
+
+        // Multiple threads writing samples concurrently
+        for _ in 0..<4 {
+            DispatchQueue.global().async {
+                for _ in 0..<iterations {
+                    let start = stats.startSample()
+                    // Small amount of work
+                    var sum = 0
+                    for i in 0..<10 { sum += i }
+                    _ = sum
+                    stats.endSample(start)
+                }
+                expectation.fulfill()
+            }
+        }
+
+        waitForExpectations(timeout: 10)
+
+        // All samples should be recorded
+        XCTAssertEqual(stats.count, iterations * 4, "All concurrent samples should be recorded")
+    }
+
+    func testMeasureThrowsInPerfStats() {
+        let stats = PerfStats(name: "Throwing")
+        struct TestError: Error {}
+
+        XCTAssertThrowsError(try stats.measure {
+            throw TestError()
+        })
+
+        // Sample should still be recorded even though it threw
+        XCTAssertEqual(stats.count, 1)
+    }
 }
 
 // MARK: - PerfRegistry Tests
@@ -260,5 +382,29 @@ final class PerfRegistryTests: XCTestCase {
         XCTAssertEqual(summaries.count, 2)
         XCTAssertTrue(summaries.contains { $0.contains("FFT") })
         XCTAssertTrue(summaries.contains { $0.contains("Convolution") })
+    }
+
+    func testConcurrentStatsAccess() {
+        let expectation = expectation(description: "Concurrent registry access")
+        expectation.expectedFulfillmentCount = 4
+
+        // Multiple threads accessing/creating stats concurrently
+        for i in 0..<4 {
+            DispatchQueue.global().async {
+                for j in 0..<50 {
+                    let name = "ConcurrentTest_\(i)_\(j)"
+                    let stats = PerfRegistry.shared.stats(for: name)
+                    let start = stats.startSample()
+                    stats.endSample(start)
+                }
+                expectation.fulfill()
+            }
+        }
+
+        waitForExpectations(timeout: 10)
+
+        // Should not crash and summaries should be retrievable
+        let summaries = PerfRegistry.shared.allSummaries()
+        XCTAssertGreaterThanOrEqual(summaries.count, 200, "Should have created many stats entries")
     }
 }

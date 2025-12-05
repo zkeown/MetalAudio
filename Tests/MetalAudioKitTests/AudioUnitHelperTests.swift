@@ -489,6 +489,211 @@ final class AudioUnitHelperTests: XCTestCase {
             XCTAssertEqual(buffer[0], 123.0)
         }
     }
+
+    // MARK: - AudioBufferList Copy Tests
+
+    func testCopyFromBufferList() {
+        let config = AudioUnitHelper.Config(maxFrames: 8, channelCount: 2)
+        let helper = AudioUnitHelper(config: config)
+
+        // Create AVAudioPCMBuffer with test data
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
+        let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4)!
+        pcmBuffer.frameLength = 4
+
+        // Fill with test data
+        let channelData = pcmBuffer.floatChannelData!
+        channelData[0][0] = 1.0
+        channelData[0][1] = 2.0
+        channelData[0][2] = 3.0
+        channelData[0][3] = 4.0
+        channelData[1][0] = 5.0
+        channelData[1][1] = 6.0
+        channelData[1][2] = 7.0
+        channelData[1][3] = 8.0
+
+        // Copy to helper
+        helper.copyFromBufferList(pcmBuffer.mutableAudioBufferList, frameCount: 4)
+
+        // Verify channel 0
+        XCTAssertEqual(helper.inputBuffer(channel: 0)![0], 1.0)
+        XCTAssertEqual(helper.inputBuffer(channel: 0)![1], 2.0)
+        XCTAssertEqual(helper.inputBuffer(channel: 0)![2], 3.0)
+        XCTAssertEqual(helper.inputBuffer(channel: 0)![3], 4.0)
+
+        // Verify channel 1
+        XCTAssertEqual(helper.inputBuffer(channel: 1)![0], 5.0)
+        XCTAssertEqual(helper.inputBuffer(channel: 1)![1], 6.0)
+        XCTAssertEqual(helper.inputBuffer(channel: 1)![2], 7.0)
+        XCTAssertEqual(helper.inputBuffer(channel: 1)![3], 8.0)
+    }
+
+    func testCopyFromBufferListPartialFrames() {
+        let config = AudioUnitHelper.Config(maxFrames: 8, channelCount: 2)
+        let helper = AudioUnitHelper(config: config)
+
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
+        let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8)!
+        pcmBuffer.frameLength = 8
+
+        let channelData = pcmBuffer.floatChannelData!
+        for i in 0..<8 {
+            channelData[0][i] = Float(i + 1)
+            channelData[1][i] = Float(i + 10)
+        }
+
+        // Only copy first 3 frames
+        helper.copyFromBufferList(pcmBuffer.mutableAudioBufferList, frameCount: 3)
+
+        XCTAssertEqual(helper.inputBuffer(channel: 0)![0], 1.0)
+        XCTAssertEqual(helper.inputBuffer(channel: 0)![1], 2.0)
+        XCTAssertEqual(helper.inputBuffer(channel: 0)![2], 3.0)
+        // Frame 3 should remain 0 (from initialization)
+        XCTAssertEqual(helper.inputBuffer(channel: 0)![3], 0.0)
+    }
+
+    func testCopyToBufferList() {
+        let config = AudioUnitHelper.Config(maxFrames: 8, channelCount: 2)
+        let helper = AudioUnitHelper(config: config)
+
+        // Set up output data in helper
+        helper.withOutputBuffer(channel: 0) { buffer in
+            buffer[0] = 10.0
+            buffer[1] = 20.0
+            buffer[2] = 30.0
+            buffer[3] = 40.0
+        }
+        helper.withOutputBuffer(channel: 1) { buffer in
+            buffer[0] = 50.0
+            buffer[1] = 60.0
+            buffer[2] = 70.0
+            buffer[3] = 80.0
+        }
+
+        // Create output buffer
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
+        let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4)!
+        pcmBuffer.frameLength = 4
+
+        // Copy from helper to buffer list
+        helper.copyToBufferList(pcmBuffer.mutableAudioBufferList, frameCount: 4)
+
+        // Verify
+        let channelData = pcmBuffer.floatChannelData!
+        XCTAssertEqual(channelData[0][0], 10.0)
+        XCTAssertEqual(channelData[0][1], 20.0)
+        XCTAssertEqual(channelData[0][2], 30.0)
+        XCTAssertEqual(channelData[0][3], 40.0)
+        XCTAssertEqual(channelData[1][0], 50.0)
+        XCTAssertEqual(channelData[1][1], 60.0)
+        XCTAssertEqual(channelData[1][2], 70.0)
+        XCTAssertEqual(channelData[1][3], 80.0)
+    }
+
+    func testCopyToBufferListPartialFrames() {
+        let config = AudioUnitHelper.Config(maxFrames: 8, channelCount: 1)
+        let helper = AudioUnitHelper(config: config)
+
+        helper.withOutputBuffer(channel: 0) { buffer in
+            for i in 0..<8 {
+                buffer[i] = Float(i + 1)
+            }
+        }
+
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)!
+        let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8)!
+        pcmBuffer.frameLength = 8
+
+        // Initialize buffer to zeros
+        let channelData = pcmBuffer.floatChannelData!
+        for i in 0..<8 {
+            channelData[0][i] = 0.0
+        }
+
+        // Only copy first 3 frames
+        helper.copyToBufferList(pcmBuffer.mutableAudioBufferList, frameCount: 3)
+
+        XCTAssertEqual(channelData[0][0], 1.0)
+        XCTAssertEqual(channelData[0][1], 2.0)
+        XCTAssertEqual(channelData[0][2], 3.0)
+        // Remaining frames should be unchanged (0)
+        XCTAssertEqual(channelData[0][3], 0.0)
+    }
+
+    func testCopyRoundTrip() {
+        let config = AudioUnitHelper.Config(maxFrames: 4, channelCount: 2)
+        let helper = AudioUnitHelper(config: config)
+
+        // Create source buffer with test data
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
+        let sourceBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4)!
+        sourceBuffer.frameLength = 4
+
+        let sourceData = sourceBuffer.floatChannelData!
+        sourceData[0][0] = 1.5; sourceData[0][1] = 2.5; sourceData[0][2] = 3.5; sourceData[0][3] = 4.5
+        sourceData[1][0] = 5.5; sourceData[1][1] = 6.5; sourceData[1][2] = 7.5; sourceData[1][3] = 8.5
+
+        // Copy in
+        helper.copyFromBufferList(sourceBuffer.mutableAudioBufferList, frameCount: 4)
+
+        // Bypass (copy input to output)
+        helper.bypass(frameCount: 4)
+
+        // Create destination buffer
+        let destBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4)!
+        destBuffer.frameLength = 4
+
+        // Copy out
+        helper.copyToBufferList(destBuffer.mutableAudioBufferList, frameCount: 4)
+
+        // Verify round trip
+        let destData = destBuffer.floatChannelData!
+        for i in 0..<4 {
+            XCTAssertEqual(destData[0][i], sourceData[0][i], accuracy: 0.0001)
+            XCTAssertEqual(destData[1][i], sourceData[1][i], accuracy: 0.0001)
+        }
+    }
+
+    func testCopyFromBufferListWithMoreChannelsThanHelper() {
+        // Helper has 1 channel, buffer has 2
+        let config = AudioUnitHelper.Config(maxFrames: 4, channelCount: 1)
+        let helper = AudioUnitHelper(config: config)
+
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
+        let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4)!
+        pcmBuffer.frameLength = 4
+
+        let channelData = pcmBuffer.floatChannelData!
+        channelData[0][0] = 1.0
+        channelData[1][0] = 99.0 // Should be ignored
+
+        // Should only copy first channel, not crash
+        helper.copyFromBufferList(pcmBuffer.mutableAudioBufferList, frameCount: 4)
+
+        XCTAssertEqual(helper.inputBuffer(channel: 0)![0], 1.0)
+        XCTAssertNil(helper.inputBuffer(channel: 1)) // No channel 1 in helper
+    }
+
+    func testCopyFromBufferListClampsToMaxFrames() {
+        let config = AudioUnitHelper.Config(maxFrames: 2, channelCount: 1)
+        let helper = AudioUnitHelper(config: config)
+
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)!
+        let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8)!
+        pcmBuffer.frameLength = 8
+
+        let channelData = pcmBuffer.floatChannelData!
+        for i in 0..<8 {
+            channelData[0][i] = Float(i + 1)
+        }
+
+        // Request more frames than helper can hold
+        helper.copyFromBufferList(pcmBuffer.mutableAudioBufferList, frameCount: 8)
+
+        // Should only have copied 2 frames (maxFrames)
+        XCTAssertEqual(helper.inputBuffer(channel: 0)![0], 1.0)
+        XCTAssertEqual(helper.inputBuffer(channel: 0)![1], 2.0)
+    }
 }
 
 // MARK: - Thread Assertion Tests

@@ -697,6 +697,26 @@ final class ThreadgroupSizeTests: XCTestCase {
         XCTAssertEqual(profile.optimal1DThreadgroupSize(workloadSize: 64), 64)
         XCTAssertEqual(profile.optimal1DThreadgroupSize(workloadSize: 128), 128)
     }
+
+    func testOptimal1DThreadgroupSizeWorkloadOne() {
+        let profile = makeProfile()
+
+        // Workload of 1 should return minimum of 32
+        let size = profile.optimal1DThreadgroupSize(workloadSize: 1)
+        XCTAssertEqual(size, 32, "Workload of 1 should return minimum threadgroup size")
+    }
+
+    func testOptimal1DThreadgroupSizeExactMatchPreferred() {
+        let profile = makeProfile()
+
+        // Workload exactly equals preferred size (256) - not small, should return preferred
+        let size = profile.optimal1DThreadgroupSize(workloadSize: 256, preferredSize: 256)
+        XCTAssertEqual(size, 256, "Workload matching preferred should return preferred size")
+
+        // Workload equals preferred (128)
+        let size2 = profile.optimal1DThreadgroupSize(workloadSize: 128, preferredSize: 128)
+        XCTAssertEqual(size2, 128)
+    }
 }
 
 // MARK: - ToleranceConfiguration A11/Legacy Tests
@@ -804,6 +824,67 @@ final class ToleranceProviderTests: XCTestCase {
         XCTAssertEqual(
             ToleranceProvider.shared.fftAccuracy,
             ToleranceProvider.shared.tolerances.fftAccuracy
+        )
+    }
+
+    func testReinitializeWithDevice() throws {
+        let device = try AudioDevice()
+
+        // Get original profile
+        let originalProfile = ToleranceProvider.shared.profile
+        XCTAssertNotNil(originalProfile)
+
+        // Override with aggressive tolerances
+        ToleranceProvider.shared.override(with: .aggressive())
+        XCTAssertEqual(ToleranceProvider.shared.tolerances.epsilon, 1e-8)
+
+        // Reinitialize should reset tolerances to optimal for the device
+        ToleranceProvider.shared.reinitialize(with: device.device)
+
+        // Should have reset to optimal (not aggressive)
+        XCTAssertNotEqual(ToleranceProvider.shared.tolerances.epsilon, 1e-8)
+
+        // Profile should still be set
+        XCTAssertNotNil(ToleranceProvider.shared.profile)
+        XCTAssertEqual(
+            ToleranceProvider.shared.profile?.deviceName,
+            device.hardwareProfile.deviceName
+        )
+    }
+
+    func testInitializeIdempotent() throws {
+        // First AudioDevice initializes the provider
+        let device1 = try AudioDevice()
+        let originalDeviceName = ToleranceProvider.shared.profile?.deviceName
+        XCTAssertNotNil(originalDeviceName)
+
+        // Creating another AudioDevice should not change the profile
+        // (initialize guards with `guard profile == nil`)
+        let device2 = try AudioDevice()
+
+        // Profile should still match original (first device wins)
+        XCTAssertEqual(
+            ToleranceProvider.shared.profile?.deviceName,
+            originalDeviceName
+        )
+
+        // Both devices should have same underlying Metal device anyway
+        XCTAssertEqual(device1.device.name, device2.device.name)
+    }
+
+    func testOverridePreservesProfile() throws {
+        _ = try AudioDevice()
+
+        let originalProfile = ToleranceProvider.shared.profile
+        XCTAssertNotNil(originalProfile)
+
+        // Override tolerances
+        ToleranceProvider.shared.override(with: .conservative())
+
+        // Profile should remain unchanged
+        XCTAssertEqual(
+            ToleranceProvider.shared.profile?.deviceName,
+            originalProfile?.deviceName
         )
     }
 }
