@@ -135,7 +135,7 @@ final class AllocationProfilingTests: XCTestCase {
         let delta = afterSnapshot - beforeSnapshot
 
         let perIterationBytes = abs(delta.processDelta) / Int64(iterations)
-        XCTAssertLessThan(perIterationBytes, 1024,
+        assertAllocationStable(perIterationBytes, lessThan: 1024,
             "Direct convolution should have minimal allocations (got \(perIterationBytes) bytes/iteration)")
     }
 
