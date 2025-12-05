@@ -45,6 +45,20 @@ enum TestEnvironment {
         !isCI
     }
 
+    /// Returns true if running on an iOS simulator.
+    ///
+    /// iOS simulators have different memory/GPU behavior than real devices:
+    /// - GPU compute may produce unreliable results
+    /// - Metal shader translation layer has quirks
+    /// - Direct convolution may not work correctly
+    static var isIOSSimulator: Bool {
+        #if targetEnvironment(simulator)
+        return true
+        #else
+        return false
+        #endif
+    }
+
     // MARK: - GPU Detection
 
     /// Returns true if a real GPU (not software renderer) is available.
@@ -66,20 +80,31 @@ enum TestEnvironment {
     /// - Absent
     /// - Software-rendered
     /// - Unreliable for timing-sensitive tests
+    ///
+    /// Also false on iOS simulator where Metal compute has quirks.
     static var hasReliableGPU: Bool {
-        hasRealGPU && isLocal
+        hasRealGPU && isLocal && !isIOSSimulator
     }
 
     // MARK: - Test Tolerances
 
-    /// Allocation tolerance multiplier for CI environments.
+    /// Allocation tolerance multiplier for CI and simulator environments.
     ///
     /// CI environments often show higher allocation due to:
     /// - Different memory management
     /// - System overhead
     /// - Lack of GPU acceleration
+    ///
+    /// iOS simulators also show higher allocation due to:
+    /// - Metal API translation layer overhead
+    /// - Different memory management from real devices
     static var allocationToleranceMultiplier: Int {
-        isCI ? 4 : 1
+        if isIOSSimulator {
+            return 16  // iOS simulator has significant overhead
+        } else if isCI {
+            return 4
+        }
+        return 1
     }
 
     /// Numerical tolerance multiplier for CI environments.
