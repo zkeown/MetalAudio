@@ -68,6 +68,8 @@ jobs:
         include:
           - device: "iPhone 17 Pro"
             ios: "26.1"
+          - device: "iPhone 8"
+            ios: "16.7"
 
     steps:
       - name: Checkout
