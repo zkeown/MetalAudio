@@ -924,9 +924,15 @@ final class ExtendedAudioDeviceTests: XCTestCase {
         let mode = device.preferredStorageMode
         // On Apple Silicon, should be .storageModeShared for unified memory
         // Just verify it contains a storage mode flag
+        #if os(macOS)
         let hasStorageMode = mode.contains(.storageModeShared) ||
                             mode.contains(.storageModePrivate) ||
                             mode.contains(.storageModeManaged)
+        #else
+        // storageModeManaged is not available on iOS
+        let hasStorageMode = mode.contains(.storageModeShared) ||
+                            mode.contains(.storageModePrivate)
+        #endif
         XCTAssertTrue(hasStorageMode, "Should return a valid storage mode")
     }
 }
