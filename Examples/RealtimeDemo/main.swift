@@ -158,11 +158,13 @@ final class RealtimeAudioProcessor {
     // Stored as Any? to avoid availability issues with stored properties
     private var bnnsInferenceStorage: Any?
 
+    #if compiler(>=6.0)
     @available(macOS 15.0, iOS 18.0, *)
     private var bnnsInference: BNNSInference? {
         get { bnnsInferenceStorage as? BNNSInference }
         set { bnnsInferenceStorage = newValue }
     }
+    #endif
 
     // Tracking
     private let allocationTracker: AllocationTracker
@@ -198,6 +200,7 @@ final class RealtimeAudioProcessor {
         timingTracker = TimingTracker(budgetMicroseconds: config.bufferDurationMicroseconds)
 
         // Initialize BNNS inference if model provided and available
+        #if compiler(>=6.0)
         if #available(macOS 15.0, iOS 18.0, *), let path = modelPath {
             let url = URL(fileURLWithPath: path)
             if FileManager.default.fileExists(atPath: path) {
@@ -217,6 +220,11 @@ final class RealtimeAudioProcessor {
         } else if modelPath != nil {
             print("Note: BNNS inference requires macOS 15+ / iOS 18+")
         }
+        #else
+        if modelPath != nil {
+            print("Note: BNNS inference requires Swift 6 / Xcode 16+")
+        }
+        #endif
 
         print("RealtimeAudioProcessor initialized:")
         print("  Buffer size: \(config.bufferSize) samples")
@@ -265,6 +273,7 @@ final class RealtimeAudioProcessor {
         self.frameCount += UInt64(frameCount)
 
         // Optional BNNS inference (zero-allocation after init)
+        #if compiler(>=6.0)
         if #available(macOS 15.0, iOS 18.0, *), let bnns = bnnsInference {
             // Copy to BNNS input buffer
             let bnnsInputCount = min(frameCount, bnnsInputBuffer.count)
@@ -302,6 +311,12 @@ final class RealtimeAudioProcessor {
                 output[i] = input[i] * 0.9
             }
         }
+        #else
+        // Pass-through with slight gain reduction (simulating processing)
+        for i in 0..<(frameCount * config.channels) {
+            output[i] = input[i] * 0.9
+        }
+        #endif
 
         // ========================================
         // END REAL-TIME SAFE ZONE
