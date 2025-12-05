@@ -10,9 +10,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
-
 jobs:
   # =============================================================================
   # Lint
@@ -78,13 +75,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # iOS 16 - A11 minimum hardware target (iPhone 8/X era)
-          - ios: "16.4"
-            device: "iPhone 14"
-            xcode: "14.3.1"
-            macos: "13"
-          # iOS 18 (newest)
-          - ios: "18.1"
+          # iOS 18 - latest stable
+          - ios: "18.4"
             device: "iPhone 16 Pro"
             xcode: "16.1"
             macos: "15"
