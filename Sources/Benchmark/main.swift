@@ -1424,7 +1424,7 @@ for cfg in roundTripConfigs {
 
     // Warm up
     let stftResult = try! fft.stft(input: input)
-    _ = fft.istft(stft: stftResult)
+    _ = try! fft.istft(stft: stftResult)
 
     // STFT benchmark
     let stftIterations = 30
@@ -1434,13 +1434,13 @@ for cfg in roundTripConfigs {
 
     // iSTFT benchmark
     let (_, istftUs) = measureTime(stftIterations) {
-        _ = fft.istft(stft: stftResult)
+        _ = try! fft.istft(stft: stftResult)
     }
 
     // Round-trip benchmark
     let (_, roundTripUs) = measureTime(stftIterations) {
         let stft = try! fft.stft(input: input)
-        _ = fft.istft(stft: stft)
+        _ = try! fft.istft(stft: stft)
     }
 
     let frameCount = stftResult.real.count

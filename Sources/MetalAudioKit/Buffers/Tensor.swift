@@ -133,13 +133,29 @@ public final class Tensor {
     }
 
     /// Initialize by wrapping an existing buffer
-    /// - Throws: `MetalAudioError.bufferSizeMismatch` if buffer is too small for shape
+    /// - Throws: `MetalAudioError.bufferSizeMismatch` if buffer is too small for shape,
+    ///           `MetalAudioError.integerOverflow` if shape calculation overflows
     public init(
         buffer: MTLBuffer,
         shape: [Int],
         dataType: TensorDataType = .float32
     ) throws {
-        let requiredBytes = shape.reduce(1, *) * dataType.size
+        // SAFETY: Calculate element count with overflow checking
+        var elementCount = 1
+        for dim in shape {
+            let (newCount, overflow) = elementCount.multipliedReportingOverflow(by: dim)
+            guard !overflow else {
+                throw MetalAudioError.integerOverflow(operation: "tensor shape multiplication")
+            }
+            elementCount = newCount
+        }
+
+        // SAFETY: Calculate byte size with overflow checking
+        let (requiredBytes, byteSizeOverflow) = elementCount.multipliedReportingOverflow(by: dataType.size)
+        guard !byteSizeOverflow else {
+            throw MetalAudioError.integerOverflow(operation: "tensor byte size calculation")
+        }
+
         guard buffer.length >= requiredBytes else {
             throw MetalAudioError.bufferSizeMismatch(
                 expected: requiredBytes,
@@ -508,9 +524,17 @@ extension Tensor {
             }
         }
 
+        // H16 FIX: Use overflow-checked arithmetic for defense in depth
+        // While valid indices should always produce valid linear indices (< count),
+        // overflow checking catches any bugs in stride computation or edge cases.
         var idx = 0
         for i in 0..<rank {
-            idx += indices[i] * strides[i]
+            let (product, mulOverflow) = indices[i].multipliedReportingOverflow(by: strides[i])
+            let (sum, addOverflow) = idx.addingReportingOverflow(product)
+            guard !mulOverflow && !addOverflow else {
+                throw MetalAudioError.indexOutOfBounds(index: indices, shape: shape)
+            }
+            idx = sum
         }
         return idx
     }

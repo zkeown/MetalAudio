@@ -213,7 +213,25 @@ public final class LayerNorm: NNLayer {
             vDSP_vsq(temp, 1, &temp, 1, vDSP_Length(featureSize))
             vDSP_meanv(temp, 1, &variance, vDSP_Length(featureSize))
 
-            let invStd = 1.0 / sqrt(variance + epsilon)
+            // Protection against division by zero/near-zero
+            // sqrt(variance + epsilon) should always be >= sqrt(epsilon), but clamp to epsilon
+            // as a safe minimum divisor. Using Float.leastNonzeroMagnitude (~1e-45) would cause
+            // numerical explosion to ~1e38.
+            var invStd = 1.0 / max(sqrt(variance + epsilon), epsilon)
+
+            // CRITICAL FIX: Additional safety check for NaN/Inf propagation
+            // If invStd is not finite (due to extreme numerical conditions like Inf in input),
+            // zero it out to prevent NaN from propagating through the entire network.
+            //
+            // NN-1: Semantic reasoning for invStd = 0.0:
+            // - normalized = (x - mean) * invStd = (x - mean) * 0 = 0
+            // - output = gamma * 0 + beta = beta
+            // This is semantically correct for the cases when this triggers:
+            // 1. Constant input (variance = 0): (x - mean) = 0 anyway, so output = beta is correct
+            // 2. Extreme inputs causing NaN: fallback to beta is safer than propagating NaN
+            if !invStd.isFinite {
+                invStd = 0.0
+            }
 
             // Normalize and apply scale/shift
             for i in 0..<featureSize {

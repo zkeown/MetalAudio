@@ -407,6 +407,18 @@ public final class LSTM: NNLayer {
         let numDirections = bidirectional ? 2 : 1
         let gateSize = 4 * hiddenSize
 
+        // CRITICAL FIX: Validate state arrays are properly initialized
+        // This catches partial initialization or corrupted state before indexed access
+        let expectedStateCount = numLayers * numDirections
+        guard hiddenState.count == expectedStateCount,
+              cellState.count == expectedStateCount else {
+            throw MetalAudioError.invalidConfiguration(
+                "LSTM state arrays not properly initialized: " +
+                "expected \(expectedStateCount) states, got hiddenState=\(hiddenState.count), cellState=\(cellState.count). " +
+                "Ensure LSTM init completed successfully."
+            )
+        }
+
         // Ensure sequence-dependent work buffers are large enough
         // These are resized only when sequence length increases (rare in real-time audio)
         // SAFETY: Use overflow-checked arithmetic to prevent wraparound causing undersized allocation

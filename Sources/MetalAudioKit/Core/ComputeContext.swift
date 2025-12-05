@@ -185,7 +185,14 @@ public final class ComputeContext: @unchecked Sendable {
             #endif
             throw MetalAudioError.gpuTimeout(effectiveTimeout)
         }
-        guard commandBuffer.status == .completed else {
+        // HIGH-FIX: Distinguish between GPU errors and timeouts
+        switch commandBuffer.status {
+        case .completed:
+            break  // Success
+        case .error:
+            let errorReason = commandBuffer.error?.localizedDescription ?? "Unknown GPU error"
+            throw MetalAudioError.gpuExecutionError(errorReason)
+        default:
             throw MetalAudioError.gpuTimeout(effectiveTimeout)
         }
 
@@ -252,7 +259,14 @@ public final class ComputeContext: @unchecked Sendable {
             #endif
             throw MetalAudioError.gpuTimeout(effectiveTimeout)
         }
-        guard commandBuffer.status == .completed else {
+        // HIGH-FIX: Distinguish between GPU errors and timeouts
+        switch commandBuffer.status {
+        case .completed:
+            break  // Success
+        case .error:
+            let errorReason = commandBuffer.error?.localizedDescription ?? "Unknown GPU error"
+            throw MetalAudioError.gpuExecutionError(errorReason)
+        default:
             throw MetalAudioError.gpuTimeout(effectiveTimeout)
         }
 
@@ -518,7 +532,14 @@ public final class ComputeContext: @unchecked Sendable {
         if waitResult == .timedOut {
             throw MetalAudioError.gpuTimeout(effectiveTimeout)
         }
-        guard commandBuffer.status == .completed else {
+        // HIGH-FIX: Distinguish between GPU errors and timeouts
+        switch commandBuffer.status {
+        case .completed:
+            break  // Success
+        case .error:
+            let errorReason = commandBuffer.error?.localizedDescription ?? "Unknown GPU error"
+            throw MetalAudioError.gpuExecutionError(errorReason)
+        default:
             throw MetalAudioError.gpuTimeout(effectiveTimeout)
         }
     }
@@ -787,7 +808,10 @@ extension ComputeContext {
         // Try to swap buffers, or wait for in-flight accesses to complete
         os_unfair_lock_lock(&unfairLock)
 
-        // Must wait for BOTH closure accesses AND GPU command buffers to complete
+        // Must wait for BOTH closure accesses AND GPU command buffers to complete.
+        // GPU LIFETIME TRACKING: `tripleBufferGPUCommandsInFlight` is incremented by
+        // `registerTripleBufferCommandBuffer()` and decremented when the GPU command completes.
+        // This ensures we wait for actual GPU completion, not just Swift closure scope.
         let totalInFlight = tripleBufferInFlightCount + tripleBufferGPUCommandsInFlight
         if totalInFlight == 0 {
             // Fast path: no buffers in flight, swap immediately
@@ -816,6 +840,9 @@ extension ComputeContext {
         if result == .timedOut {
             os_unfair_lock_unlock(&unfairLock)
             // Buffers are stuck in-flight (likely GPU command buffers still executing)
+            // NOTE: This is NOT a memory leak. When this function throws, `newBuffers` goes out
+            // of scope and Swift ARC automatically releases the MTLBuffer references. Metal buffers
+            // are reference-counted Objective-C objects that are properly deallocated by ARC.
             throw MetalAudioError.gpuTimeout(timeout)
         }
 
@@ -1009,13 +1036,16 @@ extension ComputeContext {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
 
-        if tripleBufferInFlightCount == 0 {
+        // SCAN2-FIX: Check BOTH in-flight counts - closure accesses AND GPU command buffers
+        // Previously only checked tripleBufferInFlightCount, which could clear buffers
+        // while GPU command buffers still referenced them (use-after-free).
+        if tripleBufferInFlightCount == 0 && tripleBufferGPUCommandsInFlight == 0 {
             tripleBuffer.removeAll()
             currentWriteIndex = 0
             tripleBufferPendingClear = false
             return true
         } else {
-            // Defer until in-flight count reaches 0
+            // Defer until BOTH counts reach 0
             tripleBufferPendingClear = true
             return false
         }

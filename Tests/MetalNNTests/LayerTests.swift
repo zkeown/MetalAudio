@@ -59,6 +59,40 @@ final class LinearLayerTests: XCTestCase {
         XCTAssertEqual(result[0], 1.0, accuracy: linearTolerance)
         XCTAssertEqual(result[1], 2.0, accuracy: linearTolerance)
     }
+
+    func testLinearMatchesPyTorch() throws {
+        let (weights, testCases) = try ReferenceTestUtils.getLinearReferences()
+
+        let layer = try Linear(
+            device: device,
+            inputFeatures: weights.inFeatures,
+            outputFeatures: weights.outFeatures,
+            useBias: true
+        )
+
+        // Load weights - PyTorch uses (outFeatures, inFeatures) layout
+        // Flatten the 2D weight matrix to 1D
+        let flatWeights = weights.weight.flatMap { $0 }
+        try layer.loadWeights(flatWeights, bias: weights.bias)
+
+        let context = try ComputeContext(device: device)
+
+        for (name, inputBatches, expectedBatches) in testCases {
+            for (inputRow, expectedRow) in zip(inputBatches, expectedBatches) {
+                let input = try Tensor(device: device, shape: [weights.inFeatures])
+                try input.copy(from: inputRow)
+                let output = try Tensor(device: device, shape: [weights.outFeatures])
+
+                try context.executeSync { encoder in
+                    try layer.forward(input: input, output: output, encoder: encoder)
+                }
+
+                let actual = output.toArray()
+                ReferenceTestUtils.assertClose(actual, expectedRow, rtol: linearTolerance, atol: linearTolerance,
+                    message: "Linear mismatch for '\(name)'")
+            }
+        }
+    }
 }
 
 final class ActivationTests: XCTestCase {

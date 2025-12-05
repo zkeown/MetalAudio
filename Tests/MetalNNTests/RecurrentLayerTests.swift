@@ -393,6 +393,54 @@ final class LSTMTests: XCTestCase {
             XCTAssertLessThanOrEqual(abs(value), 1.0, "Output should be in [-1, 1]")
         }
     }
+
+    // MARK: - PyTorch Reference Test
+
+    func testLSTMMatchesPyTorch() throws {
+        let (config, weights, sequence) = try ReferenceTestUtils.getLSTMReferences()
+        let sequenceLength = sequence.input.count
+
+        let lstm = try LSTM(
+            device: device,
+            inputSize: config.inputSize,
+            hiddenSize: config.hiddenSize,
+            numLayers: 1,
+            bidirectional: false,
+            sequenceLength: sequenceLength
+        )
+
+        // Flatten 2D weight matrices to 1D arrays
+        let flatWeightsIH = weights.weightIH.flatMap { $0 }
+        let flatWeightsHH = weights.weightHH.flatMap { $0 }
+
+        try lstm.loadWeights(
+            layer: 0,
+            direction: 0,
+            weightsIH: flatWeightsIH,
+            weightsHH: flatWeightsHH,
+            biasIH: weights.biasIH,
+            biasHH: weights.biasHH
+        )
+
+        // Flatten input sequence: [seqLen, inputSize] -> [seqLen * inputSize]
+        let flatInput = sequence.input.flatMap { $0 }
+        let flatExpected = sequence.output.flatMap { $0 }
+
+        let input = try Tensor(device: device, shape: [sequenceLength, config.inputSize])
+        try input.copy(from: flatInput)
+        let output = try Tensor(device: device, shape: [sequenceLength, config.hiddenSize])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try lstm.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let actual = output.toArray()
+
+        // Use recurrent tolerance since errors accumulate over sequence
+        ReferenceTestUtils.assertClose(actual, flatExpected, rtol: recurrentTolerance, atol: recurrentTolerance,
+            message: "LSTM sequence output mismatch vs PyTorch")
+    }
 }
 
 // MARK: - GRU Tests
@@ -617,6 +665,53 @@ final class GRUTests: XCTestCase {
             XCTAssertFalse(value.isNaN, "Large input caused NaN at index \(i)")
             XCTAssertFalse(value.isInfinite, "Large input caused infinity at index \(i)")
         }
+    }
+
+    // MARK: - PyTorch Reference Test
+
+    func testGRUMatchesPyTorch() throws {
+        let (config, weights, sequence) = try ReferenceTestUtils.getGRUReferences()
+        let sequenceLength = sequence.input.count
+
+        let gru = try GRU(
+            device: device,
+            inputSize: config.inputSize,
+            hiddenSize: config.hiddenSize,
+            bidirectional: false,
+            sequenceLength: sequenceLength
+        )
+
+        // Flatten 2D weight matrices to 1D arrays
+        let flatWeightsIH = weights.weightIH.flatMap { $0 }
+        let flatWeightsHH = weights.weightHH.flatMap { $0 }
+
+        try gru.loadWeights(
+            direction: 0,
+            weightsIH: flatWeightsIH,
+            weightsHH: flatWeightsHH,
+            biasIH: weights.biasIH,
+            biasHH: weights.biasHH
+        )
+
+        // Flatten input sequence
+        let flatInput = sequence.input.flatMap { $0 }
+        let flatExpected = sequence.output.flatMap { $0 }
+
+        let input = try Tensor(device: device, shape: [sequenceLength, config.inputSize])
+        try input.copy(from: flatInput)
+        let output = try Tensor(device: device, shape: [sequenceLength, config.hiddenSize])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try gru.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let actual = output.toArray()
+
+        // Use recurrent tolerance (100x looser) since errors accumulate over sequence
+        let recurrentTolerance = ToleranceProvider.shared.tolerances.nnLayerAccuracy * 100
+        ReferenceTestUtils.assertClose(actual, flatExpected, rtol: recurrentTolerance, atol: recurrentTolerance,
+            message: "GRU sequence output mismatch vs PyTorch")
     }
 }
 

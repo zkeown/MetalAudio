@@ -11,6 +11,30 @@ swift test --filter '<target>.<test>'    # Run specific test (e.g., 'MetalDSPTes
 swift run Benchmark                      # Run performance benchmarks
 ```
 
+## Code Coverage
+
+**Important:** Use `--parallel` flag for coverage to work correctly. Without it, XCTest profiling data is not captured.
+
+```bash
+# Run tests with coverage
+swift test --enable-code-coverage --parallel
+
+# Merge profraw files into profdata
+xcrun llvm-profdata merge -sparse \
+  .build/arm64-apple-macosx/debug/codecov/*.profraw \
+  -o .build/arm64-apple-macosx/debug/codecov/merged.profdata
+
+# Generate coverage report (excludes dependencies and test files)
+xcrun llvm-cov report \
+  .build/arm64-apple-macosx/debug/MetalAudioPackageTests.xctest/Contents/MacOS/MetalAudioPackageTests \
+  --instr-profile=.build/arm64-apple-macosx/debug/codecov/merged.profdata \
+  --ignore-filename-regex='.*\.build/checkouts.*' \
+  --ignore-filename-regex='.*\.build/.*DerivedSources.*' \
+  --ignore-filename-regex='.*Tests/.*'
+```
+
+For HTML report, replace `report` with `show --format=html > coverage.html`.
+
 ## Architecture Overview
 
 MetalAudio is a GPU-accelerated audio processing framework with three modules:
@@ -81,3 +105,40 @@ For real-time audio callbacks:
 
 ## Metal Shaders
 Located in `Sources/*/Shaders/`. Compiled at runtime from source or pre-compiled `.metallib`. Shaders are automatically copied as resources via Package.swift.
+
+## Test Model Generation
+
+Test CoreML models for BNNS tests are generated using the Python script `Scripts/generate_test_models.py`.
+
+### Requirements
+
+```bash
+pip install coremltools torch
+```
+
+### Usage
+
+```bash
+python3 Scripts/generate_test_models.py
+```
+
+This creates compiled `.mlmodelc` bundles in `Tests/MetalNNTests/Resources/`:
+
+- `TestIdentity.mlmodelc` - Identity (passthrough) model
+- `TestReLU.mlmodelc` - ReLU activation model
+- `TestLinear.mlmodelc` - Single linear layer (64→32)
+- `TestSequential.mlmodelc` - Multi-layer network (64→32→16)
+
+### Technical Notes
+
+- Models use **ML Program format** (required by BNNS Graph API, not old Neural Network spec)
+- Converted via `ct.convert(..., convert_to="mlprogram", minimum_deployment_target=ct.target.macOS15)`
+- Input tensor name: `"input"`, Output tensor name: `"output"`
+- All models use float32, fixed shapes (batch size 1)
+
+### Accessing in Tests
+
+```swift
+let url = Bundle.module.url(forResource: "TestIdentity", withExtension: "mlmodelc")!
+let inference = try BNNSInference(modelPath: url)
+```

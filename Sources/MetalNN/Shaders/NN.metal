@@ -869,11 +869,16 @@ kernel void softmax_1d_parallel(
         sharedGlobalSum = sharedSum[0];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    float invSum = 1.0f / sharedGlobalSum;
+
+    // CRITICAL FIX: Protect against division by zero when all exponentials underflow
+    // This can happen with large negative inputs (e.g., -1000). Without protection,
+    // invSum becomes inf, causing NaN outputs that propagate through the network.
+    float invSum = (sharedGlobalSum > 1e-38f) ? (1.0f / sharedGlobalSum) : 0.0f;
+    float uniformVal = 1.0f / float(length);  // Fallback: uniform distribution
 
     // Phase 5: Normalize
     for (uint i = localId; i < length; i += threadsPerGroup) {
-        data[rowOffset + i] *= invSum;
+        data[rowOffset + i] = (sharedGlobalSum > 1e-38f) ? data[rowOffset + i] * invSum : uniformVal;
     }
 }
 
@@ -1287,10 +1292,13 @@ kernel void softmax_1d_simd(
         if (localId == 0) sharedGlobalSum = localSum;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    float invSum = 1.0f / sharedGlobalSum;
+
+    // CRITICAL FIX: Protect against division by zero when all exponentials underflow
+    float invSum = (sharedGlobalSum > 1e-38f) ? (1.0f / sharedGlobalSum) : 0.0f;
+    float uniformVal = 1.0f / float(length);  // Fallback: uniform distribution
 
     // Phase 3: Normalize
     for (uint i = localId; i < length; i += threadsPerGroup) {
-        data[rowOffset + i] *= invSum;
+        data[rowOffset + i] = (sharedGlobalSum > 1e-38f) ? data[rowOffset + i] * invSum : uniformVal;
     }
 }

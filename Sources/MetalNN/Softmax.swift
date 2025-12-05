@@ -76,9 +76,20 @@ public final class Softmax: NNLayer, @unchecked Sendable {
         }
 
         // Normalize
-        float invSum = (sum > 1e-38f) ? (1.0f / sum) : 0.0f;
-        for (uint i = 0; i < length; i++) {
-            data[offset + i] *= invSum;
+        // If sum is near-zero (all exp() underflowed), output uniform distribution 1/N
+        // instead of zeros. This is mathematically correct: when all values are equal
+        // (after subtracting max, they're all 0), softmax should be uniform.
+        if (sum > 1e-38f) {
+            float invSum = 1.0f / sum;
+            for (uint i = 0; i < length; i++) {
+                data[offset + i] *= invSum;
+            }
+        } else {
+            // Fallback to uniform distribution
+            float uniformProb = 1.0f / float(length);
+            for (uint i = 0; i < length; i++) {
+                data[offset + i] = uniformProb;
+            }
         }
     }
 
@@ -143,11 +154,20 @@ public final class Softmax: NNLayer, @unchecked Sendable {
             sharedGlobalSum = sharedSum[0];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        float invSum = 1.0f / sharedGlobalSum;
 
         // Phase 3: Normalize
-        for (uint i = localId; i < length; i += threadsPerGroup) {
-            data[rowOffset + i] *= invSum;
+        // If sum is near-zero (all exp() underflowed), output uniform distribution 1/N
+        if (sharedGlobalSum > 1e-38f) {
+            float invSum = 1.0f / sharedGlobalSum;
+            for (uint i = localId; i < length; i += threadsPerGroup) {
+                data[rowOffset + i] *= invSum;
+            }
+        } else {
+            // Fallback to uniform distribution
+            float uniformProb = 1.0f / float(length);
+            for (uint i = localId; i < length; i += threadsPerGroup) {
+                data[rowOffset + i] = uniformProb;
+            }
         }
     }
     """
@@ -161,10 +181,15 @@ public final class Softmax: NNLayer, @unchecked Sendable {
         guard !inputShape.isEmpty else {
             throw MetalAudioError.invalidConfiguration("Softmax input shape cannot be empty")
         }
+        // SCAN4-FIX: Validate length > 0 to prevent division by zero in CPU fallback
+        // At line 286, `1.0 / Float(length)` would produce Inf if length=0
+        guard let lastDim = inputShape.last, lastDim > 0 else {
+            throw MetalAudioError.invalidConfiguration("Softmax last dimension must be > 0, got \(inputShape.last ?? 0)")
+        }
 
         self.device = device
         self.inputShape = inputShape
-        self.length = inputShape.last!
+        self.length = lastDim
         self.numRows = inputShape.count == 1 ? 1 : inputShape.dropLast().reduce(1, *)
 
         // Load kernels from embedded shader source
@@ -253,10 +278,20 @@ public final class Softmax: NNLayer, @unchecked Sendable {
                     sum += expVal
                 }
 
-                // Normalize
-                let invSum = 1.0 / sum
-                for i in 0..<length {
-                    ptr[offset + i] *= invSum
+                // Normalize with protection against division by zero
+                // If sum is near-zero (all exp() underflowed), output uniform distribution 1/N
+                // (matches GPU shader behavior)
+                if sum > 1e-38 {
+                    let invSum = 1.0 / sum
+                    for i in 0..<length {
+                        ptr[offset + i] *= invSum
+                    }
+                } else {
+                    // Fallback to uniform distribution
+                    let uniformProb = 1.0 / Float(length)
+                    for i in 0..<length {
+                        ptr[offset + i] = uniformProb
+                    }
                 }
             }
         }

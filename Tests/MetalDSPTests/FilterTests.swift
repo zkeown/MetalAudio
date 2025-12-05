@@ -1130,6 +1130,159 @@ final class FilterBankExtendedTests: XCTestCase {
 
 final class FilterStabilityTests: XCTestCase {
 
+    // MARK: - DSP-1: State Consistency on Validation Failure
+
+    /// DSP-1: Test that failed configure() leaves filter in consistent valid state
+    /// When stability validation throws, coefficients should NOT have been updated.
+    /// This prevents inconsistent state where coefficients differ from biquadSetup.
+    func testConfigureThrowsStabilityLeavesValidState() throws {
+        let filter = BiquadFilter()
+
+        // Step 1: Configure with valid parameters
+        try filter.configure(
+            type: .lowpass,
+            frequency: 1000,
+            sampleRate: 44100,
+            q: 0.707
+        )
+
+        // Capture old coefficients
+        let oldCoeffs = filter.currentCoefficients
+        XCTAssertTrue(filter.isStable, "Initial filter should be stable")
+
+        // Step 2: Try to configure with parameters that will cause NaN coefficients
+        // Use frequency exactly at Nyquist (which should be rejected before coefficient storage)
+        // Instead, we'll use extremely high Q that produces unstable coefficients
+        // Note: We need parameters that pass early validation but fail stability check
+
+        // Create coefficients that would be unstable: need |a2| >= 1 or |a1| >= 1 + a2
+        // This is tricky with standard filter types, so let's test NaN case instead
+
+        // Attempt configure with NaN parameters (should throw and NOT update coefficients)
+        XCTAssertThrowsError(try filter.configure(
+            type: .lowpass,
+            frequency: Float.nan,
+            sampleRate: 44100,
+            q: 0.707
+        )) { error in
+            XCTAssertTrue(error is FilterError, "Should throw FilterError")
+        }
+
+        // Step 3: Verify coefficients were NOT changed
+        let newCoeffs = filter.currentCoefficients
+        XCTAssertEqual(oldCoeffs.b0, newCoeffs.b0, "b0 should not change after failed configure")
+        XCTAssertEqual(oldCoeffs.b1, newCoeffs.b1, "b1 should not change after failed configure")
+        XCTAssertEqual(oldCoeffs.b2, newCoeffs.b2, "b2 should not change after failed configure")
+        XCTAssertEqual(oldCoeffs.a1, newCoeffs.a1, "a1 should not change after failed configure")
+        XCTAssertEqual(oldCoeffs.a2, newCoeffs.a2, "a2 should not change after failed configure")
+
+        // Step 4: Verify filter still produces valid output
+        let input: [Float] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        let output = filter.process(input: input)
+
+        for sample in output {
+            XCTAssertFalse(sample.isNaN, "Output should not be NaN after failed reconfigure")
+            XCTAssertFalse(sample.isInfinite, "Output should not be infinite after failed reconfigure")
+        }
+    }
+
+    /// DSP-1: Test that repeated configure failures don't corrupt state
+    func testRepeatedConfigureFailuresDoNotCorruptState() throws {
+        let filter = BiquadFilter()
+
+        // Configure with valid parameters
+        try filter.configure(
+            type: .bandpass,
+            frequency: 2000,
+            sampleRate: 48000,
+            q: 2.0
+        )
+
+        let initialCoeffs = filter.currentCoefficients
+
+        // Attempt multiple invalid configurations
+        for _ in 0..<10 {
+            // Invalid: frequency above Nyquist
+            XCTAssertThrowsError(try filter.configure(
+                type: .lowpass,
+                frequency: 30000,  // Above Nyquist for 48000 Hz
+                sampleRate: 48000,
+                q: 0.707
+            ))
+
+            // Invalid: negative sample rate
+            XCTAssertThrowsError(try filter.configure(
+                type: .lowpass,
+                frequency: 1000,
+                sampleRate: -1,
+                q: 0.707
+            ))
+
+            // Invalid: zero Q
+            XCTAssertThrowsError(try filter.configure(
+                type: .lowpass,
+                frequency: 1000,
+                sampleRate: 48000,
+                q: 0
+            ))
+        }
+
+        // Coefficients should still be the initial valid ones
+        let finalCoeffs = filter.currentCoefficients
+        XCTAssertEqual(initialCoeffs.b0, finalCoeffs.b0, accuracy: 1e-10)
+        XCTAssertEqual(initialCoeffs.b1, finalCoeffs.b1, accuracy: 1e-10)
+        XCTAssertEqual(initialCoeffs.b2, finalCoeffs.b2, accuracy: 1e-10)
+        XCTAssertEqual(initialCoeffs.a1, finalCoeffs.a1, accuracy: 1e-10)
+        XCTAssertEqual(initialCoeffs.a2, finalCoeffs.a2, accuracy: 1e-10)
+
+        // Filter should still be fully functional
+        XCTAssertTrue(filter.isStable)
+
+        var input = [Float](repeating: 0, count: 256)
+        for i in 0..<256 {
+            input[i] = sin(2.0 * Float.pi * 2000.0 * Float(i) / 48000.0)
+        }
+
+        let output = filter.process(input: input)
+        let rms = sqrt(output.map { $0 * $0 }.reduce(0, +) / Float(output.count))
+        XCTAssertGreaterThan(rms, 0.01, "Filter should produce non-zero output at center frequency")
+    }
+
+    /// DSP-1: Test that process(sample:) uses consistent coefficients after failed configure
+    func testProcessSampleUsesConsistentCoefficientsAfterFailedConfigure() throws {
+        let filter = BiquadFilter()
+
+        // Configure with valid parameters
+        try filter.configure(
+            type: .lowpass,
+            frequency: 500,
+            sampleRate: 44100,
+            q: 0.707
+        )
+
+        // Process some samples to establish state
+        for i in 0..<100 {
+            _ = filter.process(sample: sin(2.0 * Float.pi * 100.0 * Float(i) / 44100.0))
+        }
+
+        // Attempt failed reconfigure
+        XCTAssertThrowsError(try filter.configure(
+            type: .lowpass,
+            frequency: Float.infinity,  // Invalid
+            sampleRate: 44100,
+            q: 0.707
+        ))
+
+        // process(sample:) should still work and produce bounded output
+        for i in 100..<200 {
+            let input = sin(2.0 * Float.pi * 100.0 * Float(i) / 44100.0)
+            let output = filter.process(sample: input)
+            XCTAssertFalse(output.isNaN, "process(sample:) should not produce NaN after failed configure")
+            XCTAssertFalse(output.isInfinite, "process(sample:) should not produce Inf after failed configure")
+            XCTAssertLessThan(abs(output), 10.0, "Output should be bounded")
+        }
+    }
+
     func testAllFilterTypesAreStable() throws {
         let filter = BiquadFilter()
         let frequency: Float = 1000

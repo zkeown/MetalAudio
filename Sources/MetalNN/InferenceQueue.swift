@@ -132,7 +132,21 @@ public final class InferenceQueue {
     private var nextExpectedId: UInt64 = 0
 
     /// Whether the queue is running
-    private var isRunning = true
+    /// CRITICAL FIX: Thread-safe access via lock to prevent data race
+    private var isRunningLock = os_unfair_lock()
+    private var _isRunning = true
+    private var isRunning: Bool {
+        get {
+            os_unfair_lock_lock(&isRunningLock)
+            defer { os_unfair_lock_unlock(&isRunningLock) }
+            return _isRunning
+        }
+        set {
+            os_unfair_lock_lock(&isRunningLock)
+            _isRunning = newValue
+            os_unfair_lock_unlock(&isRunningLock)
+        }
+    }
 
     /// Statistics tracking
     private var totalProcessed: UInt64 = 0

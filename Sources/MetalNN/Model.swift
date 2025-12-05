@@ -46,8 +46,13 @@ public final class Sequential {
     private var sharedBuffers: [Tensor] = []
 
     /// Lock protecting layer list and buffer state during add/build operations.
-    /// Forward passes after build() don't need locking since state is read-only.
     private var buildLock = os_unfair_lock()
+
+    /// CRITICAL FIX: Lock protecting forward() calls from concurrent access.
+    /// While the buffer array structure is immutable after build(), the forward pass
+    /// writes to intermediate buffer CONTENTS. Concurrent forward() calls would corrupt
+    /// each other's intermediate results.
+    private var forwardLock = os_unfair_lock()
 
     #if DEBUG
     /// DEBUG-only: Tracks number of forward() calls in flight to detect concurrent access violations
@@ -212,6 +217,10 @@ public final class Sequential {
     ///           `SequentialModelError.inputShapeMismatch` if input shape doesn't match,
     ///           or layer errors
     public func forward(_ input: Tensor) throws -> Tensor {
+        // CRITICAL FIX: Serialize forward() calls to prevent intermediate buffer corruption
+        os_unfair_lock_lock(&forwardLock)
+        defer { os_unfair_lock_unlock(&forwardLock) }
+
         #if DEBUG
         OSAtomicIncrement32(&forwardInFlightCount)
         defer { OSAtomicDecrement32(&forwardInFlightCount) }
@@ -251,14 +260,31 @@ public final class Sequential {
             }
         }
 
-        // Safe: We checked intermediateBuffers is not empty above
+        // SAFETY: This index access is guaranteed valid because:
+        // 1. Line 223 guards `!intermediateBuffers.isEmpty`, ensuring count >= 1
+        // 2. Therefore `count - 1 >= 0` and the index is within bounds
+        // Using `.last!` would be equivalent but this form makes the invariant explicit.
         return intermediateBuffers[intermediateBuffers.count - 1]
     }
 
     /// Run inference asynchronously
+    ///
+    /// - Warning: **NOT safe for concurrent calls.** If you need concurrent inference,
+    ///   create multiple `Sequential` instances. Concurrent calls will corrupt intermediate
+    ///   buffers and produce incorrect results.
     public func forwardAsync(_ input: Tensor, completion: @escaping (Result<Tensor, Error>) -> Void) {
         #if DEBUG
-        OSAtomicIncrement32(&forwardInFlightCount)
+        // CRITICAL: Check for concurrent async calls which would corrupt shared buffers
+        let currentInFlight = OSAtomicIncrement32(&forwardInFlightCount)
+        if currentInFlight > 1 {
+            OSAtomicDecrement32(&forwardInFlightCount)
+            assertionFailure(
+                "Sequential.forwardAsync() called concurrently (\(currentInFlight) in flight). " +
+                "This is NOT thread-safe and will cause data corruption. Use separate Sequential instances.")
+            completion(.failure(MetalAudioError.invalidConfiguration(
+                "Concurrent forwardAsync() calls not supported. Use separate Sequential instances.")))
+            return
+        }
         #endif
 
         guard !layers.isEmpty else {

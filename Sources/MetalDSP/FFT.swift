@@ -21,6 +21,12 @@ public enum FFTError: Error, LocalizedError {
     /// Batch operation would overflow buffer size limits
     case batchSizeOverflow(batchSize: Int, fftSize: Int)
 
+    /// ISTFT output length calculation would overflow
+    case istftOutputOverflow(frameCount: Int, hopSize: Int, fftSize: Int)
+
+    /// DSP-3: ISTFT frame position calculation would overflow or exceed output bounds
+    case istftFrameOverflow(frameIndex: Int, hopSize: Int, fftSize: Int, outputLength: Int)
+
     public var errorDescription: String? {
         switch self {
         case .inputTooShort(let inputSize, let requiredSize):
@@ -34,6 +40,12 @@ public enum FFTError: Error, LocalizedError {
             return "Hop size \(hopSize) is invalid. Must be > 0 and <= FFT size (\(fftSize))."
         case .batchSizeOverflow(let batchSize, let fftSize):
             return "Batch size \(batchSize) with FFT size \(fftSize) would overflow buffer limits."
+        case .istftOutputOverflow(let frameCount, let hopSize, let fftSize):
+            return "ISTFT output length calculation overflowed: frameCount=\(frameCount), hopSize=\(hopSize), fftSize=\(fftSize). " +
+                "Use smaller STFT result or process in chunks."
+        case .istftFrameOverflow(let frameIndex, let hopSize, let fftSize, let outputLength):
+            return "ISTFT frame \(frameIndex) position overflow: frameIndex*hopSize=\(frameIndex)*\(hopSize) + fftSize=\(fftSize) exceeds outputLength=\(outputLength). " +
+                "STFT result may be corrupted or parameters are inconsistent."
         }
     }
 }
@@ -624,7 +636,12 @@ public final class FFT {
             // Stored as [cos, sin] pairs (float2)
             // Use Float64 for angle calculation to prevent precision loss at high frequencies
             let twiddleCount = config.size / 2
-            var twiddleData = [Float](repeating: 0, count: twiddleCount * 2)
+            // H8 FIX: Check for overflow in twiddle array size calculation
+            let (twiddleArraySize, twiddleOverflow) = twiddleCount.multipliedReportingOverflow(by: 2)
+            guard !twiddleOverflow else {
+                throw FFTError.batchSizeOverflow(batchSize: twiddleCount, fftSize: config.size)
+            }
+            var twiddleData = [Float](repeating: 0, count: twiddleArraySize)
             let twoPiOverN = -2.0 * Double.pi / Double(config.size)
             for k in 0..<twiddleCount {
                 // Compute angle in Double to prevent accumulated precision error
@@ -715,6 +732,21 @@ public final class FFT {
         gpuEnabled = false
         mpsGraphEnabled = false
 
+        // H13 FIX: Explicitly release MPSGraph resources for faster GPU memory reclamation.
+        // While ARC will eventually release these, explicit cleanup ensures GPU memory
+        // is freed promptly, especially important for apps creating/destroying many FFT instances.
+        mpsGraphFFT = nil
+        mpsGraphIFFT = nil
+        mpsInputPlaceholder = nil
+        mpsFFTOutputReal = nil
+        mpsFFTOutputImag = nil
+        mpsIFFTInputRealPlaceholder = nil
+        mpsIFFTInputImagPlaceholder = nil
+        mpsIFFTOutput = nil
+        mpsInputBuffer = nil
+        mpsRealBuffer = nil
+        mpsImagBuffer = nil
+
         // Release lock before destroying resources (resources are deallocated after deinit)
         os_unfair_lock_unlock(&gpuResourceLock)
 
@@ -772,7 +804,19 @@ public final class FFT {
         outputReal: UnsafeMutablePointer<Float>,
         outputImag: UnsafeMutablePointer<Float>
     ) {
-        guard let setup = fftSetup else { return }
+        // SCAN4-FIX: fftSetup should never be nil after successful init.
+        // If nil, it indicates a programming error (init failed but instance was used).
+        // Precondition catches this in DEBUG; in RELEASE, fall back to zeroing output.
+        guard let setup = fftSetup else {
+            #if DEBUG
+            preconditionFailure("FFT.forward called but fftSetup is nil - init() failed?")
+            #else
+            // Zero output to avoid returning garbage in release builds
+            memset(outputReal, 0, config.size * MemoryLayout<Float>.stride)
+            memset(outputImag, 0, config.size * MemoryLayout<Float>.stride)
+            return
+            #endif
+        }
 
         // Use pre-allocated buffer (zeroed at init, and vDSP doesn't modify it for real input)
         // Reset to zero for safety in case of prior use
@@ -831,7 +875,17 @@ public final class FFT {
         inputImag: UnsafePointer<Float>,
         output: UnsafeMutablePointer<Float>
     ) {
-        guard let setup = fftSetup else { return }
+        // SCAN4-FIX: fftSetup should never be nil after successful init.
+        // If nil, it indicates a programming error (init failed but instance was used).
+        guard let setup = fftSetup else {
+            #if DEBUG
+            preconditionFailure("FFT.inverse called but fftSetup is nil - init() failed?")
+            #else
+            // Zero output to avoid returning garbage in release builds
+            memset(output, 0, config.size * MemoryLayout<Float>.stride)
+            return
+            #endif
+        }
 
         // Use pre-allocated buffer
         vDSP_DFT_Execute(
@@ -1023,6 +1077,15 @@ public final class FFT {
             guard let baseAddress = ptr.baseAddress else { return }
             memcpy(baseAddress, dataBuffer.contents(), bufferSize)
         }
+
+        // Validate GPU output for NaN/Inf in DEBUG builds (matches CPU path validation)
+        #if DEBUG
+        output.withUnsafeBufferPointer { ptr in
+            if let base = ptr.baseAddress {
+                debugValidateFFTOutput(base, count: config.size * 2, context: "forwardGPU.output")
+            }
+        }
+        #endif
 
         return .gpu
     }
@@ -1222,6 +1285,15 @@ public final class FFT {
             guard let baseAddress = ptr.baseAddress else { return }
             memcpy(baseAddress, dataBuffer.contents(), bufferSize)
         }
+
+        // Validate GPU output for NaN/Inf in DEBUG builds (matches CPU path validation)
+        #if DEBUG
+        output.withUnsafeBufferPointer { ptr in
+            if let base = ptr.baseAddress {
+                debugValidateFFTOutput(base, count: config.size * 2, context: "inverseGPU.output")
+            }
+        }
+        #endif
 
         return .gpu
     }
@@ -1738,6 +1810,113 @@ public final class FFT {
         // Convert to dB: 20 * log10(mag / reference)
         var ref = reference
         vDSP_vdbcon(&workMagnitude, 1, &ref, magnitudeDB, 1, vDSP_Length(halfSize), 1)
+    }
+
+    // MARK: - Validated Buffer Access (Recommended)
+
+    /// Compute magnitude spectrum with buffer size validation
+    ///
+    /// This is the recommended version that validates buffer sizes to prevent memory corruption.
+    ///
+    /// - Parameters:
+    ///   - real: Real part of FFT output
+    ///   - imag: Imaginary part of FFT output
+    ///   - magnitude: Output magnitude buffer
+    /// - Throws: `FFTError.inputTooShort` if any buffer is too small
+    public func magnitude(
+        real: UnsafeBufferPointer<Float>,
+        imag: UnsafeBufferPointer<Float>,
+        magnitude: UnsafeMutableBufferPointer<Float>
+    ) throws {
+        let halfSize = config.size / 2 + 1
+
+        // CRITICAL FIX: Validate buffer sizes before accessing
+        guard real.count >= config.size else {
+            throw FFTError.inputTooShort(inputSize: real.count, requiredSize: config.size)
+        }
+        guard imag.count >= config.size else {
+            throw FFTError.inputTooShort(inputSize: imag.count, requiredSize: config.size)
+        }
+        guard magnitude.count >= halfSize else {
+            throw FFTError.inputTooShort(inputSize: magnitude.count, requiredSize: halfSize)
+        }
+
+        var splitComplex = DSPSplitComplex(
+            realp: UnsafeMutablePointer(mutating: real.baseAddress!),
+            imagp: UnsafeMutablePointer(mutating: imag.baseAddress!)
+        )
+        vDSP_zvabs(&splitComplex, 1, magnitude.baseAddress!, 1, vDSP_Length(halfSize))
+    }
+
+    /// Compute power spectrum with buffer size validation
+    ///
+    /// This is the recommended version that validates buffer sizes to prevent memory corruption.
+    ///
+    /// - Parameters:
+    ///   - real: Real part of FFT output
+    ///   - imag: Imaginary part of FFT output
+    ///   - power: Output power buffer
+    /// - Throws: `FFTError.inputTooShort` if any buffer is too small
+    public func power(
+        real: UnsafeBufferPointer<Float>,
+        imag: UnsafeBufferPointer<Float>,
+        power: UnsafeMutableBufferPointer<Float>
+    ) throws {
+        let halfSize = config.size / 2 + 1
+
+        // CRITICAL FIX: Validate buffer sizes before accessing
+        guard real.count >= config.size else {
+            throw FFTError.inputTooShort(inputSize: real.count, requiredSize: config.size)
+        }
+        guard imag.count >= config.size else {
+            throw FFTError.inputTooShort(inputSize: imag.count, requiredSize: config.size)
+        }
+        guard power.count >= halfSize else {
+            throw FFTError.inputTooShort(inputSize: power.count, requiredSize: halfSize)
+        }
+
+        var splitComplex = DSPSplitComplex(
+            realp: UnsafeMutablePointer(mutating: real.baseAddress!),
+            imagp: UnsafeMutablePointer(mutating: imag.baseAddress!)
+        )
+        vDSP_zvmags(&splitComplex, 1, power.baseAddress!, 1, vDSP_Length(halfSize))
+    }
+
+    /// Compute magnitude spectrum in decibels with buffer size validation
+    ///
+    /// This is the recommended version that validates buffer sizes to prevent memory corruption.
+    ///
+    /// - Parameters:
+    ///   - real: Real part of FFT output
+    ///   - imag: Imaginary part of FFT output
+    ///   - magnitudeDB: Output magnitude in dB
+    ///   - reference: Reference value for dB calculation (default: 1.0)
+    /// - Throws: `FFTError.inputTooShort` if any buffer is too small
+    public func magnitudeDB(
+        real: UnsafeBufferPointer<Float>,
+        imag: UnsafeBufferPointer<Float>,
+        magnitudeDB: UnsafeMutableBufferPointer<Float>,
+        reference: Float = 1.0
+    ) throws {
+        let halfSize = config.size / 2 + 1
+
+        // CRITICAL FIX: Validate buffer sizes before accessing
+        guard real.count >= config.size else {
+            throw FFTError.inputTooShort(inputSize: real.count, requiredSize: config.size)
+        }
+        guard imag.count >= config.size else {
+            throw FFTError.inputTooShort(inputSize: imag.count, requiredSize: config.size)
+        }
+        guard magnitudeDB.count >= halfSize else {
+            throw FFTError.inputTooShort(inputSize: magnitudeDB.count, requiredSize: halfSize)
+        }
+
+        // Use pre-allocated buffer
+        magnitude(real: real.baseAddress!, imag: imag.baseAddress!, magnitude: &workMagnitude)
+
+        // Convert to dB: 20 * log10(mag / reference)
+        var ref = reference
+        vDSP_vdbcon(&workMagnitude, 1, &ref, magnitudeDB.baseAddress!, 1, vDSP_Length(halfSize), 1)
     }
 
     // MARK: - Internal Accessors for Extensions

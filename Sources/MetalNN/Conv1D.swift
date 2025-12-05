@@ -71,16 +71,47 @@ public final class Conv1D: NNLayer {
 
         self.inputShape = [inputChannels, inputLength]
 
-        // Calculate output length
-        let effectiveKernelSize = (kernelSize - 1) * dilation + 1
-        let outputLength = inputLength > 0 ?
-            (inputLength + 2 * padding - effectiveKernelSize) / stride + 1 : 0
+        // H5 FIX: Calculate output length with overflow checking
+        // Prevent massive allocations or buffer overflows from extreme parameter combinations
+        let (kernelMinusOne, overflow1) = (kernelSize - 1).multipliedReportingOverflow(by: dilation)
+        let (effectiveKernelSize, overflow2) = kernelMinusOne.addingReportingOverflow(1)
+        guard !overflow1 && !overflow2 else {
+            throw MetalAudioError.invalidConfiguration(
+                "Conv1D effectiveKernelSize overflow: kernelSize=\(kernelSize), dilation=\(dilation)"
+            )
+        }
+
+        let outputLength: Int
+        if inputLength > 0 {
+            let (twoPadding, overflow3) = (2).multipliedReportingOverflow(by: padding)
+            let (paddedInput, overflow4) = inputLength.addingReportingOverflow(twoPadding)
+            let numerator = paddedInput - effectiveKernelSize
+            guard !overflow3 && !overflow4 && numerator >= 0 else {
+                throw MetalAudioError.invalidConfiguration(
+                    "Conv1D output length calculation overflow or negative: " +
+                    "inputLength=\(inputLength), padding=\(padding), effectiveKernel=\(effectiveKernelSize)"
+                )
+            }
+            outputLength = numerator / stride + 1
+        } else {
+            outputLength = 0
+        }
         self.outputShape = [outputChannels, outputLength]
+
+        // Validate weight tensor size doesn't overflow
+        let channelsPerGroup = inputChannels / groups
+        let (weightSize1, wOverflow1) = outputChannels.multipliedReportingOverflow(by: channelsPerGroup)
+        let (_, wOverflow2) = weightSize1.multipliedReportingOverflow(by: kernelSize)
+        guard !wOverflow1 && !wOverflow2 else {
+            throw MetalAudioError.invalidConfiguration(
+                "Conv1D weight tensor size overflow: \(outputChannels)x\(channelsPerGroup)x\(kernelSize)"
+            )
+        }
 
         // Weights: [outputChannels, inputChannels/groups, kernelSize]
         self.weights = try Tensor(
             device: device,
-            shape: [outputChannels, inputChannels / groups, kernelSize]
+            shape: [outputChannels, channelsPerGroup, kernelSize]
         )
 
         // Initialize weights - fanIn = inputChannels/groups * kernelSize

@@ -440,6 +440,57 @@ final class Conv1DTests: XCTestCase {
                 "Zero weights should produce zero output at index \(i)")
         }
     }
+
+    // MARK: - PyTorch Reference Test
+
+    func testConv1DMatchesPyTorch() throws {
+        let (weights, testCases) = try ReferenceTestUtils.getConv1DReferences()
+
+        let conv = try Conv1D(
+            device: device,
+            inputChannels: weights.inChannels,
+            outputChannels: weights.outChannels,
+            kernelSize: weights.kernelSize
+        )
+
+        // Flatten weights for loading - shape is (outChannels, inChannels, kernelSize)
+        let flatWeights = weights.weight.flatMap { $0.flatMap { $0 } }
+        try conv.loadWeights(flatWeights, bias: weights.bias)
+
+        let context = try ComputeContext(device: device)
+
+        for (name, inputData, expectedData) in testCases {
+            // inputData is [batch, channels, length]
+            let batch = inputData.count
+            let channels = inputData[0].count
+            let length = inputData[0][0].count
+
+            // Flatten input
+            let flatInput = inputData.flatMap { $0.flatMap { $0 } }
+            let flatExpected = expectedData.flatMap { $0.flatMap { $0 } }
+
+            // Calculate output length (no padding, stride 1)
+            let outputLength = length - weights.kernelSize + 1
+
+            // Process each batch item separately (Conv1D typically expects [channels, length])
+            for b in 0..<batch {
+                let batchInput = inputData[b].flatMap { $0 }
+                let batchExpected = expectedData[b].flatMap { $0 }
+
+                let input = try Tensor(device: device, shape: [channels, length])
+                try input.copy(from: batchInput)
+                let output = try Tensor(device: device, shape: [weights.outChannels, outputLength])
+
+                try context.executeSync { encoder in
+                    try conv.forward(input: input, output: output, encoder: encoder)
+                }
+
+                let actual = output.toArray()
+                ReferenceTestUtils.assertClose(actual, batchExpected, rtol: tolerance, atol: tolerance,
+                    message: "Conv1D mismatch for '\(name)' batch \(b)")
+            }
+        }
+    }
 }
 
 // MARK: - ConvTranspose1D Tests
@@ -630,6 +681,56 @@ final class ConvTranspose1DTests: XCTestCase {
         for i in 0..<result.count {
             XCTAssertEqual(result[i], 0.0, accuracy: 1e-6,
                 "Zero weights should produce zero output at index \(i)")
+        }
+    }
+
+    // MARK: - PyTorch Reference Test
+
+    func testConvTranspose1DMatchesPyTorch() throws {
+        let (weights, testCases) = try ReferenceTestUtils.getConvTranspose1DReferences()
+        let tolerance: Float = 1e-4
+
+        let context = try ComputeContext(device: device)
+
+        for (name, inputData, expectedData) in testCases {
+            // inputData is [batch, channels, length]
+            let batch = inputData.count
+            let channels = inputData[0].count
+            let length = inputData[0][0].count
+
+            // Create ConvTranspose1D layer
+            let conv = try ConvTranspose1D(
+                device: device,
+                inputChannels: weights.inChannels,
+                outputChannels: weights.outChannels,
+                kernelSize: weights.kernelSize,
+                useBias: true,
+                inputLength: length
+            )
+
+            // Flatten weights for loading - shape is (inChannels, outChannels, kernelSize)
+            let flatWeights = weights.weight.flatMap { $0.flatMap { $0 } }
+            try conv.loadWeights(flatWeights, bias: weights.bias)
+
+            let outputLength = conv.outputShape[1]
+
+            // Process each batch item separately
+            for b in 0..<batch {
+                let batchInput = inputData[b].flatMap { $0 }
+                let batchExpected = expectedData[b].flatMap { $0 }
+
+                let input = try Tensor(device: device, shape: [channels, length])
+                try input.copy(from: batchInput)
+                let output = try Tensor(device: device, shape: [weights.outChannels, outputLength])
+
+                try context.executeSync { encoder in
+                    try conv.forward(input: input, output: output, encoder: encoder)
+                }
+
+                let actual = output.toArray()
+                ReferenceTestUtils.assertClose(actual, batchExpected, rtol: tolerance, atol: tolerance,
+                    message: "ConvTranspose1D mismatch for '\(name)' batch \(b)")
+            }
         }
     }
 }

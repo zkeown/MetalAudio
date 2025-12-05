@@ -22,6 +22,7 @@ public enum MetalAudioError: Error, LocalizedError {
     case indexOutOfBounds(index: [Int], shape: [Int])
     case typeSizeMismatch(requestedBytes: Int, bufferBytes: Int)
     case gpuTimeout(TimeInterval)
+    case gpuExecutionError(String)
     case deviceLost
     case invalidPointer
     case bufferOverflow(String)
@@ -60,6 +61,8 @@ public enum MetalAudioError: Error, LocalizedError {
             return "Type requires \(requested) bytes but buffer only has \(buffer) bytes"
         case .gpuTimeout(let timeout):
             return "GPU operation timed out after \(timeout) seconds"
+        case .gpuExecutionError(let reason):
+            return "GPU execution error: \(reason)"
         case .deviceLost:
             return "GPU device was disconnected or lost"
         case .invalidPointer:

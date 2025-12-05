@@ -432,7 +432,7 @@ final class COLAValidationTests: XCTestCase {
 
         let colaFFT = try FFT(device: device, config: colaConfig)
         let colaSTFT = try colaFFT.stft(input: input)
-        let colaOutput = colaFFT.istft(stft: colaSTFT)
+        let colaOutput = try colaFFT.istft(stft: colaSTFT)
 
         // Non-COLA configuration (arbitrary hop with Hann)
         let nonColaConfig = FFT.Config(size: fftSize, windowType: .hann, hopSize: 200)
@@ -440,7 +440,7 @@ final class COLAValidationTests: XCTestCase {
 
         let nonColaFFT = try FFT(device: device, config: nonColaConfig)
         let nonColaSTFT = try nonColaFFT.stft(input: input)
-        let nonColaOutput = nonColaFFT.istft(stft: nonColaSTFT)
+        let nonColaOutput = try nonColaFFT.istft(stft: nonColaSTFT)
 
         // Both should produce output
         XCTAssertGreaterThan(colaOutput.count, 0, "COLA STFT should produce output")
@@ -919,7 +919,7 @@ final class STFTTests: XCTestCase {
         XCTAssertTrue(hasContent, "STFT output should have non-zero frequency content")
 
         // Inverse STFT should produce output
-        let output = fft.istft(stft: stft)
+        let output = try fft.istft(stft: stft)
         XCTAssertGreaterThan(output.count, 0, "iSTFT should produce output")
 
         // Output should have non-zero content
@@ -988,7 +988,7 @@ final class STFTTests: XCTestCase {
         XCTAssertEqual(stft.frameCount, 1, "Input = FFT size should produce 1 frame")
 
         // Reconstruct and verify
-        let output = fft.istft(stft: stft)
+        let output = try fft.istft(stft: stft)
         XCTAssertGreaterThan(output.count, 0, "iSTFT should produce output")
     }
 
@@ -1036,7 +1036,7 @@ final class STFTTests: XCTestCase {
         let stft = try fft.stft(input: input)
 
         // Inverse STFT
-        let output = fft.istft(stft: stft)
+        let output = try fft.istft(stft: stft)
 
         // Verify output was produced with reasonable length
         XCTAssertGreaterThan(output.count, 0, "STFT round-trip should produce output")
@@ -1644,7 +1644,7 @@ final class FFTEdgeCaseTests: XCTestCase {
         let fft = try FFT(device: device, config: .init(size: 512))
 
         let emptySTFT = FFT.STFTResult(real: [], imag: [])
-        let output = fft.istft(stft: emptySTFT)
+        let output = try fft.istft(stft: emptySTFT)
 
         // Empty STFT with frameCount=0 returns the initial output allocation
         // which may be size-dependent. Just verify it doesn't crash.
@@ -2009,6 +2009,17 @@ final class FFTErrorDescriptionTests: XCTestCase {
         XCTAssertTrue(description.contains("10000"), "Should mention batch size")
         XCTAssertTrue(description.contains("65536"), "Should mention FFT size")
         XCTAssertTrue(description.contains("overflow"), "Should mention overflow")
+    }
+
+    func testIstftOutputOverflowDescription() {
+        let error = FFTError.istftOutputOverflow(frameCount: 1000000, hopSize: 512, fftSize: 2048)
+        let description = error.errorDescription ?? ""
+
+        XCTAssertTrue(description.contains("1000000"), "Should mention frame count")
+        XCTAssertTrue(description.contains("512"), "Should mention hop size")
+        XCTAssertTrue(description.contains("2048"), "Should mention FFT size")
+        XCTAssertTrue(description.contains("overflow") || description.contains("overflowed"),
+            "Should mention overflow")
     }
 }
 

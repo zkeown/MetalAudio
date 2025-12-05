@@ -143,7 +143,8 @@ public final class Convolution {
     private var partitionCount: Int = 0
     private var inputWriteIndex: Int = 0
     private var partitionOffsets: [Int] = []  // Pre-computed: offsets[p] = (partitionCount - p) % partitionCount
-    private var stateLock = os_unfair_lock()  // Protects inputBuffer and inputWriteIndex modifications
+    private var stateLock = os_unfair_lock()  // Protects inputBuffer, inputWriteIndex, and copyBuffer modifications
+    private var isProcessing = false  // Guard against reset() during processPartitioned() - DEBUG only check
     private var useMPSGraphFFT: Bool = false  // Use MPSGraph for FFT (faster for large blocks)
 
     // Work buffers for vectorized complex multiply-accumulate
@@ -412,7 +413,15 @@ public final class Convolution {
         //   requiredSize = N + P - 1 = (input.count + kernel.count - 1) + kernel.count - 1
         //                = input.count + 2*(kernel.count - 1)
         // Zero-pad input to prevent reading garbage beyond the buffer.
-        let paddingNeeded = 2 * (kernel.count - 1)
+        //
+        // SAFETY: Check for integer overflow in padding calculation
+        guard kernel.count > 0 else { return }
+        let (kernelMinusOne, overflow1) = kernel.count.subtractingReportingOverflow(1)
+        let (paddingNeeded, overflow2) = kernelMinusOne.multipliedReportingOverflow(by: 2)
+        guard !overflow1 && !overflow2 else {
+            // Kernel size would cause integer overflow - throw error instead of silent failure
+            throw ConvolutionError.outputSizeOverflow(inputSize: input.count, kernelSize: kernel.count)
+        }
         var paddedInput = input
         paddedInput.append(contentsOf: repeatElement(Float(0), count: paddingNeeded))
 
@@ -484,6 +493,20 @@ public final class Convolution {
     }
 
     private func processPartitionedConvolution(input: [Float], output: inout [Float]) throws {
+        // SAFETY: Set processing flag to detect concurrent reset() calls
+        // This class is documented as single-threaded only (see CLAUDE.md thread safety matrix)
+        os_unfair_lock_lock(&stateLock)
+        #if DEBUG
+        precondition(!isProcessing, "Convolution.processPartitioned: concurrent call detected. This class is NOT thread-safe.")
+        #endif
+        isProcessing = true
+        os_unfair_lock_unlock(&stateLock)
+        defer {
+            os_unfair_lock_lock(&stateLock)
+            isProcessing = false
+            os_unfair_lock_unlock(&stateLock)
+        }
+
         guard let fft = fft, let inverseFft = inverseFft, !partitions.isEmpty else {
             throw ConvolutionError.fftNotInitialized
         }
@@ -526,8 +549,9 @@ public final class Convolution {
             let (inputOffset, inputOffsetOverflow) = block.multipliedReportingOverflow(by: blockSize)
             let (outputOffset, outputOffsetOverflow) = block.multipliedReportingOverflow(by: blockSize)
             guard !inputOffsetOverflow && !outputOffsetOverflow else {
-                // Break BEFORE any state modification - prevents state desync
-                break
+                // CRITICAL FIX: Throw error instead of silently returning incomplete results
+                // Silent break would cause truncated convolution output with no indication
+                throw ConvolutionError.outputSizeOverflow(inputSize: input.count, kernelSize: kernel.count)
             }
             guard outputOffset >= 0 && outputOffset < fullOutputSize else {
                 break
@@ -584,8 +608,13 @@ public final class Convolution {
             // OPTIMIZATION: Reduced lock scope with copy-out pattern
             // Copy input buffer data under lock (fast memcpy), then process without lock held.
             // This reduces lock contention from O(partitionCount * fftSize * 7 vDSP calls) to O(partitionCount * memcpy)
-            // NOTE: This lock pattern assumes single-threaded use (see CLAUDE.md thread safety matrix).
-            // The locks protect against basic races but don't make this class fully thread-safe.
+            //
+            // THREAD SAFETY NOTE: This lock pattern assumes single-threaded use (see CLAUDE.md).
+            // The `currentWriteIndex` snapshot captured at line 586 remains valid because:
+            // 1. Single-threaded contract: only this thread can modify `inputWriteIndex`
+            // 2. `inputWriteIndex` is only updated at the END of this function (line ~726)
+            // 3. The `isProcessing` flag + precondition at line 500 detects contract violations in DEBUG
+            // The locks protect internal state consistency, not concurrent `process()` calls.
 
             // SAFETY: Early exit if partitionCount is 0 (would cause empty array access)
             guard partitionCount > 0 && !partitions.isEmpty && !partitionOffsets.isEmpty else {
@@ -597,9 +626,18 @@ public final class Convolution {
                 // SAFETY: partitionOffsets is sized to partitionCount, so p is always valid
                 var bufferIdx = currentWriteIndex + partitionOffsets[p]
                 if bufferIdx >= partitionCount { bufferIdx -= partitionCount }
-                // Fast memcpy to copy buffers with bounds validation
+                // DSP-2 FIX: Fast memcpy to copy buffers with bounds validation
+                // Previously: silent return if guard failed, leaving stale data in copyBuffer
+                // Now: assert on invariant violation (should NEVER happen in normal operation)
+                // Buffers are initialized with exactly fftSize elements in reset(), so this
+                // guard failing indicates a programming error in buffer management.
                 copyBufferReal[p].withUnsafeMutableBufferPointer { dst in
                     inputBufferReal[bufferIdx].withUnsafeBufferPointer { src in
+                        // DSP-2: Assert on buffer size invariant - these should always be fftSize
+                        assert(dst.baseAddress != nil, "DSP-2: copyBufferReal[\(p)] has nil baseAddress - buffer not allocated")
+                        assert(src.baseAddress != nil, "DSP-2: inputBufferReal[\(bufferIdx)] has nil baseAddress - buffer not allocated")
+                        assert(src.count >= fftSize, "DSP-2: inputBufferReal[\(bufferIdx)].count=\(src.count) < fftSize=\(fftSize)")
+                        assert(dst.count >= fftSize, "DSP-2: copyBufferReal[\(p)].count=\(dst.count) < fftSize=\(fftSize)")
                         guard let dstBase = dst.baseAddress, let srcBase = src.baseAddress,
                               src.count >= fftSize, dst.count >= fftSize else { return }
                         memcpy(dstBase, srcBase, fftSize * MemoryLayout<Float>.stride)
@@ -607,6 +645,11 @@ public final class Convolution {
                 }
                 copyBufferImag[p].withUnsafeMutableBufferPointer { dst in
                     inputBufferImag[bufferIdx].withUnsafeBufferPointer { src in
+                        // DSP-2: Assert on buffer size invariant - these should always be fftSize
+                        assert(dst.baseAddress != nil, "DSP-2: copyBufferImag[\(p)] has nil baseAddress - buffer not allocated")
+                        assert(src.baseAddress != nil, "DSP-2: inputBufferImag[\(bufferIdx)] has nil baseAddress - buffer not allocated")
+                        assert(src.count >= fftSize, "DSP-2: inputBufferImag[\(bufferIdx)].count=\(src.count) < fftSize=\(fftSize)")
+                        assert(dst.count >= fftSize, "DSP-2: copyBufferImag[\(p)].count=\(dst.count) < fftSize=\(fftSize)")
                         guard let dstBase = dst.baseAddress, let srcBase = src.baseAddress,
                               src.count >= fftSize, dst.count >= fftSize else { return }
                         memcpy(dstBase, srcBase, fftSize * MemoryLayout<Float>.stride)
@@ -706,8 +749,14 @@ public final class Convolution {
     }
 
     /// Reset internal state (for partitioned convolution)
+    ///
+    /// - Warning: This method must NOT be called while `process()` is executing.
+    ///   This class is single-threaded only (see CLAUDE.md thread safety matrix).
     public func reset() {
         os_unfair_lock_lock(&stateLock)
+        #if DEBUG
+        precondition(!isProcessing, "Convolution.reset: called during processPartitioned(). This class is NOT thread-safe.")
+        #endif
         inputBufferReal = [[Float]](repeating: [Float](repeating: 0, count: fftSize), count: partitionCount)
         inputBufferImag = [[Float]](repeating: [Float](repeating: 0, count: fftSize), count: partitionCount)
         copyBufferReal = [[Float]](repeating: [Float](repeating: 0, count: fftSize), count: partitionCount)

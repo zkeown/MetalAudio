@@ -335,6 +335,305 @@ extension ReferenceTestUtils {
 
         return ((weight, bias, normalizedShape, eps), testCases)
     }
+
+    /// Get BatchNorm references
+    public static func getBatchNormReferences() throws -> (
+        params: (weight: [Float], bias: [Float], runningMean: [Float], runningVar: [Float], numFeatures: Int, eps: Float),
+        testCases: [(name: String, input: [[Float]], output: [[Float]])]
+    ) {
+        let refs = try loadPyTorchReferences()
+        guard let batchnorm = refs["batchnorm"] as? [String: Any],
+              let params = batchnorm["params"] as? [String: Any] else {
+            throw ReferenceError.invalidFormat("BatchNorm references not found")
+        }
+
+        let weight = (params["weight"] as! [Double]).map { Float($0) }
+        let bias = (params["bias"] as! [Double]).map { Float($0) }
+        let runningMean = (params["running_mean"] as! [Double]).map { Float($0) }
+        let runningVar = (params["running_var"] as! [Double]).map { Float($0) }
+        let numFeatures = params["num_features"] as! Int
+        let eps = Float(params["eps"] as! Double)
+
+        var testCases: [(String, [[Float]], [[Float]])] = []
+        for (key, value) in batchnorm {
+            if key != "params", let caseData = value as? [String: Any] {
+                let input = (caseData["input"] as! [[Double]]).map { $0.map { Float($0) } }
+                let output = (caseData["output"] as! [[Double]]).map { $0.map { Float($0) } }
+                testCases.append((key, input, output))
+            }
+        }
+
+        return ((weight, bias, runningMean, runningVar, numFeatures, eps), testCases)
+    }
+
+    /// Get Pooling references
+    public static func getPoolingReferences() throws -> [(
+        name: String,
+        input: [[[Float]]],
+        globalAvgPool: [[Float]],
+        maxPoolK2: [[[Float]]],
+        maxPoolK4: [[[Float]]]
+    )] {
+        let refs = try loadPyTorchReferences()
+        guard let pooling = refs["pooling"] as? [String: Any] else {
+            throw ReferenceError.invalidFormat("Pooling references not found")
+        }
+
+        var results: [(String, [[[Float]]], [[Float]], [[[Float]]], [[[Float]]])] = []
+        for (name, value) in pooling {
+            guard let caseData = value as? [String: Any] else { continue }
+            let input = (caseData["input"] as! [[[Double]]]).map { $0.map { $0.map { Float($0) } } }
+            let globalAvgPool = (caseData["global_avg_pool"] as! [[Double]]).map { $0.map { Float($0) } }
+            let maxPoolK2 = (caseData["maxpool_k2"] as! [[[Double]]]).map { $0.map { $0.map { Float($0) } } }
+            let maxPoolK4 = (caseData["maxpool_k4"] as! [[[Double]]]).map { $0.map { $0.map { Float($0) } } }
+            results.append((name, input, globalAvgPool, maxPoolK2, maxPoolK4))
+        }
+        return results
+    }
+
+    /// Get LSTM references
+    public static func getLSTMReferences() throws -> (
+        config: (inputSize: Int, hiddenSize: Int),
+        weights: (weightIH: [[Float]], weightHH: [[Float]], biasIH: [Float], biasHH: [Float]),
+        sequence: (input: [[Float]], output: [[Float]])
+    ) {
+        let refs = try loadPyTorchReferences()
+        guard let lstm = refs["lstm"] as? [String: Any],
+              let config = lstm["config"] as? [String: Any],
+              let weights = lstm["weights"] as? [String: Any],
+              let sequence = lstm["sequence"] as? [String: Any] else {
+            throw ReferenceError.invalidFormat("LSTM references not found")
+        }
+
+        let inputSize = config["input_size"] as! Int
+        let hiddenSize = config["hidden_size"] as! Int
+
+        let weightIH = (weights["weight_ih_l0"] as! [[Double]]).map { $0.map { Float($0) } }
+        let weightHH = (weights["weight_hh_l0"] as! [[Double]]).map { $0.map { Float($0) } }
+        let biasIH = (weights["bias_ih_l0"] as! [Double]).map { Float($0) }
+        let biasHH = (weights["bias_hh_l0"] as! [Double]).map { Float($0) }
+
+        let input = (sequence["input"] as! [[Double]]).map { $0.map { Float($0) } }
+        let output = (sequence["output"] as! [[Double]]).map { $0.map { Float($0) } }
+
+        return ((inputSize, hiddenSize), (weightIH, weightHH, biasIH, biasHH), (input, output))
+    }
+
+    /// Get Conv1D references
+    public static func getConv1DReferences() throws -> (
+        weights: (weight: [[[Float]]], bias: [Float], inChannels: Int, outChannels: Int, kernelSize: Int),
+        testCases: [(name: String, input: [[[Float]]], output: [[[Float]]])]
+    ) {
+        let refs = try loadPyTorchReferences()
+        guard let conv1d = refs["conv1d"] as? [String: Any],
+              let weightsData = conv1d["weights"] as? [String: Any] else {
+            throw ReferenceError.invalidFormat("Conv1D references not found")
+        }
+
+        let weight = (weightsData["weight"] as! [[[Double]]]).map { $0.map { $0.map { Float($0) } } }
+        let bias = (weightsData["bias"] as! [Double]).map { Float($0) }
+        let inChannels = weightsData["in_channels"] as! Int
+        let outChannels = weightsData["out_channels"] as! Int
+        let kernelSize = weightsData["kernel_size"] as! Int
+
+        var testCases: [(String, [[[Float]]], [[[Float]]])] = []
+        for (key, value) in conv1d {
+            if key != "weights", let caseData = value as? [String: Any] {
+                let input = (caseData["input"] as! [[[Double]]]).map { $0.map { $0.map { Float($0) } } }
+                let output = (caseData["output"] as! [[[Double]]]).map { $0.map { $0.map { Float($0) } } }
+                testCases.append((key, input, output))
+            }
+        }
+
+        return ((weight, bias, inChannels, outChannels, kernelSize), testCases)
+    }
+
+    /// Get GRU references
+    public static func getGRUReferences() throws -> (
+        config: (inputSize: Int, hiddenSize: Int),
+        weights: (weightIH: [[Float]], weightHH: [[Float]], biasIH: [Float], biasHH: [Float]),
+        sequence: (input: [[Float]], output: [[Float]])
+    ) {
+        let refs = try loadPyTorchReferences()
+        guard let gru = refs["gru"] as? [String: Any],
+              let config = gru["config"] as? [String: Any],
+              let weights = gru["weights"] as? [String: Any],
+              let sequence = gru["sequence"] as? [String: Any] else {
+            throw ReferenceError.invalidFormat("GRU references not found")
+        }
+
+        let inputSize = config["input_size"] as! Int
+        let hiddenSize = config["hidden_size"] as! Int
+
+        let weightIH = (weights["weight_ih_l0"] as! [[Double]]).map { $0.map { Float($0) } }
+        let weightHH = (weights["weight_hh_l0"] as! [[Double]]).map { $0.map { Float($0) } }
+        let biasIH = (weights["bias_ih_l0"] as! [Double]).map { Float($0) }
+        let biasHH = (weights["bias_hh_l0"] as! [Double]).map { Float($0) }
+
+        let input = (sequence["input"] as! [[Double]]).map { $0.map { Float($0) } }
+        let output = (sequence["output"] as! [[Double]]).map { $0.map { Float($0) } }
+
+        return ((inputSize, hiddenSize), (weightIH, weightHH, biasIH, biasHH), (input, output))
+    }
+
+    /// Get ConvTranspose1D references
+    public static func getConvTranspose1DReferences() throws -> (
+        weights: (weight: [[[Float]]], bias: [Float], inChannels: Int, outChannels: Int, kernelSize: Int),
+        testCases: [(name: String, input: [[[Float]]], output: [[[Float]]])]
+    ) {
+        let refs = try loadPyTorchReferences()
+        guard let convT = refs["conv_transpose1d"] as? [String: Any],
+              let weightsData = convT["weights"] as? [String: Any] else {
+            throw ReferenceError.invalidFormat("ConvTranspose1D references not found")
+        }
+
+        let weight = (weightsData["weight"] as! [[[Double]]]).map { $0.map { $0.map { Float($0) } } }
+        let bias = (weightsData["bias"] as! [Double]).map { Float($0) }
+        let inChannels = weightsData["in_channels"] as! Int
+        let outChannels = weightsData["out_channels"] as! Int
+        let kernelSize = weightsData["kernel_size"] as! Int
+
+        var testCases: [(String, [[[Float]]], [[[Float]]])] = []
+        for (key, value) in convT {
+            if key != "weights", let caseData = value as? [String: Any] {
+                let input = (caseData["input"] as! [[[Double]]]).map { $0.map { $0.map { Float($0) } } }
+                let output = (caseData["output"] as! [[[Double]]]).map { $0.map { $0.map { Float($0) } } }
+                testCases.append((key, input, output))
+            }
+        }
+
+        return ((weight, bias, inChannels, outChannels, kernelSize), testCases)
+    }
+
+    /// Get Bidirectional LSTM references
+    public static func getBidirectionalLSTMReferences() throws -> (
+        config: (inputSize: Int, hiddenSize: Int),
+        weights: (
+            weightIH: [[Float]], weightHH: [[Float]], biasIH: [Float], biasHH: [Float],
+            weightIHReverse: [[Float]], weightHHReverse: [[Float]], biasIHReverse: [Float], biasHHReverse: [Float]
+        ),
+        sequence: (input: [[Float]], output: [[Float]])
+    ) {
+        let refs = try loadPyTorchReferences()
+        guard let lstm = refs["lstm_bidirectional"] as? [String: Any],
+              let config = lstm["config"] as? [String: Any],
+              let weights = lstm["weights"] as? [String: Any],
+              let sequence = lstm["sequence"] as? [String: Any] else {
+            throw ReferenceError.invalidFormat("Bidirectional LSTM references not found")
+        }
+
+        let inputSize = config["input_size"] as! Int
+        let hiddenSize = config["hidden_size"] as! Int
+
+        // Forward direction weights
+        let weightIH = (weights["weight_ih_l0"] as! [[Double]]).map { $0.map { Float($0) } }
+        let weightHH = (weights["weight_hh_l0"] as! [[Double]]).map { $0.map { Float($0) } }
+        let biasIH = (weights["bias_ih_l0"] as! [Double]).map { Float($0) }
+        let biasHH = (weights["bias_hh_l0"] as! [Double]).map { Float($0) }
+
+        // Reverse direction weights
+        let weightIHReverse = (weights["weight_ih_l0_reverse"] as! [[Double]]).map { $0.map { Float($0) } }
+        let weightHHReverse = (weights["weight_hh_l0_reverse"] as! [[Double]]).map { $0.map { Float($0) } }
+        let biasIHReverse = (weights["bias_ih_l0_reverse"] as! [Double]).map { Float($0) }
+        let biasHHReverse = (weights["bias_hh_l0_reverse"] as! [Double]).map { Float($0) }
+
+        let input = (sequence["input"] as! [[Double]]).map { $0.map { Float($0) } }
+        let output = (sequence["output"] as! [[Double]]).map { $0.map { Float($0) } }
+
+        return (
+            (inputSize, hiddenSize),
+            (weightIH, weightHH, biasIH, biasHH, weightIHReverse, weightHHReverse, biasIHReverse, biasHHReverse),
+            (input, output)
+        )
+    }
+
+    /// Get STFT references (generated with librosa)
+    public static func getSTFTReferences() throws -> [(
+        name: String,
+        input: [Float],
+        config: (nFFT: Int, hopLength: Int, winLength: Int),
+        magnitudes: [[Float]]
+    )] {
+        let refs = try loadPyTorchReferences()
+        guard let stft = refs["stft"] as? [String: Any] else {
+            throw ReferenceError.invalidFormat("STFT references not found")
+        }
+
+        var results: [(String, [Float], (Int, Int, Int), [[Float]])] = []
+        for (name, value) in stft {
+            guard let caseData = value as? [String: Any],
+                  let configData = caseData["config"] as? [String: Any] else { continue }
+
+            let input = (caseData["input"] as! [Double]).map { Float($0) }
+            let nFFT = configData["n_fft"] as! Int
+            let hopLength = configData["hop_length"] as! Int
+            let winLength = configData["win_length"] as! Int
+            let magnitudes = (caseData["magnitudes"] as! [[Double]]).map { $0.map { Float($0) } }
+
+            results.append((name, input, (nFFT, hopLength, winLength), magnitudes))
+        }
+        return results
+    }
+
+    /// Get Filter frequency response references (generated with scipy)
+    public static func getFilterReferences() throws -> [(
+        name: String,
+        filterType: String,
+        frequency: Float,
+        q: Float,
+        sampleRate: Float,
+        bCoeffs: [Float],
+        aCoeffs: [Float],
+        frequencies: [Float],
+        magnitudeDB: [Float],
+        phaseRad: [Float]
+    )] {
+        let refs = try loadPyTorchReferences()
+        guard let filters = refs["filters"] as? [String: Any] else {
+            throw ReferenceError.invalidFormat("Filter references not found")
+        }
+
+        var results: [(String, String, Float, Float, Float, [Float], [Float], [Float], [Float], [Float])] = []
+        for (name, value) in filters {
+            guard let caseData = value as? [String: Any] else { continue }
+
+            let filterType = caseData["type"] as! String
+            let frequency = Float(caseData["frequency"] as! Double)
+            let q = Float(caseData["Q"] as! Double)
+            let sampleRate = Float(caseData["sample_rate"] as! Double)
+            let bCoeffs = (caseData["b_coeffs"] as! [Double]).map { Float($0) }
+            let aCoeffs = (caseData["a_coeffs"] as! [Double]).map { Float($0) }
+            let frequencies = (caseData["frequencies"] as! [Double]).map { Float($0) }
+            let magnitudeDB = (caseData["magnitude_db"] as! [Double]).map { Float($0) }
+            let phaseRad = (caseData["phase_rad"] as! [Double]).map { Float($0) }
+
+            results.append((name, filterType, frequency, q, sampleRate, bCoeffs, aCoeffs, frequencies, magnitudeDB, phaseRad))
+        }
+        return results
+    }
+
+    /// Get AvgPool1D references
+    public static func getAvgPoolReferences() throws -> [(
+        name: String,
+        input: [[[Float]]],
+        avgPoolK2: [[[Float]]],
+        avgPoolK4: [[[Float]]]
+    )] {
+        let refs = try loadPyTorchReferences()
+        guard let avgpool = refs["avgpool"] as? [String: Any] else {
+            throw ReferenceError.invalidFormat("AvgPool references not found")
+        }
+
+        var results: [(String, [[[Float]]], [[[Float]]], [[[Float]]])] = []
+        for (name, value) in avgpool {
+            guard let caseData = value as? [String: Any] else { continue }
+            let input = (caseData["input"] as! [[[Double]]]).map { $0.map { $0.map { Float($0) } } }
+            let avgPoolK2 = (caseData["avgpool_k2"] as! [[[Double]]]).map { $0.map { $0.map { Float($0) } } }
+            let avgPoolK4 = (caseData["avgpool_k4"] as! [[[Double]]]).map { $0.map { $0.map { Float($0) } } }
+            results.append((name, input, avgPoolK2, avgPoolK4))
+        }
+        return results
+    }
 }
 
 // MARK: - XCTest Extensions

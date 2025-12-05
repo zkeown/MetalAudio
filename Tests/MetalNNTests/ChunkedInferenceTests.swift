@@ -157,4 +157,88 @@ final class ChunkedInferenceTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Additional Window Tests
+
+    func testWindowSizeOne() {
+        let types: [ChunkedInference.WindowType] = [.rectangular, .hann, .hamming, .blackman]
+        for windowType in types {
+            let window = windowType.generate(size: 1)
+            XCTAssertEqual(window.count, 1)
+        }
+    }
+
+    func testWindowSizeTwo() {
+        let hann = ChunkedInference.WindowType.hann.generate(size: 2)
+        XCTAssertEqual(hann.count, 2)
+        // First and last should be at endpoints
+        XCTAssertEqual(hann[0], 0.0, accuracy: 0.001)
+        XCTAssertEqual(hann[1], 0.0, accuracy: 0.001)
+    }
+
+    func testLargeWindowSize() {
+        let size = 8192
+        let window = ChunkedInference.WindowType.hann.generate(size: size)
+        XCTAssertEqual(window.count, size)
+        // Peak should be near middle
+        let midValue = window[size / 2]
+        XCTAssertGreaterThan(midValue, 0.9)
+    }
+
+    // MARK: - Additional Configuration Tests
+
+    func testConfigurationZeroOverlap() {
+        let config = ChunkedInference.Configuration(
+            chunkSize: 1024,
+            overlap: 0,
+            windowType: .rectangular
+        )
+        XCTAssertEqual(config.overlap, 0)
+        XCTAssertEqual(config.hopSize, 1024)
+    }
+
+    func testConfigurationMaxOverlap() {
+        // Overlap just under chunk size
+        let config = ChunkedInference.Configuration(
+            chunkSize: 1024,
+            overlap: 1023,
+            windowType: .hann
+        )
+        XCTAssertEqual(config.overlap, 1023)
+        XCTAssertEqual(config.hopSize, 1)
+    }
+
+    func testConfigurationAllWindowTypes() {
+        let types: [ChunkedInference.WindowType] = [.rectangular, .hann, .hamming, .blackman]
+        for windowType in types {
+            let config = ChunkedInference.Configuration(
+                chunkSize: 512,
+                overlap: 128,
+                windowType: windowType
+            )
+            XCTAssertEqual(config.chunkSize, 512)
+        }
+    }
+
+    // MARK: - Window Mathematical Properties
+
+    func testHannWindowPeakValue() {
+        let window = ChunkedInference.WindowType.hann.generate(size: 256)
+        let maxValue = window.max()!
+        XCTAssertEqual(maxValue, 1.0, accuracy: 0.001)
+    }
+
+    func testHammingWindowMinValue() {
+        // Hamming window minimum should be 0.08 at endpoints
+        let window = ChunkedInference.WindowType.hamming.generate(size: 256)
+        XCTAssertEqual(window[0], 0.08, accuracy: 0.001)
+        XCTAssertEqual(window[255], 0.08, accuracy: 0.001)
+    }
+
+    func testBlackmanWindowMinValue() {
+        // Blackman should start and end very close to 0
+        let window = ChunkedInference.WindowType.blackman.generate(size: 256)
+        XCTAssertLessThan(abs(window[0]), 0.01)
+        XCTAssertLessThan(abs(window[255]), 0.01)
+    }
 }

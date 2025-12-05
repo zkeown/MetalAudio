@@ -215,6 +215,9 @@ public final class BNNSInference: @unchecked Sendable {
         // Create mutable context
         let ctx = BNNSGraphContextMake(graph)
         guard ctx.data != nil else {
+            // NOTE: BNNS API does not expose BNNSGraphDestroy - graph lifecycle is tied
+            // to context. If context creation fails here, the compiled graph may leak.
+            // This is an Apple API limitation; context creation failures are rare in practice.
             throw BNNSInferenceError.contextCreationFailed
         }
         self.context = ctx
@@ -236,6 +239,14 @@ public final class BNNSInference: @unchecked Sendable {
         guard outPos >= 0 && outPos < argumentCount else {
             BNNSGraphContextDestroy(ctx)
             throw BNNSInferenceError.invalidArgumentPosition(name: "output", position: outPos)
+        }
+        // SAFETY: Input and output must not share the same argument slot
+        // If they do, the output buffer would overwrite the input during inference
+        guard inPos != outPos else {
+            BNNSGraphContextDestroy(ctx)
+            throw BNNSInferenceError.compilationFailed(
+                reason: "Input and output share the same argument position (\(inPos)). Model may be malformed."
+            )
         }
         self.inputPosition = inPos
         self.outputPosition = outPos
@@ -580,10 +591,11 @@ public final class BNNSStreamingInference: @unchecked Sendable {
     /// when resetState() is called concurrently with predict()
     private var contextLock = os_unfair_lock()
 
-    #if DEBUG
-    /// DEBUG-only: Tracks number of predict() calls in flight to detect concurrent access violations
+    /// Tracks number of predict() calls in flight.
+    /// Used by resetState() to wait for in-flight predictions to complete before
+    /// destroying the context, preventing use-after-free.
+    /// Active in all builds (not just DEBUG) for memory safety.
     private var predictInFlightCount: Int32 = 0
-    #endif
 
     public let inputShape: [Int]
     public let outputShape: [Int]
@@ -639,6 +651,9 @@ public final class BNNSStreamingInference: @unchecked Sendable {
         // Create STREAMING context (maintains hidden state)
         let ctx = BNNSGraphContextMakeStreaming(graph, nil, 0, nil)
         guard ctx.data != nil else {
+            // NOTE: BNNS API does not expose BNNSGraphDestroy - graph lifecycle is tied
+            // to context. If context creation fails here, the compiled graph may leak.
+            // This is an Apple API limitation; context creation failures are rare in practice.
             throw BNNSInferenceError.contextCreationFailed
         }
         self.context = ctx
@@ -657,6 +672,13 @@ public final class BNNSStreamingInference: @unchecked Sendable {
         guard outPos >= 0 && outPos < argumentCount else {
             BNNSGraphContextDestroy(ctx)
             throw BNNSInferenceError.invalidArgumentPosition(name: "output", position: outPos)
+        }
+        // SAFETY: Input and output must not share the same argument slot
+        guard inPos != outPos else {
+            BNNSGraphContextDestroy(ctx)
+            throw BNNSInferenceError.compilationFailed(
+                reason: "Input and output share the same argument position (\(inPos)). Model may be malformed."
+            )
         }
         self.inputPosition = inPos
         self.outputPosition = outPos
@@ -728,23 +750,24 @@ public final class BNNSStreamingInference: @unchecked Sendable {
     ///   if called during `predict()`. Use external synchronization if needed, or call
     ///   `resetState()` only when you know no `predict()` calls are in progress.
     ///
-    /// - Note: In DEBUG builds, concurrent access violations are detected and will trigger
-    ///   an assertion failure. In RELEASE builds, this method is lock-free for real-time safety.
+    /// - Note: This method tracks in-flight calls atomically to allow `resetState()` to wait
+    ///   for completion, preventing use-after-free. The atomic operations are lock-free and
+    ///   real-time safe.
     @discardableResult
     @inline(__always)
     public func predict(
         input: UnsafePointer<Float>,
         output: UnsafeMutablePointer<Float>
     ) -> Bool {
-        #if DEBUG
-        // Track in-flight predict() calls to detect concurrent access violations
+        // Track in-flight predict() calls atomically (lock-free, real-time safe).
+        // This allows resetState() to wait for in-flight predictions to complete
+        // before destroying the context, preventing use-after-free.
         OSAtomicIncrement32(&predictInFlightCount)
         defer { OSAtomicDecrement32(&predictInFlightCount) }
-        #endif
 
         // Note: We don't acquire contextLock here for performance reasons.
         // Audio thread predict() calls must be lock-free for real-time safety.
-        // Users must ensure resetState() is not called concurrently.
+        // resetState() will spin-wait for predictInFlightCount to reach 0.
         arguments[inputPosition].data_ptr = UnsafeMutableRawPointer(mutating: input)
         arguments[inputPosition].data_ptr_size = inputSizeBytes
 
@@ -766,6 +789,10 @@ public final class BNNSStreamingInference: @unchecked Sendable {
         inputSize: Int,
         outputSize: Int
     ) -> Bool {
+        // Track in-flight predict() calls atomically (lock-free, real-time safe).
+        OSAtomicIncrement32(&predictInFlightCount)
+        defer { OSAtomicDecrement32(&predictInFlightCount) }
+
         arguments[inputPosition].data_ptr = UnsafeMutableRawPointer(mutating: input)
         arguments[inputPosition].data_ptr_size = inputSize * MemoryLayout<Float>.size
 
@@ -824,23 +851,40 @@ public final class BNNSStreamingInference: @unchecked Sendable {
         }
     }
 
+    /// Maximum time to wait for in-flight predictions before resetting (100ms)
+    private static let resetStateMaxWaitTime: UInt64 = 100_000_000  // nanoseconds
+
     public func resetState() throws {
         // BNNS does not provide an in-place state reset API.
         // We recreate the streaming context which initializes all states to zero.
         // This allocates memory, so it's not real-time safe.
-        //
-        // THREAD SAFETY WARNING: predict() does NOT acquire contextLock for
-        // real-time performance. Caller MUST ensure resetState() is not called
-        // concurrently with predict(). See predict() documentation.
 
-        #if DEBUG
-        // Detect concurrent access violations in DEBUG builds
-        let inFlight = OSAtomicAdd32(0, &predictInFlightCount)
-        assert(inFlight == 0,
-            "BNNSStreamingInference.resetState() called while \(inFlight) predict() call(s) are in progress. " +
-            "This is a threading violation that causes use-after-free. " +
-            "Ensure no predict() calls are in progress when calling resetState().")
-        #endif
+        // THREAD SAFETY: Wait for any in-flight predict() calls to complete.
+        // This prevents use-after-free when destroying the old context.
+        // Uses a spin-wait with yield to avoid blocking the audio thread if it's
+        // in the middle of a predict() call.
+        let startTime = DispatchTime.now().uptimeNanoseconds
+        var spinCount = 0
+        while OSAtomicAdd32(0, &predictInFlightCount) > 0 {
+            spinCount += 1
+            // Yield to other threads periodically (sched_yield via usleep(0))
+            if spinCount % 100 == 0 {
+                usleep(0)  // Yields CPU without blocking
+            }
+            // Check for timeout to prevent infinite wait
+            let elapsed = DispatchTime.now().uptimeNanoseconds - startTime
+            if elapsed > Self.resetStateMaxWaitTime {
+                #if DEBUG
+                let inFlight = OSAtomicAdd32(0, &predictInFlightCount)
+                assertionFailure(
+                    "BNNSStreamingInference.resetState() timed out waiting for \(inFlight) predict() call(s). " +
+                    "This may indicate a deadlock or very long-running prediction.")
+                #endif
+                // In release builds, proceed anyway after timeout.
+                // This is still safer than the old behavior which had no protection.
+                break
+            }
+        }
 
         // Create new context FIRST before destroying old one.
         // This ensures we never leave the object in an invalid state.

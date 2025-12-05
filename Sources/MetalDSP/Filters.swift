@@ -264,22 +264,23 @@ public final class BiquadFilter {
             )
         }
 
-        // Normalize coefficients (in Double) then convert to Float32 for storage
-        coefficients = Coefficients(
-            b0: Float(b0 / a0),
-            b1: Float(b1 / a0),
-            b2: Float(b2 / a0),
-            a1: Float(a1 / a0),
-            a2: Float(a2 / a0)
-        )
+        // DSP-1 FIX: Calculate coefficients in temporary variables BEFORE storing
+        // This ensures that if ANY validation fails, the filter remains in its previous valid state.
+        // Previously, coefficients were stored before stability validation, leaving the filter in
+        // an inconsistent state if validation threw (coefficients updated but biquadSetup not).
+        let newB0 = Float(b0 / a0)
+        let newB1 = Float(b1 / a0)
+        let newB2 = Float(b2 / a0)
+        let newA1 = Float(a1 / a0)
+        let newA2 = Float(a2 / a0)
 
         // Check for NaN/Inf after normalization (can occur with extreme parameters)
         // This catches cases where Float32 overflow or underflow occurred during conversion
-        guard !coefficients.b0.isNaN && !coefficients.b0.isInfinite &&
-              !coefficients.b1.isNaN && !coefficients.b1.isInfinite &&
-              !coefficients.b2.isNaN && !coefficients.b2.isInfinite &&
-              !coefficients.a1.isNaN && !coefficients.a1.isInfinite &&
-              !coefficients.a2.isNaN && !coefficients.a2.isInfinite else {
+        guard !newB0.isNaN && !newB0.isInfinite &&
+              !newB1.isNaN && !newB1.isInfinite &&
+              !newB2.isNaN && !newB2.isInfinite &&
+              !newA1.isNaN && !newA1.isInfinite &&
+              !newA2.isNaN && !newA2.isInfinite else {
             throw FilterError.invalidParameter(
                 name: "coefficients",
                 value: 0,
@@ -288,6 +289,39 @@ public final class BiquadFilter {
                     "(very high Q, frequency near 0 or Nyquist)"
             )
         }
+
+        // Validate filter stability BEFORE storing coefficients
+        // For a second-order IIR filter to be stable, poles must be inside the unit circle.
+        // The stability conditions for the transfer function H(z) = B(z)/A(z) where
+        // A(z) = 1 + a1*z^-1 + a2*z^-2 are:
+        //   |a2| < 1
+        //   |a1| < 1 + a2
+        // Violation indicates filter will produce unbounded (growing) output.
+        guard abs(newA2) < 1.0 else {
+            throw FilterError.invalidParameter(
+                name: "a2 (stability)",
+                value: newA2,
+                requirement: "|a2| must be < 1 for filter stability. " +
+                    "Current |a2| = \(abs(newA2)). Try reducing Q or adjusting frequency."
+            )
+        }
+        guard abs(newA1) < 1.0 + newA2 else {
+            throw FilterError.invalidParameter(
+                name: "a1 (stability)",
+                value: newA1,
+                requirement: "|a1| must be < 1 + a2 for filter stability. " +
+                    "Current |a1| = \(abs(newA1)), 1 + a2 = \(1.0 + newA2). Try reducing Q."
+            )
+        }
+
+        // All validation passed - NOW store the new coefficients
+        coefficients = Coefficients(
+            b0: newB0,
+            b1: newB1,
+            b2: newB2,
+            a1: newA1,
+            a2: newA2
+        )
 
         // Update Accelerate setup
         updateBiquadSetup()

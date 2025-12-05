@@ -190,7 +190,11 @@ extension ComputeContext: MemoryPressureResponder {
             os_unfair_lock_lock(&unfairLock)
             defer { os_unfair_lock_unlock(&unfairLock) }
 
-            if tripleBufferInFlightCount == 0 && !waitingForDrain {
+            // SCAN3-FIX: Check BOTH in-flight counts - closure accesses AND GPU command buffers
+            // Previously only checked tripleBufferInFlightCount, which could clear buffers
+            // while GPU command buffers still referenced them (use-after-free).
+            // This mirrors the fix in clearTripleBuffering().
+            if tripleBufferInFlightCount == 0 && tripleBufferGPUCommandsInFlight == 0 && !waitingForDrain {
                 // Safe to clear - no GPU commands are using these buffers
                 // and setupTripleBuffering isn't waiting for them
                 tripleBuffer.removeAll()

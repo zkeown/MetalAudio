@@ -312,6 +312,18 @@ public final class Linear: NNLayer {
     private func forwardAccelerateBatched(input: Tensor, output: Tensor, batchSize: Int) {
         let inputFeatures = inputShape[0]
         let outputFeatures = outputShape[0]
+
+        // H4 FIX: Defensive validation before BLAS calls
+        // Ensures buffer sizes match expected dimensions to prevent memory corruption
+        #if DEBUG
+        precondition(weights.count == outputFeatures * inputFeatures,
+            "Weight buffer size mismatch: \(weights.count) != \(outputFeatures * inputFeatures)")
+        precondition(input.count >= batchSize * inputFeatures,
+            "Input buffer too small: \(input.count) < \(batchSize * inputFeatures)")
+        precondition(output.count >= batchSize * outputFeatures,
+            "Output buffer too small: \(output.count) < \(batchSize * outputFeatures)")
+        #endif
+
         let inputPtr = input.floatPointer
         let outputPtr = output.floatPointer
         let weightsPtr = weights.floatPointer
@@ -354,6 +366,17 @@ public final class Linear: NNLayer {
     private func forwardAccelerate(input: Tensor, output: Tensor, batchSize: Int) {
         let inputFeatures = inputShape[0]
         let outputFeatures = outputShape[0]
+
+        // H4 FIX: Defensive validation before BLAS calls
+        #if DEBUG
+        precondition(weights.count == outputFeatures * inputFeatures,
+            "Weight buffer size mismatch: \(weights.count) != \(outputFeatures * inputFeatures)")
+        precondition(input.count >= batchSize * inputFeatures,
+            "Input buffer too small: \(input.count) < \(batchSize * inputFeatures)")
+        precondition(output.count >= batchSize * outputFeatures,
+            "Output buffer too small: \(output.count) < \(batchSize * outputFeatures)")
+        #endif
+
         let inputPtr = input.floatPointer
         let outputPtr = output.floatPointer
         let weightsPtr = weights.floatPointer

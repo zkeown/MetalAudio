@@ -99,6 +99,15 @@ extension FFT {
         let batchSize = inputs.count
         guard batchSize > 0 else { return }
 
+        // CRITICAL FIX: Validate all input arrays have sufficient size
+        // Without this check, undersized inputs cause buffer overrun in GPU path
+        // or garbage data in CPU path (vDSP reads past array bounds)
+        for input in inputs {
+            guard input.count >= fftConfig.size else {
+                throw FFTError.inputTooShort(inputSize: input.count, requiredSize: fftConfig.size)
+            }
+        }
+
         // Ensure outputs are properly sized
         if outputsReal.count != batchSize {
             outputsReal = [[Float]](repeating: [Float](repeating: 0, count: fftConfig.size), count: batchSize)
@@ -187,10 +196,12 @@ extension FFT {
         // Use pre-allocated batch buffer when capacity is sufficient (avoids 1-5ms allocation overhead)
         // For larger batches, allocate a new buffer (rare case)
         // Lock protects buffer reallocation AND buffer use from concurrent batch calls
-        // IMPORTANT: Lock must be held until buffer copy is complete to prevent race conditions
-        // where another thread could reallocate the buffer while we're still writing to it
+        // SAFETY: Lock must be held until GPU work completes AND results are copied back to prevent
+        // race conditions where another thread could start using the same buffer while GPU work is active
         var batchBufferOpt: MTLBuffer?
         os_unfair_lock_lock(&internalBatchBufferLock)
+        defer { os_unfair_lock_unlock(&internalBatchBufferLock) }
+
         if batchSize <= internalGpuBatchBufferCapacity, let preallocated = internalGpuBatchBuffer {
             batchBufferOpt = preallocated
         } else {
@@ -206,13 +217,15 @@ extension FFT {
         }
 
         guard let batchBuffer = batchBufferOpt else {
-            os_unfair_lock_unlock(&internalBatchBufferLock)
+            // defer handles unlock
             try forwardBatchCPU(inputs: inputs, outputsReal: &outputsReal, outputsImag: &outputsImag)
             return
         }
 
         // Copy all inputs to batch buffer (interleaved format)
-        // STILL UNDER LOCK: prevents another thread from reallocating while we copy
+        // SAFETY: Overflow check at lines 187-194 validates batchSize * fftSize * 8 fits in Int.
+        // Since idx < batchSize, offset = idx * fftSize * 2 < batchSize * fftSize * 2 < batchSize * fftSize * 8,
+        // so offset calculations cannot overflow if we reach this point.
         let bufferPtr = batchBuffer.contents().assumingMemoryBound(to: Float.self)
         for (idx, input) in inputs.enumerated() {
             let offset = idx * fftSize * 2
@@ -221,7 +234,7 @@ extension FFT {
                 bufferPtr[offset + i * 2 + 1] = 0        // Imag
             }
         }
-        os_unfair_lock_unlock(&internalBatchBufferLock)
+        // Lock held through GPU work and result copy - defer handles unlock
 
         #if os(macOS)
         if batchBuffer.storageMode == .managed {
@@ -233,8 +246,15 @@ extension FFT {
         var logN = UInt32(fftSize.trailingZeroBitCount)
 
         // Determine which butterfly pipeline to use
-        let useOptimized = internalGpuButterflyOptimizedPipeline != nil && internalGpuTwiddleBuffer != nil
-        let activeButterflyPipeline = useOptimized ? internalGpuButterflyOptimizedPipeline! : butterflyPipeline
+        // Use optional binding to avoid force unwrap crash if resources released under memory pressure
+        let (activeButterflyPipeline, optimizedTwiddle): (MTLComputePipelineState, MTLBuffer?) = {
+            if let optimizedPipeline = internalGpuButterflyOptimizedPipeline,
+               let twiddleBuffer = internalGpuTwiddleBuffer {
+                return (optimizedPipeline, twiddleBuffer)
+            } else {
+                return (butterflyPipeline, nil)
+            }
+        }()
 
         // Execute batch FFT
         try context.executeSync { encoder in
@@ -262,7 +282,7 @@ extension FFT {
                     encoder.setBytes(&n, length: MemoryLayout<UInt32>.stride, index: 1)
                     encoder.setBytes(&s, length: MemoryLayout<UInt32>.stride, index: 2)
 
-                    if useOptimized, let twiddleBuffer = internalGpuTwiddleBuffer {
+                    if let twiddleBuffer = optimizedTwiddle {
                         encoder.setBuffer(twiddleBuffer, offset: 0, index: 3)
                     }
 
@@ -311,7 +331,11 @@ extension FFT {
     ) throws {
         let batchSize = inputsReal.count
         guard batchSize > 0 else { return }
-        guard inputsImag.count == batchSize else { return }
+        // SCAN3-FIX: Throw error instead of silent return on mismatched batch sizes
+        // Previously this silently returned, leaving outputs uninitialized/stale.
+        guard inputsImag.count == batchSize else {
+            throw FFTError.inputTooShort(inputSize: inputsImag.count, requiredSize: batchSize)
+        }
 
         // Ensure outputs are properly sized
         if outputs.count != batchSize {
@@ -356,13 +380,30 @@ extension FFT {
     ///
     /// - Parameter stft: STFT result
     /// - Returns: Reconstructed audio samples
-    public func istft(stft: STFTResult) -> [Float] {
+    /// - Throws: `FFTError.istftOutputOverflow` if output length calculation would overflow
+    public func istft(stft: STFTResult) throws -> [Float] {
         let hopSize = fftConfig.hopSize
         let fftSize = fftConfig.size
         let frameCount = stft.frameCount
-        let outputLength = (frameCount - 1) * hopSize + fftSize
 
         guard frameCount > 0 else { return [] }
+
+        // CRITICAL FIX: Check for integer overflow in output length calculation
+        // This prevents heap corruption from allocating wrong-sized buffer
+        let (intermediate, overflow1) = (frameCount - 1).multipliedReportingOverflow(by: hopSize)
+        let (outputLength, overflow2) = intermediate.addingReportingOverflow(fftSize)
+        guard !overflow1 && !overflow2 else {
+            throw FFTError.istftOutputOverflow(frameCount: frameCount, hopSize: hopSize, fftSize: fftSize)
+        }
+
+        // SCAN3-FIX: Validate array bounds before accessing
+        // Previously, if stft.real.count < frameCount, this would crash with index out of bounds.
+        guard stft.real.count >= frameCount && stft.imag.count >= frameCount else {
+            throw FFTError.inputTooShort(
+                inputSize: min(stft.real.count, stft.imag.count),
+                requiredSize: frameCount
+            )
+        }
 
         // Filter out empty frames (should not happen with valid STFT result)
         var validReal: [[Float]] = []
@@ -378,6 +419,23 @@ extension FFT {
         }
 
         guard !validReal.isEmpty else { return [Float](repeating: 0, count: outputLength) }
+
+        // DSP-3 FIX: Pre-validate ALL frame positions before overlap-add
+        // Previously: frames with overflow were silently skipped with `continue`, leaving gaps in output
+        // Now: validate upfront and throw error if ANY frame would overflow
+        // This ensures we either produce complete output or fail with a clear error.
+        for frameIdx in validIndices {
+            let (start, overflow1) = frameIdx.multipliedReportingOverflow(by: hopSize)
+            let (endOffset, overflow2) = start.addingReportingOverflow(fftSize)
+            guard !overflow1 && !overflow2 && start >= 0 && endOffset <= outputLength else {
+                throw FFTError.istftFrameOverflow(
+                    frameIndex: frameIdx,
+                    hopSize: hopSize,
+                    fftSize: fftSize,
+                    outputLength: outputLength
+                )
+            }
+        }
 
         // Batch inverse FFT all valid frames
         var frames = [[Float]](repeating: [Float](repeating: 0, count: fftSize), count: validReal.count)
@@ -395,14 +453,8 @@ extension FFT {
         var windowedFrame = [Float](repeating: 0, count: fftSize)
 
         for (batchIdx, frameIdx) in validIndices.enumerated() {
-            // Bounds check: prevent buffer overflow from invalid frame indices
-            // This guards against corrupted STFT data or integer overflow in frameIdx * hopSize
-            let (start, overflow) = frameIdx.multipliedReportingOverflow(by: hopSize)
-            guard !overflow && start >= 0 && start + fftSize <= outputLength else {
-                // Skip this frame - it would write out of bounds
-                // This is a defensive check; valid STFT results should never trigger this
-                continue
-            }
+            // SAFETY: Frame positions already validated above, compute start offset
+            let start = frameIdx * hopSize
 
             // Apply window to frame: windowedFrame = frame * window
             frames[batchIdx].withUnsafeBufferPointer { framePtr in
@@ -453,13 +505,21 @@ extension FFT {
         // We need max(sum[i], floor), so use vDSP_vclip for proper floor clamping.
         windowSum.withUnsafeMutableBufferPointer { sumPtr in
             output.withUnsafeMutableBufferPointer { outPtr in
+                guard let sumBase = sumPtr.baseAddress, let outBase = outPtr.baseAddress else { return }
+
+                // H10 FIX: Flush denormals to zero before arithmetic operations
+                // Denormal values (< Float.leastNormalMagnitude ≈ 1.17e-38) cause 10-100x
+                // performance degradation on some hardware. Zero them before clamping.
+                var denormalThreshold = Float.leastNormalMagnitude
+                vDSP_vthres(sumBase, 1, &denormalThreshold, sumBase, 1, vDSP_Length(outputLength))
+
                 // Clamp to floor: sum[i] = max(sum[i], floor)
                 // vDSP_vclip clips to [low, high] range
                 var low = windowFloor
                 var high = Float.greatestFiniteMagnitude
-                vDSP_vclip(sumPtr.baseAddress!, 1, &low, &high, sumPtr.baseAddress!, 1, vDSP_Length(outputLength))
+                vDSP_vclip(sumBase, 1, &low, &high, sumBase, 1, vDSP_Length(outputLength))
                 // Divide: out[i] = out[i] / sum[i]
-                vDSP_vdiv(sumPtr.baseAddress!, 1, outPtr.baseAddress!, 1, outPtr.baseAddress!, 1, vDSP_Length(outputLength))
+                vDSP_vdiv(sumBase, 1, outBase, 1, outBase, 1, vDSP_Length(outputLength))
             }
         }
 

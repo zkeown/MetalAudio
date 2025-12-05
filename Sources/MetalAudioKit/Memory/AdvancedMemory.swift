@@ -119,11 +119,19 @@ public final class MappedTensor {
         guard fd >= 0 else {
             throw MappedTensorError.fileOpenFailed(path: path, errno: errno)
         }
-        self.fileDescriptor = fd
+
+        // H15 FIX: Use defer to ensure fd is closed on any failure path.
+        // This is more robust than explicit close() calls before each throw,
+        // especially as the init grows with additional error conditions.
+        var success = false
+        defer {
+            if !success {
+                close(fd)
+            }
+        }
 
         // Extend file to required size
         if ftruncate(fd, off_t(byteSize)) != 0 {
-            close(fd)
             throw MappedTensorError.truncateFailed(errno: errno)
         }
 
@@ -133,11 +141,12 @@ public final class MappedTensor {
 
         guard let ptr = mmap(nil, byteSize, prot, mapFlags, fd, 0),
               ptr != MAP_FAILED else {
-            close(fd)
             throw MappedTensorError.mmapFailed(errno: errno)
         }
 
+        self.fileDescriptor = fd
         self.pointer = ptr
+        success = true  // All initialization succeeded, don't close fd in defer
     }
 
     deinit {
@@ -559,13 +568,16 @@ public final class SpeculativeBuffer: @unchecked Sendable {
     ///
     /// If buffer was deallocated, this triggers reallocation.
     /// Each call updates access timestamp and count.
+    ///
+    /// - Note: The lock is held for the entire duration of the closure execution
+    ///   to prevent TOCTOU races where another thread deallocates the buffer.
     public func withContents<R>(_ body: (UnsafeMutableRawPointer) throws -> R) throws -> R {
         os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
 
         // Reallocate if needed
         if buffer == nil {
             guard let buf = device.makeBuffer(length: byteSize, options: .storageModeShared) else {
-                os_unfair_lock_unlock(&lock)
                 throw SpeculativeBufferError.reallocationFailed(byteSize: byteSize)
             }
             buffer = buf
@@ -575,9 +587,8 @@ public final class SpeculativeBuffer: @unchecked Sendable {
         lastAccessTime = DispatchTime.now().uptimeNanoseconds
         accessCount += 1
 
+        // SAFETY: Lock held during body execution prevents deallocation races
         let ptr = buffer!.contents()
-        os_unfair_lock_unlock(&lock)
-
         return try body(ptr)
     }
 
