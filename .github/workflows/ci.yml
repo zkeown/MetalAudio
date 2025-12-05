@@ -118,15 +118,19 @@ jobs:
       - name: Create iPhone 8 Simulator
         if: matrix.device == 'iPhone 8'
         run: |
-          # Create iPhone 8 device if it doesn't exist
-          xcrun simctl create "iPhone 8" "com.apple.CoreSimulator.SimDeviceType.iPhone-8" "com.apple.CoreSimulator.SimRuntime.iOS-16-4" || true
+          # Delete any existing iPhone 8 simulators to avoid duplicates
+          xcrun simctl list devices | grep "iPhone 8" | grep -oE '[A-F0-9-]{36}' | xargs -I {} xcrun simctl delete {} || true
+          # Create iPhone 8 device
+          xcrun simctl create "iPhone 8" "com.apple.CoreSimulator.SimDeviceType.iPhone-8" "com.apple.CoreSimulator.SimRuntime.iOS-16-4"
           xcrun simctl list devices | grep "iPhone 8"
 
-      - name: Create iPhone 17 Pro Simulator
+      - name: Setup iPhone 17 Pro Simulator
         if: matrix.device == 'iPhone 17 Pro'
         run: |
-          # Create iPhone 17 Pro device if it doesn't exist
-          xcrun simctl create "iPhone 17 Pro" "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro" "com.apple.CoreSimulator.SimRuntime.iOS-26-1" || true
+          # Delete any existing iPhone 17 Pro simulators to avoid duplicates
+          xcrun simctl list devices | grep "iPhone 17 Pro" | grep -oE '[A-F0-9-]{36}' | xargs -I {} xcrun simctl delete {} || true
+          # Create a fresh iPhone 17 Pro device
+          xcrun simctl create "iPhone 17 Pro" "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro" "com.apple.CoreSimulator.SimRuntime.iOS-26-1"
           xcrun simctl list devices | grep "iPhone 17 Pro"
 
       - name: Cache Swift packages
