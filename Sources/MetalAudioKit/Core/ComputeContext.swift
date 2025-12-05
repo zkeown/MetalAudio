@@ -1215,7 +1215,7 @@ extension ComputeContext {
     ///
     /// Each operation gets its own command buffer, allowing true GPU parallelism
     /// on devices that support it.
-    public func executeParallel<T>(
+    public func executeParallel<T: Sendable>(
         _ operations: [(MTLComputeCommandEncoder) throws -> T]
     ) async throws -> [T] {
         try await withThrowingTaskGroup(of: (Int, T).self) { group in
