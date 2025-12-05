@@ -103,17 +103,9 @@ jobs:
           restore-keys: |
             ios-${{ matrix.ios }}-spm-
 
-      - name: Build for iOS
+      - name: Build and Test on iOS Simulator
         run: |
-          xcodebuild build-for-testing \
-            -scheme MetalAudio \
-            -destination "platform=iOS Simulator,name=${{ matrix.device }},OS=${{ matrix.ios }}" \
-            -skipPackagePluginValidation \
-            CODE_SIGNING_ALLOWED=NO
-
-      - name: Test on iOS Simulator
-        run: |
-          xcodebuild test-without-building \
+          xcodebuild test \
             -scheme MetalAudio \
             -destination "platform=iOS Simulator,name=${{ matrix.device }},OS=${{ matrix.ios }}" \
             -skipPackagePluginValidation \
