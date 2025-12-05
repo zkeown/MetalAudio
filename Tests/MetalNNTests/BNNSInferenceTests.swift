@@ -1,3 +1,6 @@
+// BNNS Graph API requires iOS 18+ / macOS 15+ SDK (Swift 6 / Xcode 16)
+#if compiler(>=6.0)
+
 import XCTest
 @testable import MetalNN
 @testable import MetalAudioKit
@@ -1218,3 +1221,5 @@ final class HybridPipelineFunctionalTests: XCTestCase {
         XCTAssertGreaterThan(memoryUsage, 0, "Memory usage should be positive")
     }
 }
+
+#endif  // compiler(>=6.0)

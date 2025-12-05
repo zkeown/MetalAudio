@@ -1,3 +1,6 @@
+// BNNS Graph API requires iOS 18+ / macOS 15+ SDK (Swift 6 / Xcode 16)
+#if compiler(>=6.0)
+
 import Foundation
 import Accelerate
 import MetalAudioKit
@@ -1079,3 +1082,12 @@ public func isBNNSGraphAvailable() -> Bool {
     }
     return false
 }
+
+#else
+
+// Stub for older compilers that don't have BNNS Graph API
+public func isBNNSGraphAvailable() -> Bool {
+    return false
+}
+
+#endif  // compiler(>=6.0)

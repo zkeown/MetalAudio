@@ -1012,6 +1012,7 @@ for cfg in gruConfigs {
 
 // MARK: - BNNS Graph Comparison (macOS 15+ / iOS 18+)
 
+#if compiler(>=6.0)
 if #available(macOS 15.0, iOS 18.0, *) {
     if verboseOutput { print("\n--- BNNS Graph vs Metal NN Comparison ---") }
 
@@ -1375,6 +1376,7 @@ if #available(macOS 15.0, iOS 18.0, *) {
         print("  Requires macOS 15+ / iOS 18+")
     }
 }
+#endif  // compiler(>=6.0)
 
 // MARK: - STFT Benchmarks
 
