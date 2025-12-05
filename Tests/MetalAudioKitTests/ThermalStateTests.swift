@@ -22,7 +22,7 @@ final class ThermalStateTests: XCTestCase {
         XCTAssertEqual(state, .nominal, "macOS thermal state should always be .nominal")
         #else
         // On iOS, state could be any valid value
-        let validStates: [AudioDevice.ThermalState] = [.nominal, .fair, .serious, .critical]
+        let validStates: [ThermalState] = [.nominal, .fair, .serious, .critical]
         XCTAssertTrue(validStates.contains(state), "Thermal state should be a valid value")
         #endif
     }
