@@ -229,11 +229,9 @@ final class LSTMTests: XCTestCase {
 
         // Result 2 should differ from result 1 (state accumulated)
         var anyDifferent = false
-        for i in 0..<result1.count {
-            if abs(result1[i] - result2[i]) > 1e-5 {
-                anyDifferent = true
-                break
-            }
+        for i in 0..<result1.count where abs(result1[i] - result2[i]) > 1e-5 {
+            anyDifferent = true
+            break
         }
         XCTAssertTrue(anyDifferent, "Second pass should differ from first (state should accumulate)")
     }

@@ -99,7 +99,7 @@ final class Conv1DTests: XCTestCase {
 
         for i in 0..<expected.count {
             XCTAssertEqual(result[i], expected[i], accuracy: tolerance,
-                "Identity kernel failed at index \(i): got \(result[i]), expected \(expected[i]) (tolerance: \(tolerance))")
+                           "Identity kernel failed at index \(i): got \(result[i]), expected \(expected[i]) (tolerance: \(tolerance))")
         }
     }
 
@@ -141,7 +141,7 @@ final class Conv1DTests: XCTestCase {
 
         for i in 0..<expected.count {
             XCTAssertEqual(result[i], expected[i], accuracy: tolerance,
-                "Averaging kernel failed at index \(i)")
+                           "Averaging kernel failed at index \(i)")
         }
     }
 
@@ -186,7 +186,7 @@ final class Conv1DTests: XCTestCase {
 
         for i in 0..<expected.count {
             XCTAssertEqual(result[i], expected[i], accuracy: tolerance,
-                "Bias test failed at index \(i)")
+                           "Bias test failed at index \(i)")
         }
     }
 
@@ -232,7 +232,7 @@ final class Conv1DTests: XCTestCase {
 
         for i in 0..<expected.count {
             XCTAssertEqual(result[i], expected[i], accuracy: tolerance,
-                "Multi-channel test failed at index \(i)")
+                           "Multi-channel test failed at index \(i)")
         }
     }
 
@@ -281,7 +281,7 @@ final class Conv1DTests: XCTestCase {
 
         for i in 0..<expected.count {
             XCTAssertEqual(result[i], expected[i], accuracy: tolerance,
-                "Dilation test failed at index \(i)")
+                           "Dilation test failed at index \(i)")
         }
     }
 
@@ -333,7 +333,7 @@ final class Conv1DTests: XCTestCase {
 
         for i in 0..<expected.count {
             XCTAssertEqual(result[i], expected[i], accuracy: tolerance,
-                "Grouped conv test failed at index \(i)")
+                           "Grouped conv test failed at index \(i)")
         }
     }
 
@@ -437,7 +437,7 @@ final class Conv1DTests: XCTestCase {
         let result = output.toArray()
         for i in 0..<result.count {
             XCTAssertEqual(result[i], 0.0, accuracy: 1e-6,
-                "Zero weights should produce zero output at index \(i)")
+                           "Zero weights should produce zero output at index \(i)")
         }
     }
 
@@ -487,7 +487,7 @@ final class Conv1DTests: XCTestCase {
 
                 let actual = output.toArray()
                 ReferenceTestUtils.assertClose(actual, batchExpected, rtol: tolerance, atol: tolerance,
-                    message: "Conv1D mismatch for '\(name)' batch \(b)")
+                                               message: "Conv1D mismatch for '\(name)' batch \(b)")
             }
         }
     }
@@ -608,7 +608,7 @@ final class ConvTranspose1DTests: XCTestCase {
 
         for i in 0..<expected.count {
             XCTAssertEqual(result[i], expected[i], accuracy: 1e-4,
-                "Bias test failed at index \(i)")
+                           "Bias test failed at index \(i)")
         }
     }
 
@@ -649,7 +649,7 @@ final class ConvTranspose1DTests: XCTestCase {
 
         for i in 0..<expected.count {
             XCTAssertEqual(result[i], expected[i], accuracy: 1e-4,
-                "Multi-channel test failed at index \(i)")
+                           "Multi-channel test failed at index \(i)")
         }
     }
 
@@ -680,7 +680,7 @@ final class ConvTranspose1DTests: XCTestCase {
         let result = output.toArray()
         for i in 0..<result.count {
             XCTAssertEqual(result[i], 0.0, accuracy: 1e-6,
-                "Zero weights should produce zero output at index \(i)")
+                           "Zero weights should produce zero output at index \(i)")
         }
     }
 
@@ -730,7 +730,7 @@ final class ConvTranspose1DTests: XCTestCase {
 
                 let actual = output.toArray()
                 ReferenceTestUtils.assertClose(actual, batchExpected, rtol: tolerance, atol: tolerance,
-                    message: "ConvTranspose1D mismatch for '\(name)' batch \(b)")
+                                               message: "ConvTranspose1D mismatch for '\(name)' batch \(b)")
             }
         }
     }
@@ -797,7 +797,7 @@ final class FusedConv1DTests: XCTestCase {
 
         for i in 0..<expected.count {
             XCTAssertEqual(result[i], expected[i], accuracy: 1e-4,
-                "ReLU activation failed at index \(i)")
+                           "ReLU activation failed at index \(i)")
         }
     }
 
@@ -838,7 +838,7 @@ final class FusedConv1DTests: XCTestCase {
 
         for i in 0..<expected.count {
             XCTAssertEqual(result[i], expected[i], accuracy: 1e-4,
-                "LeakyReLU activation failed at index \(i)")
+                           "LeakyReLU activation failed at index \(i)")
         }
     }
 
@@ -950,7 +950,7 @@ final class FusedConv1DTests: XCTestCase {
 
         for i in 0..<expected.count {
             XCTAssertEqual(result[i], expected[i], accuracy: 1e-4,
-                "No activation failed at index \(i)")
+                           "No activation failed at index \(i)")
         }
     }
 
@@ -992,7 +992,7 @@ final class FusedConv1DTests: XCTestCase {
 
         for i in 0..<expected.count {
             XCTAssertEqual(result[i], expected[i], accuracy: 1e-4,
-                "Residual connection failed at index \(i)")
+                           "Residual connection failed at index \(i)")
         }
     }
 
@@ -1033,7 +1033,7 @@ final class FusedConv1DTests: XCTestCase {
 
         for i in 0..<expected.count {
             XCTAssertEqual(result[i], expected[i], accuracy: 1e-4,
-                "Fused bias+ReLU failed at index \(i)")
+                           "Fused bias+ReLU failed at index \(i)")
         }
     }
 
@@ -1126,7 +1126,7 @@ final class FusedConv1DTests: XCTestCase {
 
         for i in 0..<expected.count {
             XCTAssertEqual(result[i], expected[i], accuracy: 1e-4,
-                "Grouped fused conv failed at index \(i)")
+                           "Grouped fused conv failed at index \(i)")
         }
     }
 }
@@ -1191,7 +1191,7 @@ final class HalfConv1DTests: XCTestCase {
 
         for i in 0..<expected.count {
             XCTAssertEqual(result[i], expected[i], accuracy: 0.01,
-                "Half precision conv failed at index \(i)")
+                           "Half precision conv failed at index \(i)")
         }
     }
 
@@ -1231,7 +1231,7 @@ final class HalfConv1DTests: XCTestCase {
 
         for i in 0..<expected.count {
             XCTAssertEqual(result[i], expected[i], accuracy: 0.01,
-                "Half precision bias test failed at index \(i)")
+                           "Half precision bias test failed at index \(i)")
         }
     }
 
@@ -1275,7 +1275,7 @@ final class HalfConv1DTests: XCTestCase {
 
         for i in 0..<expected.count {
             XCTAssertEqual(result[i], expected[i], accuracy: 0.1,
-                "Half precision multi-channel test failed at index \(i)")
+                           "Half precision multi-channel test failed at index \(i)")
         }
     }
 

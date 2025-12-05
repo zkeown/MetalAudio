@@ -1,5 +1,8 @@
 import Metal
 import Foundation
+import os.log
+
+private let deviceLogger = Logger(subsystem: "MetalAudioKit", category: "AudioDevice")
 #if os(iOS) || os(tvOS)
 import UIKit
 #endif
@@ -767,17 +770,19 @@ extension AudioDevice {
         #endif
     }
 
-    /// Print device capabilities for debugging
+    /// Log device capabilities for debugging
     public func printCapabilities() {
-        print("Metal Audio Device: \(name)")
-        print("  Unified Memory: \(hasUnifiedMemory)")
-        print("  Max Threads/Threadgroup: \(maxThreadsPerThreadgroup)")
-        print("  Max Buffer Length: \(device.maxBufferLength / 1024 / 1024) MB")
-        print("  Recommended Memory: \(device.recommendedMaxWorkingSetSize / 1024 / 1024) MB")
-        print("  GPU Family: \(hardwareProfile.gpuFamily)")
-        print("  GPU/CPU Threshold: \(tolerances.gpuCpuThreshold) samples")
-        print("  Numerical Epsilon: \(tolerances.epsilon)")
-        print("  FFT Test Accuracy: \(tolerances.fftAccuracy)")
+        deviceLogger.info("""
+            Metal Audio Device: \(self.name)
+              Unified Memory: \(self.hasUnifiedMemory)
+              Max Threads/Threadgroup: \(self.maxThreadsPerThreadgroup)
+              Max Buffer Length: \(self.device.maxBufferLength / 1024 / 1024) MB
+              Recommended Memory: \(self.device.recommendedMaxWorkingSetSize / 1024 / 1024) MB
+              GPU Family: \(self.hardwareProfile.gpuFamily.rawValue)
+              GPU/CPU Threshold: \(self.tolerances.gpuCpuThreshold) samples
+              Numerical Epsilon: \(self.tolerances.epsilon)
+              FFT Test Accuracy: \(self.tolerances.fftAccuracy)
+            """)
     }
 }
 

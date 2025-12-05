@@ -23,12 +23,12 @@ final class HardwareProfileTests: XCTestCase {
 
         // Should detect some valid family on any supported device
         XCTAssertNotEqual(profile.gpuFamily, .unknown,
-            "GPU family should be detected. Device: \(profile.deviceName)")
+                          "GPU family should be detected. Device: \(profile.deviceName)")
 
         // Apple Silicon should have unified memory
         if profile.gpuFamily >= .apple7 && profile.gpuFamily.rawValue < 100 {
             XCTAssertTrue(profile.hasUnifiedMemory,
-                "Apple Silicon (Apple 7+) should have unified memory")
+                          "Apple Silicon (Apple 7+) should have unified memory")
         }
     }
 
@@ -38,7 +38,7 @@ final class HardwareProfileTests: XCTestCase {
         // Bandwidth should be positive and reasonable
         XCTAssertGreaterThan(profile.estimatedMemoryBandwidthGBps, 0)
         XCTAssertLessThan(profile.estimatedMemoryBandwidthGBps, 2000,
-            "Bandwidth estimate seems unreasonably high")
+                          "Bandwidth estimate seems unreasonably high")
     }
 }
 
@@ -236,7 +236,7 @@ final class HardwareProfileDescriptionTests: XCTestCase {
         let description = profile.description
 
         XCTAssertTrue(description.contains(profile.deviceName),
-            "Description should contain device name")
+                      "Description should contain device name")
     }
 
     func testDescriptionContainsGPUFamily() {
@@ -244,7 +244,7 @@ final class HardwareProfileDescriptionTests: XCTestCase {
         let description = profile.description
 
         XCTAssertTrue(description.contains("GPU Family"),
-            "Description should mention GPU Family")
+                      "Description should mention GPU Family")
     }
 
     func testDescriptionContainsUnifiedMemory() {
@@ -252,7 +252,7 @@ final class HardwareProfileDescriptionTests: XCTestCase {
         let description = profile.description
 
         XCTAssertTrue(description.contains("Unified Memory"),
-            "Description should mention unified memory status")
+                      "Description should mention unified memory status")
     }
 
     func testDescriptionContainsBandwidth() {
@@ -260,7 +260,7 @@ final class HardwareProfileDescriptionTests: XCTestCase {
         let description = profile.description
 
         XCTAssertTrue(description.contains("Bandwidth"),
-            "Description should mention bandwidth estimate")
+                      "Description should mention bandwidth estimate")
     }
 
     func testDescriptionContainsThreshold() {
@@ -268,7 +268,7 @@ final class HardwareProfileDescriptionTests: XCTestCase {
         let description = profile.description
 
         XCTAssertTrue(description.contains("Threshold"),
-            "Description should mention GPU/CPU threshold")
+                      "Description should mention GPU/CPU threshold")
     }
 }
 
@@ -281,7 +281,7 @@ final class ToleranceConfigurationDescriptionTests: XCTestCase {
         let description = config.description
 
         XCTAssertTrue(description.contains("Epsilon"),
-            "Description should mention epsilon")
+                      "Description should mention epsilon")
     }
 
     func testDescriptionContainsThreshold() {
@@ -289,7 +289,7 @@ final class ToleranceConfigurationDescriptionTests: XCTestCase {
         let description = config.description
 
         XCTAssertTrue(description.contains("Threshold"),
-            "Description should mention GPU/CPU threshold")
+                      "Description should mention GPU/CPU threshold")
     }
 
     func testDescriptionContainsFFTAccuracy() {
@@ -297,7 +297,7 @@ final class ToleranceConfigurationDescriptionTests: XCTestCase {
         let description = config.description
 
         XCTAssertTrue(description.contains("FFT Accuracy"),
-            "Description should mention FFT accuracy")
+                      "Description should mention FFT accuracy")
     }
 
     func testDescriptionContainsBuffers() {
@@ -305,7 +305,7 @@ final class ToleranceConfigurationDescriptionTests: XCTestCase {
         let description = config.description
 
         XCTAssertTrue(description.contains("In-Flight Buffers"),
-            "Description should mention in-flight buffer count")
+                      "Description should mention in-flight buffer count")
     }
 }
 
@@ -508,7 +508,7 @@ final class HardwareProfileSIMDTests: XCTestCase {
         // SIMD permute is supported on Apple7+
         if profile.gpuFamily >= .apple7 && profile.gpuFamily.rawValue < 100 {
             XCTAssertTrue(profile.supportsSimdPermute,
-                "Apple 7+ should support SIMD permute")
+                          "Apple 7+ should support SIMD permute")
         }
     }
 
@@ -518,7 +518,7 @@ final class HardwareProfileSIMDTests: XCTestCase {
         // SIMD reduction is supported on Apple7+
         if profile.gpuFamily >= .apple7 && profile.gpuFamily.rawValue < 100 {
             XCTAssertTrue(profile.supportsSimdReduction,
-                "Apple 7+ should support SIMD reduction")
+                          "Apple 7+ should support SIMD reduction")
         }
     }
 
@@ -527,7 +527,7 @@ final class HardwareProfileSIMDTests: XCTestCase {
 
         // All Apple GPUs use 32-wide SIMD
         XCTAssertEqual(profile.threadExecutionWidth, 32,
-            "Apple GPUs should have 32-wide SIMD")
+                       "Apple GPUs should have 32-wide SIMD")
     }
 }
 

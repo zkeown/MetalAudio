@@ -155,8 +155,7 @@ public final class Conv1D: NNLayer {
                 // Fall back to basic kernel on devices with insufficient threadgroup memory
                 // This should never happen as all Metal devices support at least 16KB
                 #if DEBUG
-                print("[MetalAudio] Warning: Device threadgroup memory (\(maxThreadgroupMemory) bytes) " +  // TODO: Convert to os_log
-                      "insufficient for tiled kernel (\(Self.tiledKernelThreadgroupMemory) bytes). Using basic kernel.")
+                logger.warning("Device threadgroup memory (\(maxThreadgroupMemory) bytes) insufficient for tiled kernel (\(Self.tiledKernelThreadgroupMemory) bytes). Using basic kernel.")
                 #endif
                 self.tiledPipeline = nil
             }

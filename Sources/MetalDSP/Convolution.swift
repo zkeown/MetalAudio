@@ -492,6 +492,40 @@ public final class Convolution {
         inverseFft.inverse(inputReal: workOutputReal, inputImag: workOutputImag, output: &output)
     }
 
+    // MARK: - Partitioned Convolution Helpers
+
+    /// Prepare input block from input array with zero-padding to fftSize
+    private func prepareInputBlock(from input: [Float], inputOffset: Int, into block: inout [Float]) {
+        for i in 0..<blockSize {
+            let inputIdx = inputOffset + i
+            block[i] = inputIdx < input.count ? input[inputIdx] : 0
+        }
+        for i in blockSize..<fftSize {
+            block[i] = 0
+        }
+    }
+
+    /// Perform overlap-add to output buffer using vDSP
+    private func overlapAddToOutput(
+        from workBlock: [Float],
+        to output: inout [Float],
+        at outputOffset: Int,
+        count samplesToWrite: Int
+    ) {
+        workBlock.withUnsafeBufferPointer { workPtr in
+            output.withUnsafeMutableBufferPointer { outPtr in
+                guard let outBase = outPtr.baseAddress,
+                      let workBase = workPtr.baseAddress else { return }
+                vDSP_vadd(
+                    outBase + outputOffset, 1,
+                    workBase, 1,
+                    outBase + outputOffset, 1,
+                    vDSP_Length(samplesToWrite)
+                )
+            }
+        }
+    }
+
     private func processPartitionedConvolution(input: [Float], output: inout [Float]) throws {
         // SAFETY: Set processing flag to detect concurrent reset() calls
         // This class is documented as single-threaded only (see CLAUDE.md thread safety matrix)
@@ -558,18 +592,7 @@ public final class Convolution {
             }
 
             // Prepare input block using pre-allocated buffer (zero-pad to fftSize)
-            // For blocks beyond input length, use all zeros
-            for i in 0..<blockSize {
-                let inputIdx = inputOffset + i
-                if inputIdx < input.count {
-                    workInputBlock[i] = input[inputIdx]
-                } else {
-                    workInputBlock[i] = 0
-                }
-            }
-            for i in blockSize..<fftSize {
-                workInputBlock[i] = 0
-            }
+            prepareInputBlock(from: input, inputOffset: inputOffset, into: &workInputBlock)
 
             // FFT of input block using pre-allocated buffers
             // Use MPSGraph FFT when enabled (faster for large block sizes)
@@ -722,24 +745,10 @@ public final class Convolution {
                 inverseFft.inverse(inputReal: workAccumReal, inputImag: workAccumImag, output: &workOutputBlock)
             }
 
-            // Overlap-add to output using vectorized vDSP_vadd (3-5x faster than scalar loop)
-            // NOTE: outputOffset overflow/bounds already checked at start of loop iteration
-
-            // SAFETY: samplesToWrite is guaranteed <= fullOutputSize - outputOffset,
-            // so outputOffset + samplesToWrite <= fullOutputSize (no overflow possible)
+            // Overlap-add to output using vectorized vDSP_vadd
+            // SAFETY: samplesToWrite guaranteed <= fullOutputSize - outputOffset (checked at loop start)
             let samplesToWrite = min(fftSize, fullOutputSize - outputOffset)
-            workOutputBlock.withUnsafeBufferPointer { workPtr in
-                output.withUnsafeMutableBufferPointer { outPtr in
-                    guard let outBase = outPtr.baseAddress,
-                          let workBase = workPtr.baseAddress else { return }
-                    vDSP_vadd(
-                        outBase + outputOffset, 1,
-                        workBase, 1,
-                        outBase + outputOffset, 1,
-                        vDSP_Length(samplesToWrite)
-                    )
-                }
-            }
+            overlapAddToOutput(from: workOutputBlock, to: &output, at: outputOffset, count: samplesToWrite)
 
             // Update write index atomically
             os_unfair_lock_lock(&stateLock)

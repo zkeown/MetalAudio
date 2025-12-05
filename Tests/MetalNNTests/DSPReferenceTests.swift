@@ -127,6 +127,7 @@ final class STFTReferenceTests: XCTestCase {
         // Find peak bin
         var peakBin = 0
         var peakMag: Float = 0
+        // swiftlint:disable:next for_where
         for bin in 0..<fftSize / 2 {
             if frameMag[bin] > peakMag {
                 peakMag = frameMag[bin]
@@ -199,10 +200,8 @@ final class STFTReferenceTests: XCTestCase {
 
         // Simple correlation: compare signs (should mostly match for sinusoid)
         var signMatches = 0
-        for i in margin..<(margin + minLen) {
-            if (input[i] > 0) == (reconstructed[i] > 0) {
-                signMatches += 1
-            }
+        for i in margin..<(margin + minLen) where (input[i] > 0) == (reconstructed[i] > 0) {
+            signMatches += 1
         }
 
         let matchRatio = Float(signMatches) / Float(minLen)

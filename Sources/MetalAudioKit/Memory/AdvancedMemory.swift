@@ -360,10 +360,8 @@ public final class AudioAllocatorZone {
 
     /// Find the size class index for a given size
     private func sizeClassIndex(for size: Int) -> Int? {
-        for (i, classSize) in Self.sizeClasses.enumerated() {
-            if size <= classSize {
-                return i
-            }
+        for (i, classSize) in Self.sizeClasses.enumerated() where size <= classSize {
+            return i
         }
         return nil  // Too large for our size classes
     }

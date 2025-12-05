@@ -111,4 +111,4 @@ custom_rules:
       - identifier
     message: "Use os_log instead of print() in production code"
     severity: warning
-    included: "Sources/.*\\.swift$"
+    included: "Sources/(?!Benchmark/).*\\.swift$"

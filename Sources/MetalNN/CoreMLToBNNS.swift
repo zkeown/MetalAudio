@@ -257,10 +257,8 @@ public final class CoreMLToBNNS {
 
             // Check for potentially problematic ops
             let concerningOps = ["custom_layer", "dynamic_", "while_loop", "cond"]
-            for op in concerningOps {
-                if milContent.contains(op) {
-                    warnings.append("Model may contain unsupported operation: \(op)")
-                }
+            for op in concerningOps where milContent.contains(op) {
+                warnings.append("Model may contain unsupported operation: \(op)")
             }
         }
 
@@ -424,10 +422,8 @@ public extension CoreMLToBNNS {
 
         // Known incompatible patterns
         let incompatible = ["dynamic_shape", "custom_layer", "while_loop"]
-        for pattern in incompatible {
-            if content.contains(pattern) {
-                return false
-            }
+        for pattern in incompatible where content.contains(pattern) {
+            return false
         }
 
         return true

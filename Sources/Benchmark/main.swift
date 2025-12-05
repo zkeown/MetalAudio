@@ -1065,13 +1065,13 @@ if #available(macOS 15.0, iOS 18.0, *) {
                     print("  Input size: \(inputSize) floats, Output size: \(outputSize) floats")
                 }
                 recordResult(category: "BNNS-Graph", operation: "LSTM 128→256 seq=100",
-                            iterations: 0, totalMs: 0, avgUs: 0, extra: "Error \(errorCode)")
+                             iterations: 0, totalMs: 0, avgUs: 0, extra: "Error \(errorCode)")
             } else if !outputNonZero {
                 if verboseOutput {
                     print("  BNNS Graph: Output unchanged (all zeros) - model may not be running correctly")
                 }
                 recordResult(category: "BNNS-Graph", operation: "LSTM 128→256 seq=100",
-                            iterations: 0, totalMs: 0, avgUs: 0, extra: "Output unchanged")
+                             iterations: 0, totalMs: 0, avgUs: 0, extra: "Output unchanged")
             } else {
                 // Benchmark BNNS Graph
                 let bnnsIterations = adjustedIterations(100)
@@ -1092,8 +1092,8 @@ if #available(macOS 15.0, iOS 18.0, *) {
                 }
 
                 recordResult(category: "BNNS-Graph", operation: "LSTM 128→256 seq=100",
-                            iterations: bnnsIterations, totalMs: bnnsUs * Double(bnnsIterations) / 1000.0,
-                            avgUs: bnnsUs)
+                             iterations: bnnsIterations, totalMs: bnnsUs * Double(bnnsIterations) / 1000.0,
+                             avgUs: bnnsUs)
 
                 // Also run Metal LSTM for direct comparison
                 let metalLstm = try! LSTM(device: device, inputSize: 128, hiddenSize: 256, numLayers: 2)
@@ -1205,8 +1205,8 @@ if #available(macOS 15.0, iOS 18.0, *) {
 
             let throughput = Double(throughputIterations) / (throughputTotalMs / 1000.0)
             recordResult(category: "BNNS-Streaming", operation: "Throughput",
-                        iterations: throughputIterations, totalMs: throughputTotalMs,
-                        avgUs: throughputAvgUs, throughput: throughput)
+                         iterations: throughputIterations, totalMs: throughputTotalMs,
+                         avgUs: throughputAvgUs, throughput: throughput)
 
             if verboseOutput {
                 print("  Throughput: \(String(format: "%.0f", throughput)) pred/sec, \(String(format: "%.1f", throughputAvgUs)) µs/pred")
@@ -1233,11 +1233,11 @@ if #available(macOS 15.0, iOS 18.0, *) {
             let p99 = latencies[Int(Double(latencies.count) * 0.99)]
 
             recordResult(category: "BNNS-Streaming-Latency", operation: "p50",
-                        iterations: latencyIterations, totalMs: 0, avgUs: p50)
+                         iterations: latencyIterations, totalMs: 0, avgUs: p50)
             recordResult(category: "BNNS-Streaming-Latency", operation: "p95",
-                        iterations: latencyIterations, totalMs: 0, avgUs: p95)
+                         iterations: latencyIterations, totalMs: 0, avgUs: p95)
             recordResult(category: "BNNS-Streaming-Latency", operation: "p99",
-                        iterations: latencyIterations, totalMs: 0, avgUs: p99)
+                         iterations: latencyIterations, totalMs: 0, avgUs: p99)
 
             if verboseOutput {
                 print("  Latency: p50=\(String(format: "%.1f", p50)) µs, p95=\(String(format: "%.1f", p95)) µs, p99=\(String(format: "%.1f", p99)) µs")
@@ -1250,8 +1250,8 @@ if #available(macOS 15.0, iOS 18.0, *) {
             }
 
             recordResult(category: "BNNS-Streaming-Reset", operation: "resetState()",
-                        iterations: resetIterations, totalMs: resetTotalMs,
-                        avgUs: resetAvgUs, extra: "NOT real-time safe")
+                         iterations: resetIterations, totalMs: resetTotalMs,
+                         avgUs: resetAvgUs, extra: "NOT real-time safe")
 
             if verboseOutput {
                 print("  resetState(): \(String(format: "%.1f", resetAvgUs)) µs (allocates memory)")
@@ -1294,9 +1294,9 @@ if #available(macOS 15.0, iOS 18.0, *) {
                 let meetsRealTime = maxLatency < budgetUs
 
                 recordResult(category: "BNNS-Streaming-RT", operation: "buf=\(bufSize)@48kHz",
-                            iterations: callbackIterations, totalMs: 0,
-                            avgUs: avgLatency, throughput: utilization,
-                            extra: meetsRealTime ? "PASS" : "FAIL(\(glitches) glitches)")
+                             iterations: callbackIterations, totalMs: 0,
+                             avgUs: avgLatency, throughput: utilization,
+                             extra: meetsRealTime ? "PASS" : "FAIL(\(glitches) glitches)")
 
                 if verboseOutput {
                     let status = meetsRealTime ? "✓" : "✗"
@@ -1341,8 +1341,8 @@ if #available(macOS 15.0, iOS 18.0, *) {
                 let deltaMB = Double(Int64(finalMemory) - Int64(initialMemory)) / 1_000_000.0
 
                 recordResult(category: "BNNS-Streaming-Memory", operation: "Stability 1K",
-                            iterations: stabilityIterations, totalMs: 0,
-                            avgUs: 0, extra: String(format: "%.2f MB delta", deltaMB))
+                             iterations: stabilityIterations, totalMs: 0,
+                             avgUs: 0, extra: String(format: "%.2f MB delta", deltaMB))
 
                 if verboseOutput {
                     print("    Memory delta: \(String(format: "%.2f", deltaMB)) MB")
@@ -1354,20 +1354,20 @@ if #available(macOS 15.0, iOS 18.0, *) {
                 print("  This is expected for models without explicit state handling")
             }
             recordResult(category: "BNNS-Streaming", operation: "Not supported",
-                        iterations: 0, totalMs: 0, avgUs: 0, extra: "Model lacks streaming support")
+                         iterations: 0, totalMs: 0, avgUs: 0, extra: "Model lacks streaming support")
         } catch {
             if verboseOutput {
                 print("  BNNSStreamingInference error: \(error)")
             }
             recordResult(category: "BNNS-Streaming", operation: "Error",
-                        iterations: 0, totalMs: 0, avgUs: 0, extra: "\(error)")
+                         iterations: 0, totalMs: 0, avgUs: 0, extra: "\(error)")
         }
     } else {
         if verboseOutput {
             print("  No test model found at: \(streamingModelPath.path)")
         }
         recordResult(category: "BNNS-Streaming", operation: "No model",
-                    iterations: 0, totalMs: 0, avgUs: 0, extra: "See TestModels/")
+                     iterations: 0, totalMs: 0, avgUs: 0, extra: "See TestModels/")
     }
 } else {
     if verboseOutput {
@@ -1758,7 +1758,7 @@ if memoryMode || memoryOnlyMode {
         tracker.reset()
         let iterations = adjustedIterations(50)
 
-        let (totalDelta, _, warnings) = try! tracker.measureForLeaks(iterations: iterations) {
+        let (totalDelta, _, warnings) = tracker.measureForLeaks(iterations: iterations) {
             let tensor = try! Tensor(device: device, shape: shape)
             _ = tensor.count // Force allocation
         }
@@ -1959,7 +1959,7 @@ if memoryMode || memoryOnlyMode {
     // Warm-up: First copy triggers Metal driver allocations
     try! reusedTensor.copy(from: tensorWriteData)
 
-    let (tensorLeakDelta, _, tensorLeakWarnings) = try! tracker.measureForLeaks(iterations: tensorLeakIterations) {
+    let (tensorLeakDelta, _, tensorLeakWarnings) = tracker.measureForLeaks(iterations: tensorLeakIterations) {
         // Reuse the same tensor and buffer - zero allocations inside loop
         // Simple increment avoids random number generator allocations
         tensorWriteData[0] += 1.0
@@ -1999,7 +1999,7 @@ if memoryMode || memoryOnlyMode {
     var fftOutputReal = [Float](repeating: 0, count: 2048)
     var fftOutputImag = [Float](repeating: 0, count: 2048)
 
-    let (fftLeakDelta, _, fftLeakWarnings) = try! tracker.measureForLeaks(iterations: fftLeakIterations) {
+    let (fftLeakDelta, _, fftLeakWarnings) = tracker.measureForLeaks(iterations: fftLeakIterations) {
         // Reuse the same FFT - only transform operations
         fftInput.withUnsafeBufferPointer { ptr in
             reusedFFT.forward(input: ptr.baseAddress!, outputReal: &fftOutputReal, outputImag: &fftOutputImag)
@@ -2064,7 +2064,7 @@ if memoryMode || memoryOnlyMode {
     }
     reusedLSTM.resetState()
 
-    let (lstmLeakDelta, _, lstmLeakWarnings) = try! tracker.measureForLeaks(iterations: lstmLeakIterations) {
+    let (lstmLeakDelta, _, lstmLeakWarnings) = tracker.measureForLeaks(iterations: lstmLeakIterations) {
         // Reuse the same LSTM - forward pass should be zero-allocation after prewarm
         try! lstmContext.executeSync { encoder in
             try! reusedLSTM.forward(input: lstmInputTensor, output: lstmOutputTensor, encoder: encoder)
@@ -2192,23 +2192,21 @@ func analyzeResults(_ results: [BenchmarkResult]) -> AnalysisReport {
 
     // Check for real-time budget violations
     for result in results {
-        for budget in budgets {
-            if result.avgUs > budget.budgetUs {
-                report.warnings.append(AnalysisReport.Warning(
-                    operation: result.operation,
-                    category: result.category,
-                    avgUs: result.avgUs,
-                    budgetUs: budget.budgetUs,
-                    bufferSize: budget.buffer,
-                    sampleRate: 48_000
-                ))
-                break  // Only flag once per operation
-            }
+        for budget in budgets where result.avgUs > budget.budgetUs {
+            report.warnings.append(AnalysisReport.Warning(
+                operation: result.operation,
+                category: result.category,
+                avgUs: result.avgUs,
+                budgetUs: budget.budgetUs,
+                bufferSize: budget.buffer,
+                sampleRate: 48_000
+            ))
+            break  // Only flag once per operation
         }
     }
 
     // Find top bottlenecks
-    report.topBottlenecks = results.sorted { $0.avgUs > $1.avgUs }.prefix(10).map { $0 }
+    report.topBottlenecks = Array(results.sorted { $0.avgUs > $1.avgUs }.prefix(10))
 
     // Crossover recommendation based on crossover results
     let crossoverData = results.filter { $0.category == "Crossover" }

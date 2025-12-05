@@ -11,7 +11,7 @@ final class ConversionErrorTests: XCTestCase {
         let description = error.errorDescription ?? ""
 
         XCTAssertTrue(description.contains("compiler") || description.contains("Xcode"),
-            "Should mention compiler or Xcode")
+                      "Should mention compiler or Xcode")
     }
 
     func testCompilationFailedDescription() {
@@ -19,9 +19,9 @@ final class ConversionErrorTests: XCTestCase {
         let description = error.errorDescription ?? ""
 
         XCTAssertTrue(description.contains("syntax error at line 42"),
-            "Should include the output message")
+                      "Should include the output message")
         XCTAssertTrue(description.contains("failed") || description.contains("compilation"),
-            "Should describe compilation failure")
+                      "Should describe compilation failure")
     }
 
     func testModelNotFoundDescription() {
@@ -29,9 +29,9 @@ final class ConversionErrorTests: XCTestCase {
         let description = error.errorDescription ?? ""
 
         XCTAssertTrue(description.contains("/path/to/model.mlpackage"),
-            "Should include the path")
+                      "Should include the path")
         XCTAssertTrue(description.contains("not found") || description.contains("Model"),
-            "Should describe model not found")
+                      "Should describe model not found")
     }
 
     func testValidationFailedDescription() {
@@ -39,9 +39,9 @@ final class ConversionErrorTests: XCTestCase {
         let description = error.errorDescription ?? ""
 
         XCTAssertTrue(description.contains("Dynamic shapes") || description.contains("Unsupported op"),
-            "Should include at least one error")
+                      "Should include at least one error")
         XCTAssertTrue(description.contains("validation") || description.contains("failed"),
-            "Should describe validation failure")
+                      "Should describe validation failure")
     }
 
     func testUnsupportedPlatformDescription() {
@@ -49,7 +49,7 @@ final class ConversionErrorTests: XCTestCase {
         let description = error.errorDescription ?? ""
 
         XCTAssertTrue(description.contains("macOS") || description.contains("platform"),
-            "Should mention platform requirement")
+                      "Should mention platform requirement")
     }
 }
 
@@ -174,7 +174,7 @@ final class ValidateForBNNSTests: XCTestCase {
             // Either shapes are captured or there's a warning
             let hasShapeInfo = result.inputShape != nil || result.warnings.contains(where: { $0.contains("shape") })
             XCTAssertTrue(hasShapeInfo || result.inputShape != nil || result.warnings.isEmpty,
-                "Should have shape info or warning about it")
+                          "Should have shape info or warning about it")
         }
     }
 
@@ -369,9 +369,9 @@ final class CompileTests: XCTestCase {
         let compiledPath = try CoreMLToBNNS.compile(mlpackage: mlpackage, outputDir: outputDir)
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: compiledPath.path),
-            "Compiled model should exist at \(compiledPath.path)")
+                      "Compiled model should exist at \(compiledPath.path)")
         XCTAssertTrue(compiledPath.pathExtension == "mlmodelc",
-            "Output should be .mlmodelc")
+                      "Output should be .mlmodelc")
     }
 
     func testCompileCreatesOutputDirectory() throws {
@@ -395,9 +395,9 @@ final class CompileTests: XCTestCase {
         let compiledPath = try CoreMLToBNNS.compile(mlpackage: mlpackage, outputDir: outputDir)
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: outputDir.path),
-            "Output directory should be created")
+                      "Output directory should be created")
         XCTAssertTrue(FileManager.default.fileExists(atPath: compiledPath.path),
-            "Compiled model should exist")
+                      "Compiled model should exist")
     }
 }
 #endif
@@ -605,7 +605,7 @@ final class CoreMLToBNNSIntegrationTests: XCTestCase {
 
             // Model size should be positive
             XCTAssertGreaterThan(validation.modelSizeBytes, 0,
-                "\(modelName) should have positive size")
+                                 "\(modelName) should have positive size")
 
             // If quick check passed, validation should generally work too
             if compatible {

@@ -116,8 +116,7 @@ public enum WeightInitialization {
             // With std=100, max weight ~566 from mean, which may cause training instability
             #if DEBUG
             if std > 10.0 {
-                print("WeightInitialization WARNING: std=\(std) is large. " +  // TODO: Convert to os_log
-                      "Max possible weight: ±\(mean + 5.67 * std). This may cause training instability.")
+                logger.warning("WeightInitialization: std=\(std) is large. Max possible weight: ±\(mean + 5.67 * std). This may cause training instability.")
             }
             #endif
 

@@ -382,7 +382,7 @@ public final class MemoryTracker: @unchecked Sendable {
 
         for i in 0..<iterations {
             // Safety check every 10 iterations to avoid overhead
-            if i % 10 == 0 && i > 0 {
+            if i.isMultiple(of: 10) && i > 0 {
                 let snapshot = MemorySnapshot.capture(device: nil)
                 if snapshot.systemAvailable < abortThresholdBytes {
                     // Memory getting low - abort early to prevent crash

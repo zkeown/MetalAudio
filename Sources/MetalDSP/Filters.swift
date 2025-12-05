@@ -233,80 +233,21 @@ public final class BiquadFilter {
         }
     }
 
-    /// Configure filter with type, frequency, and Q
-    /// - Parameters:
-    ///   - type: Filter type
-    ///   - frequency: Center/cutoff frequency in Hz (must be > 0 and < sampleRate/2)
-    ///   - sampleRate: Sample rate in Hz (must be > 0)
-    ///   - q: Q factor (must be > 0, default: 0.7071 = 1/√2 for Butterworth response)
-    /// - Throws: `FilterError.invalidParameter` if parameters are out of valid range
-    ///
-    /// ## Q Factor Guidelines
-    /// - **Q = 0.7071 (1/√2)**: Butterworth (maximally flat passband, no resonance)
-    /// - **Q = 0.5**: Bessel-like (maximally flat group delay)
-    /// - **Q = 1.0**: Slight resonance at cutoff
-    /// - **Q > 1.0**: Increasing resonance peak at cutoff frequency
-    /// - **Q > 10**: High resonance, may cause instability with float32
-    ///
-    /// - Note: Coefficient calculations are performed in Double precision to maintain
-    ///   accuracy for high-Q filters (Q > 10) and extreme frequency ratios. This prevents
-    ///   filter instability and numerical artifacts that can occur with Float32 precision.
-    public func configure(
+    // MARK: - Coefficient Calculation
+
+    /// Raw biquad coefficients before normalization
+    private struct RawCoefficients {
+        var b0: Double, b1: Double, b2: Double
+        var a0: Double, a1: Double, a2: Double
+    }
+
+    /// Calculate raw biquad coefficients for the given filter type and parameters
+    private func calculateRawCoefficients(
         type: FilterType,
-        frequency: Float,
-        sampleRate: Float,
-        q: Float = 0.7071067811865476
-    ) throws {
-        // Validate sampleRate
-        guard sampleRate > 0 else {
-            throw FilterError.invalidParameter(
-                name: "sampleRate",
-                value: sampleRate,
-                requirement: "must be > 0"
-            )
-        }
-
-        // Validate frequency (must be between 0 and Nyquist)
-        let nyquist = sampleRate / 2.0
-        guard frequency > 0 && frequency < nyquist else {
-            throw FilterError.invalidParameter(
-                name: "frequency",
-                value: frequency,
-                requirement: "must be > 0 and < \(nyquist) Hz (Nyquist)"
-            )
-        }
-
-        // Validate Q factor
-        guard q > 0 else {
-            throw FilterError.invalidParameter(
-                name: "q",
-                value: q,
-                requirement: "must be > 0"
-            )
-        }
-
-        // Check for NaN/Inf in inputs
-        guard !frequency.isNaN && !frequency.isInfinite &&
-              !sampleRate.isNaN && !sampleRate.isInfinite &&
-              !q.isNaN && !q.isInfinite else {
-            throw FilterError.invalidParameter(
-                name: "input",
-                value: 0,
-                requirement: "parameters must not be NaN or Infinite"
-            )
-        }
-
-        // Use Double precision for intermediate calculations to maintain
-        // accuracy for high-Q filters and extreme frequency ratios
-        let freq64 = Double(frequency)
-        let sr64 = Double(sampleRate)
-        let q64 = Double(q)
-
-        let omega = 2.0 * Double.pi * freq64 / sr64
-        let sinOmega = sin(omega)
-        let cosOmega = cos(omega)
-        let alpha = sinOmega / (2.0 * q64)
-
+        cosOmega: Double,
+        sinOmega: Double,
+        alpha: Double
+    ) -> RawCoefficients {
         var b0: Double = 0, b1: Double = 0, b2: Double = 0
         var a0: Double = 0, a1: Double = 0, a2: Double = 0
 
@@ -381,11 +322,96 @@ public final class BiquadFilter {
             a2 = (A + 1.0) - (A - 1.0) * cosOmega - 2.0 * sqrtA * alpha
         }
 
+        return RawCoefficients(b0: b0, b1: b1, b2: b2, a0: a0, a1: a1, a2: a2)
+    }
+
+    /// Configure filter with type, frequency, and Q
+    /// - Parameters:
+    ///   - type: Filter type
+    ///   - frequency: Center/cutoff frequency in Hz (must be > 0 and < sampleRate/2)
+    ///   - sampleRate: Sample rate in Hz (must be > 0)
+    ///   - q: Q factor (must be > 0, default: 0.7071 = 1/√2 for Butterworth response)
+    /// - Throws: `FilterError.invalidParameter` if parameters are out of valid range
+    ///
+    /// ## Q Factor Guidelines
+    /// - **Q = 0.7071 (1/√2)**: Butterworth (maximally flat passband, no resonance)
+    /// - **Q = 0.5**: Bessel-like (maximally flat group delay)
+    /// - **Q = 1.0**: Slight resonance at cutoff
+    /// - **Q > 1.0**: Increasing resonance peak at cutoff frequency
+    /// - **Q > 10**: High resonance, may cause instability with float32
+    ///
+    /// - Note: Coefficient calculations are performed in Double precision to maintain
+    ///   accuracy for high-Q filters (Q > 10) and extreme frequency ratios. This prevents
+    ///   filter instability and numerical artifacts that can occur with Float32 precision.
+    public func configure(
+        type: FilterType,
+        frequency: Float,
+        sampleRate: Float,
+        q: Float = 0.7071067811865476
+    ) throws {
+        // Validate sampleRate
+        guard sampleRate > 0 else {
+            throw FilterError.invalidParameter(
+                name: "sampleRate",
+                value: sampleRate,
+                requirement: "must be > 0"
+            )
+        }
+
+        // Validate frequency (must be between 0 and Nyquist)
+        let nyquist = sampleRate / 2.0
+        guard frequency > 0 && frequency < nyquist else {
+            throw FilterError.invalidParameter(
+                name: "frequency",
+                value: frequency,
+                requirement: "must be > 0 and < \(nyquist) Hz (Nyquist)"
+            )
+        }
+
+        // Validate Q factor
+        guard q > 0 else {
+            throw FilterError.invalidParameter(
+                name: "q",
+                value: q,
+                requirement: "must be > 0"
+            )
+        }
+
+        // Check for NaN/Inf in inputs
+        guard !frequency.isNaN && !frequency.isInfinite &&
+              !sampleRate.isNaN && !sampleRate.isInfinite &&
+              !q.isNaN && !q.isInfinite else {
+            throw FilterError.invalidParameter(
+                name: "input",
+                value: 0,
+                requirement: "parameters must not be NaN or Infinite"
+            )
+        }
+
+        // Use Double precision for intermediate calculations to maintain
+        // accuracy for high-Q filters and extreme frequency ratios
+        let freq64 = Double(frequency)
+        let sr64 = Double(sampleRate)
+        let q64 = Double(q)
+
+        let omega = 2.0 * Double.pi * freq64 / sr64
+        let sinOmega = sin(omega)
+        let cosOmega = cos(omega)
+        let alpha = sinOmega / (2.0 * q64)
+
+        // Calculate raw coefficients using helper method
+        let raw = calculateRawCoefficients(
+            type: type,
+            cosOmega: cosOmega,
+            sinOmega: sinOmega,
+            alpha: alpha
+        )
+
         // Guard against division by near-zero a0 (can cause NaN propagation)
         // This indicates invalid filter parameters - throw instead of silently falling back to pass-through
         // Note: Use Float tolerance because coefficients will be stored as Float32. A value that passes
         // Double tolerance (1e-15) might still produce Inf when divided in Float32 representation.
-        let a0Float = Float(a0)
+        let a0Float = Float(raw.a0)
         let a0Tolerance: Float = 1e-6  // Safe margin for Float32 division
         guard abs(a0Float) > a0Tolerance else {
             throw FilterError.invalidParameter(
@@ -400,11 +426,11 @@ public final class BiquadFilter {
         // This ensures that if ANY validation fails, the filter remains in its previous valid state.
         // Previously, coefficients were stored before stability validation, leaving the filter in
         // an inconsistent state if validation threw (coefficients updated but biquadSetup not).
-        let newB0 = Float(b0 / a0)
-        let newB1 = Float(b1 / a0)
-        let newB2 = Float(b2 / a0)
-        let newA1 = Float(a1 / a0)
-        let newA2 = Float(a2 / a0)
+        let newB0 = Float(raw.b0 / raw.a0)
+        let newB1 = Float(raw.b1 / raw.a0)
+        let newB2 = Float(raw.b2 / raw.a0)
+        let newA1 = Float(raw.a1 / raw.a0)
+        let newA2 = Float(raw.a2 / raw.a0)
 
         // Check for NaN/Inf after normalization (can occur with extreme parameters)
         // This catches cases where Float32 overflow or underflow occurred during conversion

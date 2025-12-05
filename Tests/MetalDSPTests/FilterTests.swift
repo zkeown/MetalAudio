@@ -528,7 +528,7 @@ final class BiquadFilterEdgeCaseTests: XCTestCase {
         // Should produce same results (using looser tolerance for mode comparison)
         for i in 0..<100 {
             XCTAssertEqual(batchOutput[i], singleOutput[i], accuracy: modeConsistencyTolerance,
-                "Batch and single-sample processing should match at index \(i) (tolerance: \(modeConsistencyTolerance))")
+                           "Batch and single-sample processing should match at index \(i) (tolerance: \(modeConsistencyTolerance))")
         }
     }
 
@@ -558,7 +558,7 @@ final class BiquadFilterEdgeCaseTests: XCTestCase {
         // After reset, both methods should produce the same result (using looser tolerance for mode comparison)
         for i in 0..<100 {
             XCTAssertEqual(batchOutput[i], singleOutput[i], accuracy: modeConsistencyTolerance,
-                "After reset, batch and single-sample should match at index \(i) (tolerance: \(modeConsistencyTolerance))")
+                           "After reset, batch and single-sample should match at index \(i) (tolerance: \(modeConsistencyTolerance))")
         }
     }
 
@@ -823,7 +823,7 @@ final class ShelfFilterExtendedTests: XCTestCase {
 
         // Low shelf boost: low freq should be louder than high freq (inverted from normal)
         XCTAssertGreaterThan(lowRMS, highRMS * 1.5,
-            "Low shelf boost should boost low frequencies")
+                             "Low shelf boost should boost low frequencies")
     }
 
     func testLowShelfCut() throws {
@@ -850,7 +850,7 @@ final class ShelfFilterExtendedTests: XCTestCase {
         let outputRMS = sqrt(output.map { $0 * $0 }.reduce(0, +) / Float(numSamples))
 
         XCTAssertLessThan(outputRMS, inputRMS,
-            "Low shelf cut should attenuate low frequencies")
+                          "Low shelf cut should attenuate low frequencies")
     }
 
     func testHighShelfBoost() throws {
@@ -888,7 +888,7 @@ final class ShelfFilterExtendedTests: XCTestCase {
 
         // High shelf boost: high freq should be boosted relative to low
         XCTAssertGreaterThan(highRMS, lowRMS * 1.5,
-            "High shelf boost should boost high frequencies")
+                             "High shelf boost should boost high frequencies")
     }
 
     func testHighShelfCut() throws {
@@ -914,7 +914,7 @@ final class ShelfFilterExtendedTests: XCTestCase {
         let outputRMS = sqrt(output.map { $0 * $0 }.reduce(0, +) / Float(numSamples))
 
         XCTAssertLessThan(outputRMS, inputRMS,
-            "High shelf cut should attenuate high frequencies")
+                          "High shelf cut should attenuate high frequencies")
     }
 }
 
@@ -959,7 +959,7 @@ final class PeakingFilterExtendedTests: XCTestCase {
 
         // Center should be boosted more than far frequencies
         XCTAssertGreaterThan(centerRMS, farRMS,
-            "Peaking boost should boost center frequency")
+                             "Peaking boost should boost center frequency")
     }
 
     func testPeakingCut() throws {
@@ -985,7 +985,7 @@ final class PeakingFilterExtendedTests: XCTestCase {
         let outputRMS = sqrt(output.map { $0 * $0 }.reduce(0, +) / Float(numSamples))
 
         XCTAssertLessThan(outputRMS, inputRMS,
-            "Peaking cut should attenuate center frequency")
+                          "Peaking cut should attenuate center frequency")
     }
 
     func testPeakingUnityGain() throws {
@@ -1012,7 +1012,7 @@ final class PeakingFilterExtendedTests: XCTestCase {
 
         // With unity gain, RMS should be approximately preserved
         XCTAssertEqual(outputRMS, inputRMS, accuracy: inputRMS * 0.01,
-            "Unity gain peaking should preserve amplitude")
+                       "Unity gain peaking should preserve amplitude")
     }
 }
 
@@ -1103,7 +1103,7 @@ final class FilterBankExtendedTests: XCTestCase {
 
         // Just verify both produce valid output
         XCTAssertGreaterThan(seriesRMS + parallelRMS, 0,
-            "Both series and parallel should produce output")
+                             "Both series and parallel should produce output")
     }
 
     func testFilterBankWithDifferentSampleRates() throws {
@@ -1121,7 +1121,7 @@ final class FilterBankExtendedTests: XCTestCase {
             let output = bank.processSeries(input: input)
 
             XCTAssertEqual(output.count, input.count,
-                "Filter bank should work at \(sampleRate) Hz sample rate")
+                           "Filter bank should work at \(sampleRate) Hz sample rate")
         }
     }
 }
@@ -1313,7 +1313,7 @@ final class FilterStabilityTests: XCTestCase {
             )
 
             XCTAssertTrue(filter.isStable,
-                "Filter type \(filterType) should be stable")
+                          "Filter type \(filterType) should be stable")
         }
     }
 
@@ -1367,7 +1367,7 @@ final class FilterNumericalStabilityTests: XCTestCase {
         let secondHalfEnergy = output.suffix(512).map { $0 * $0 }.reduce(0, +)
 
         XCTAssertGreaterThan(firstHalfEnergy, secondHalfEnergy,
-            "Impulse response should decay over time (stable)")
+                             "Impulse response should decay over time (stable)")
     }
 
     func testLongTermStability() throws {
@@ -1446,7 +1446,7 @@ final class GPUFilterTests: XCTestCase {
         // Results should match within tolerance
         for i in 0..<numSamples {
             XCTAssertEqual(gpuOutput[i], cpuOutput[i], accuracy: 1e-4,
-                "GPU and CPU output should match at index \(i)")
+                           "GPU and CPU output should match at index \(i)")
         }
     }
 

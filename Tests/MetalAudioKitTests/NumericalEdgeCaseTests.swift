@@ -199,11 +199,9 @@ final class NumericalEdgeCaseTests: XCTestCase {
 
         // NaN in kernel should propagate to output
         var hasNaN = false
-        for value in output {
-            if value.isNaN {
-                hasNaN = true
-                break
-            }
+        for value in output where value.isNaN {
+            hasNaN = true
+            break
         }
         XCTAssertTrue(hasNaN, "NaN in kernel should propagate to convolution output")
     }
@@ -275,11 +273,9 @@ final class NumericalEdgeCaseTests: XCTestCase {
 
         // NaN in input should propagate (weight * NaN = NaN)
         var hasNaN = false
-        for value in result {
-            if value.isNaN {
-                hasNaN = true
-                break
-            }
+        for value in result where value.isNaN {
+            hasNaN = true
+            break
         }
         XCTAssertTrue(hasNaN, "NaN in linear layer input should propagate to output")
     }
@@ -404,11 +400,9 @@ final class NumericalEdgeCaseTests: XCTestCase {
 
         // NaN should propagate through filter state
         var hasNaN = false
-        for value in output.suffix(50) {  // Check after NaN injection
-            if value.isNaN {
-                hasNaN = true
-                break
-            }
+        for value in output.suffix(50) where value.isNaN {  // Check after NaN injection
+            hasNaN = true
+            break
         }
         XCTAssertTrue(hasNaN, "NaN should propagate through biquad filter")
     }
