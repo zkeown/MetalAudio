@@ -105,12 +105,15 @@ public final class Tensor {
         // - Memory spikes during GPU operations
         // - System services allocating memory
         // - Background app memory reclamation
-        let safeAllocationLimit = Int(Double(availableMemory) * 0.6)
-        guard byteSize <= safeAllocationLimit else {
-            throw MetalAudioError.bufferTooLarge(
-                requested: byteSize,
-                maxAllowed: safeAllocationLimit
-            )
+        // Note: os_proc_available_memory() returns 0 on iOS simulator - skip check in that case
+        if availableMemory > 0 {
+            let safeAllocationLimit = Int(Double(availableMemory) * 0.6)
+            guard byteSize <= safeAllocationLimit else {
+                throw MetalAudioError.bufferTooLarge(
+                    requested: byteSize,
+                    maxAllowed: safeAllocationLimit
+                )
+            }
         }
         #endif
 
