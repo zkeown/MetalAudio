@@ -36,23 +36,34 @@ jobs:
         run: swift build -c release --product Benchmark
 
       - name: Run Benchmarks
+        id: benchmark
         run: |
           # Run with --quick flag in CI to reduce time, use --json for output
-          timeout 180 .build/release/Benchmark --quick --json > benchmark-raw.json 2>&1 || true
+          # Separate stdout (JSON) from stderr (logs/errors)
+          timeout 180 .build/release/Benchmark --quick --json > benchmark-raw.json 2>benchmark-stderr.log || true
+
+          echo "=== Benchmark stderr ==="
+          cat benchmark-stderr.log || true
+
+          echo "=== Raw benchmark output ==="
+          head -100 benchmark-raw.json || true
 
           # Transform to github-action-benchmark format
           # Expected: [{"name": "...", "unit": "µs", "value": 123.45}, ...]
-          if [ -s benchmark-raw.json ]; then
-            jq '[.results | to_entries[] | .value[] | {name: "\(.operation)", unit: "µs", value: .avgUs}]' benchmark-raw.json > benchmark-results.json 2>/dev/null || echo "[]" > benchmark-results.json
+          if [ -s benchmark-raw.json ] && jq empty benchmark-raw.json 2>/dev/null; then
+            jq '[.results | to_entries[] | .value[] | {name: "\(.operation)", unit: "µs", value: .avgUs}]' benchmark-raw.json > benchmark-results.json
+            RESULT_COUNT=$(jq length benchmark-results.json)
+            echo "has_results=$([[ $RESULT_COUNT -gt 0 ]] && echo true || echo false)" >> $GITHUB_OUTPUT
           else
             echo "[]" > benchmark-results.json
+            echo "has_results=false" >> $GITHUB_OUTPUT
           fi
 
-          echo "Benchmark results:"
+          echo "=== Final benchmark results ==="
           cat benchmark-results.json
 
       - name: Store Benchmark Results
-        if: ${{ hashFiles('benchmark-results.json') != '' }}
+        if: steps.benchmark.outputs.has_results == 'true'
         uses: benchmark-action/github-action-benchmark@d48d326b4ca9ba73ca0cd0d59f108f9e02a381c7 # v1.20.4
         with:
           name: MetalAudio Benchmarks
@@ -65,3 +76,7 @@ jobs:
           fail-on-alert: false
           max-items-in-chart: 50
           skip-fetch-gh-pages: ${{ github.event_name == 'pull_request' }}
+
+      - name: Skip notice
+        if: steps.benchmark.outputs.has_results != 'true'
+        run: echo "⚠️ Benchmark skipped - no GPU available or benchmark failed"
