@@ -1,3 +1,5 @@
+// BNNS Graph API requires Swift 6 / Xcode 16 SDK
+#if compiler(>=6.0)
 import XCTest
 @testable import MetalNN
 @testable import MetalAudioKit
@@ -478,3 +480,4 @@ final class ChunkedInferenceModelTests: XCTestCase {
         XCTAssertGreaterThan(totalProcessed, 0, "Should produce output after warmup")
     }
 }
+#endif  // compiler(>=6.0)

@@ -379,6 +379,8 @@ final class BatchNorm1DTests: XCTestCase {
 
 // MARK: - ChunkedInference Window Tests
 
+// ChunkedInference requires Swift 6 / Xcode 16 SDK (BNNS Graph API)
+#if compiler(>=6.0)
 @available(macOS 15.0, iOS 18.0, *)
 final class ChunkedInferenceWindowTests: XCTestCase {
 
@@ -466,6 +468,7 @@ final class ChunkedInferenceWindowTests: XCTestCase {
         XCTAssertEqual(config.hopSize, 1536)
     }
 }
+#endif  // compiler(>=6.0)
 
 // MARK: - Conv1D Additional Tests
 

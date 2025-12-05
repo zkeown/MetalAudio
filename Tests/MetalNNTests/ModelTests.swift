@@ -490,16 +490,20 @@ final class MetalNNConfigTests: XCTestCase {
     }
 
     func testCustomLogWarning() {
-        var capturedMessage: String?
+        // Use a class wrapper to avoid strict concurrency issues with mutable capture
+        final class MessageCapture: @unchecked Sendable {
+            var message: String?
+        }
+        let capture = MessageCapture()
         let originalLogger = MetalNNConfig.logWarning
 
         MetalNNConfig.logWarning = { message in
-            capturedMessage = message
+            capture.message = message
         }
 
         MetalNNConfig.logWarning("Custom test message")
 
-        XCTAssertEqual(capturedMessage, "Custom test message")
+        XCTAssertEqual(capture.message, "Custom test message")
 
         // Restore original
         MetalNNConfig.logWarning = originalLogger
