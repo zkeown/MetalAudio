@@ -102,13 +102,16 @@ jobs:
             ios-${{ matrix.device }}-spm-
 
       - name: List Available Simulators
-        run: xcrun simctl list devices available | grep -E "iPhone|iPad" | head -20
+        run: |
+          xcrun simctl list runtimes
+          echo "---"
+          xcrun simctl list devices available | grep -E "iPhone|iPad" | head -20
 
       - name: Build and Test on iOS Simulator
         run: |
           xcodebuild test \
             -scheme MetalAudio-Package \
-            -destination "platform=iOS Simulator,name=${{ matrix.device }}" \
+            -destination "platform=iOS Simulator,name=${{ matrix.device }},OS=latest" \
             -skipPackagePluginValidation \
             CODE_SIGNING_ALLOWED=NO
 
