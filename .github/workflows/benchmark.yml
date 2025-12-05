@@ -1,0 +1,57 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  benchmark:
+    name: Performance Benchmarks
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@60606e260d2fc5762a71e64e74b2174e8ea3c8bd # v1.6.0
+        with:
+          xcode-version: latest-stable
+
+      - name: Cache Swift packages
+        uses: actions/cache@6849a6489940f00c2f30c0fb92c6274307ccb58a # v4.1.2
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-benchmark-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-benchmark-
+
+      - name: Build Benchmark
+        run: swift build -c release --product Benchmark
+
+      - name: Run Benchmarks
+        run: |
+          timeout 120 .build/release/Benchmark --format json > benchmark-results.json || true
+          cat benchmark-results.json
+
+      - name: Store Benchmark Results
+        uses: benchmark-action/github-action-benchmark@d48d326b4ca9ba73ca0cd0d59f108f9e02a381c7 # v1.20.4
+        with:
+          name: MetalAudio Benchmarks
+          tool: 'customSmallerIsBetter'
+          output-file-path: benchmark-results.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # Store results in gh-pages branch
+          auto-push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # Comment on PRs with comparison
+          comment-on-alert: true
+          alert-threshold: '150%'
+          fail-on-alert: false
+          # Keep history
+          max-items-in-chart: 50

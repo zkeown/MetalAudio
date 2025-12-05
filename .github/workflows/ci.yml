@@ -35,8 +35,32 @@ jobs:
       - name: Build
         run: swift build -c release
 
-      - name: Run Tests
-        run: swift test --parallel
+      - name: Run Tests with Coverage
+        run: swift test --parallel --enable-code-coverage
+
+      - name: Generate Coverage Report
+        run: |
+          # Merge profraw files
+          xcrun llvm-profdata merge -sparse \
+            .build/arm64-apple-macosx/debug/codecov/*.profraw \
+            -o .build/coverage.profdata
+
+          # Generate lcov format for Codecov
+          xcrun llvm-cov export \
+            .build/arm64-apple-macosx/debug/MetalAudioPackageTests.xctest/Contents/MacOS/MetalAudioPackageTests \
+            --instr-profile=.build/coverage.profdata \
+            --format=lcov \
+            --ignore-filename-regex='.*\.build/checkouts.*' \
+            --ignore-filename-regex='.*\.build/.*DerivedSources.*' \
+            --ignore-filename-regex='.*Tests/.*' \
+            > coverage.lcov
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@cb6530fbecd68d5f1ee7a3dcd113450ea8d5d6d4 # v4.6.0
+        with:
+          files: coverage.lcov
+          fail_ci_if_error: false
+          verbose: true
 
   lint:
     name: Lint
