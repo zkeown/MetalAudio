@@ -89,7 +89,7 @@ let package = Package(
         // MARK: - Tests
         .testTarget(
             name: "MetalAudioKitTests",
-            dependencies: ["MetalAudioKit", "MetalDSP"],
+            dependencies: ["MetalAudioKit", "MetalDSP", "MetalNN"],
             path: "Tests/MetalAudioKitTests"
         ),
         .testTarget(
