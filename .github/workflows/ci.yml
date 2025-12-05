@@ -66,7 +66,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - device: "iPhone 16 Pro"
+          - device: "iPhone 17 Pro"
             ios: "26.1"
 
     steps:
