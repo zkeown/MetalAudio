@@ -26,3 +26,12 @@
 # Build configuration
 Package.swift @zkeown
 Package.resolved @zkeown
+
+# Security-sensitive files
+SECURITY.md @zkeown
+
+# Core thread-safety and real-time audio code (critical)
+Sources/MetalAudioKit/Core/AudioDevice.swift @zkeown
+Sources/MetalAudioKit/Core/ComputeContext.swift @zkeown
+Sources/MetalNN/BNNSInference.swift @zkeown
+Sources/MetalNN/BNNSStreamingInference.swift @zkeown

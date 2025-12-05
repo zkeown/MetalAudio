@@ -163,7 +163,14 @@ public final class ComputeContext: @unchecked Sendable {
             throw MetalAudioError.commandEncoderCreationFailed
         }
 
-        let result = try encode(encoder)
+        // Ensure encoder is properly ended even if encode() throws
+        let result: T
+        do {
+            result = try encode(encoder)
+        } catch {
+            encoder.endEncoding()
+            throw error
+        }
         encoder.endEncoding()
 
         // Always use a timeout to prevent indefinite hangs
@@ -236,7 +243,14 @@ public final class ComputeContext: @unchecked Sendable {
             throw MetalAudioError.commandEncoderCreationFailed
         }
 
-        let result = try encode(encoder)
+        // Ensure encoder is properly ended even if encode() throws
+        let result: T
+        do {
+            result = try encode(encoder)
+        } catch {
+            encoder.endEncoding()
+            throw error
+        }
         encoder.endEncoding()
 
         let effectiveTimeout = timeout ?? Self.defaultGPUTimeout
@@ -477,7 +491,14 @@ public final class ComputeContext: @unchecked Sendable {
             throw MetalAudioError.commandEncoderCreationFailed
         }
 
-        let result = try encode(encoder)
+        // Ensure encoder is properly ended even if encode() throws
+        let result: T
+        do {
+            result = try encode(encoder)
+        } catch {
+            encoder.endEncoding()
+            throw error
+        }
         encoder.endEncoding()
 
         // Setup completion handler BEFORE commit

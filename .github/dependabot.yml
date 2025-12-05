@@ -2,7 +2,6 @@
 # https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
 
 version: 2
-
 updates:
   # Swift Package Manager dependencies
   - package-ecosystem: "swift"
@@ -13,10 +12,9 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
+      - "swift"
     commit-message:
       prefix: "chore(deps)"
-    reviewers:
-      - "zkeown"
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
@@ -30,5 +28,11 @@ updates:
       - "github-actions"
     commit-message:
       prefix: "chore(ci)"
-    reviewers:
-      - "zkeown"
+    # Group minor/patch updates to reduce PR noise
+    groups:
+      actions:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
