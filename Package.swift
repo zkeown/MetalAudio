@@ -33,6 +33,11 @@ let package = Package(
             name: "Benchmark",
             targets: ["Benchmark"]
         ),
+        // Real-time audio demo
+        .executable(
+            name: "RealtimeAudioDemo",
+            targets: ["RealtimeAudioDemo"]
+        ),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-atomics.git", from: "1.2.0"),
@@ -106,6 +111,13 @@ let package = Package(
             name: "Benchmark",
             dependencies: ["MetalAudioKit", "MetalDSP", "MetalNN"],
             path: "Sources/Benchmark"
+        ),
+
+        // MARK: - Real-time Audio Demo
+        .executableTarget(
+            name: "RealtimeAudioDemo",
+            dependencies: ["MetalAudioKit", "MetalDSP", "MetalNN"],
+            path: "Examples/RealtimeDemo"
         ),
     ]
 )
