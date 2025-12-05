@@ -51,9 +51,13 @@ jobs:
           # Transform to github-action-benchmark format
           # Expected: [{"name": "...", "unit": "µs", "value": 123.45}, ...]
           if [ -s benchmark-raw.json ] && jq empty benchmark-raw.json 2>/dev/null; then
-            jq '[.results | to_entries[] | .value[] | {name: "\(.operation)", unit: "µs", value: .avgUs}]' benchmark-raw.json > benchmark-results.json
-            RESULT_COUNT=$(jq length benchmark-results.json)
-            echo "has_results=$([[ $RESULT_COUNT -gt 0 ]] && echo true || echo false)" >> $GITHUB_OUTPUT
+            jq '[.results | to_entries[] | .value[] | {name: "\(.operation)", unit: "µs", value: .avgUs}]' benchmark-raw.json > benchmark-results.json 2>/dev/null || echo "[]" > benchmark-results.json
+            RESULT_COUNT=$(jq 'length' benchmark-results.json 2>/dev/null || echo "0")
+            if [ "$RESULT_COUNT" -gt 0 ] 2>/dev/null; then
+              echo "has_results=true" >> $GITHUB_OUTPUT
+            else
+              echo "has_results=false" >> $GITHUB_OUTPUT
+            fi
           else
             echo "[]" > benchmark-results.json
             echo "has_results=false" >> $GITHUB_OUTPUT
