@@ -347,7 +347,7 @@ final class ActivationPropertyTests: XCTestCase {
 
         let output = outputTensor.toArray()
         for i in 1..<output.count {
-            XCTAssertGreaterThanOrEqual(output[i], output[i-1],
+            XCTAssertGreaterThanOrEqual(output[i], output[i - 1],
                 "Sigmoid should be monotonically increasing")
         }
     }
@@ -453,7 +453,7 @@ final class ActivationPropertyTests: XCTestCase {
             [1.0, 2.0, 3.0, 4.0],
             [0.0, 0.0, 0.0, 0.0],
             [-1.0, -2.0, -3.0, -4.0],
-            [100.0, 100.0, 100.0, 100.0],
+            [100.0, 100.0, 100.0, 100.0]
         ]
 
         for input in inputs {
@@ -522,7 +522,7 @@ final class ActivationPropertyTests: XCTestCase {
 
         let output = outputTensor.toArray()
         for i in 1..<output.count {
-            XCTAssertGreaterThan(output[i], output[i-1],
+            XCTAssertGreaterThan(output[i], output[i - 1],
                 "Softmax should preserve input ordering")
         }
     }
@@ -647,7 +647,7 @@ final class GELUPropertyTests: XCTestCase {
 
         // Check that changes between adjacent outputs are bounded
         for i in 1..<output.count {
-            let delta = abs(output[i] - output[i-1])
+            let delta = abs(output[i] - output[i - 1])
             XCTAssertLessThan(delta, 0.02, "GELU should change smoothly")
         }
     }

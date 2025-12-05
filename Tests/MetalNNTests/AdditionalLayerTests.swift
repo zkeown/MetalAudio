@@ -428,7 +428,7 @@ final class ChunkedInferenceWindowTests: XCTestCase {
         let hann = ChunkedInference.WindowType.hann.generate(size: size)
 
         // Symmetric windows should be symmetric
-        for i in 0..<size/2 {
+        for i in 0..<size / 2 {
             XCTAssertEqual(hann[i], hann[size - 1 - i], accuracy: 0.0001)
         }
     }
@@ -554,8 +554,8 @@ final class Conv1DAdditionalTests: XCTestCase {
             device: device,
             inputChannels: 1,
             outputChannels: 1,
-            kernelSize: 1000000,
-            dilation: 1000000,
+            kernelSize: 1_000_000,
+            dilation: 1_000_000,
             inputLength: 10
         ))
     }

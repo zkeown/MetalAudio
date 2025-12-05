@@ -71,7 +71,7 @@ public func runAdvancedMemoryBenchmark(device: AudioDevice) {
 
     // Allocate 10 x 100KB buffers
     for _ in 0..<10 {
-        let buf = try! SpeculativeBuffer(device: device.device, byteSize: 102400)
+        let buf = try! SpeculativeBuffer(device: device.device, byteSize: 102_400)
         specBuffers.append(buf)
     }
 

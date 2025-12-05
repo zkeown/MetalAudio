@@ -1,6 +1,7 @@
 import Foundation
 import AudioToolbox
 import AVFoundation
+import os.log
 
 /// Complete Audio Unit v3 scaffolding with real-time safe patterns
 ///
@@ -30,6 +31,9 @@ import AVFoundation
 /// ## Real-Time Safety
 /// The `process()` method is called from the audio render thread.
 /// Do not allocate memory, take locks, or perform I/O in this method.
+
+private let logger = Logger(subsystem: "MetalAudioKit", category: "AudioUnitScaffold")
+
 open class AudioUnitScaffold: AUAudioUnit {
 
     // MARK: - Types
@@ -143,13 +147,13 @@ open class AudioUnitScaffold: AUAudioUnit {
         self.helper = AudioUnitHelper(config: .init(
             maxFrames: config.maxFrames,
             channelCount: config.channelCount,
-            sampleRate: 48000,
+            sampleRate: 48_000,
             interleaved: false
         ))
 
         // Default format
         guard let format = AVAudioFormat(
-            standardFormatWithSampleRate: 48000,
+            standardFormatWithSampleRate: 48_000,
             channels: AVAudioChannelCount(config.channelCount)
         ) else {
             throw NSError(domain: "AudioUnitScaffold", code: -1,
@@ -214,12 +218,12 @@ open class AudioUnitScaffold: AUAudioUnit {
 
     // MARK: - AUAudioUnit Overrides
 
-    open override var parameterTree: AUParameterTree? {
+    override open var parameterTree: AUParameterTree? {
         get { _parameterTree }
         set { _parameterTree = newValue }
     }
 
-    open override var inputBusses: AUAudioUnitBusArray {
+    override open var inputBusses: AUAudioUnitBusArray {
         if _inputBusArray == nil {
             do {
                 let bus = try AUAudioUnitBus(format: defaultFormat)
@@ -235,7 +239,7 @@ open class AudioUnitScaffold: AUAudioUnit {
         return _inputBusArray!
     }
 
-    open override var outputBusses: AUAudioUnitBusArray {
+    override open var outputBusses: AUAudioUnitBusArray {
         if _outputBusArray == nil {
             do {
                 let bus = try AUAudioUnitBus(format: defaultFormat)
@@ -251,7 +255,7 @@ open class AudioUnitScaffold: AUAudioUnit {
         return _outputBusArray!
     }
 
-    open override var latency: TimeInterval {
+    override open var latency: TimeInterval {
         let sampleRate = outputBusses[0].format.sampleRate
         guard sampleRate > 0 else {
             return 0
@@ -259,16 +263,16 @@ open class AudioUnitScaffold: AUAudioUnit {
         return Double(config.latencySamples) / sampleRate
     }
 
-    open override var shouldBypassEffect: Bool {
+    override open var shouldBypassEffect: Bool {
         get { _bypassed }
         set { _bypassed = newValue }
     }
 
-    open override var canProcessInPlace: Bool { true }
+    override open var canProcessInPlace: Bool { true }
 
-    open override var supportsUserPresets: Bool { true }
+    override open var supportsUserPresets: Bool { true }
 
-    open override var factoryPresets: [AUAudioUnitPreset]? {
+    override open var factoryPresets: [AUAudioUnitPreset]? {
         config.factoryPresets.map { preset in
             let auPreset = AUAudioUnitPreset()
             auPreset.number = preset.number
@@ -277,7 +281,7 @@ open class AudioUnitScaffold: AUAudioUnit {
         }
     }
 
-    open override var fullState: [String: Any]? {
+    override open var fullState: [String: Any]? {
         get {
             var state: [String: Any] = [:]
             os_unfair_lock_lock(&parameterLock)
@@ -313,13 +317,13 @@ open class AudioUnitScaffold: AUAudioUnit {
 
     // MARK: - Render Block
 
-    open override var internalRenderBlock: AUInternalRenderBlock {
+    override open var internalRenderBlock: AUInternalRenderBlock {
         // Capture everything needed for render - no self reference in hot path
         let helper = self.helper
         let channelCount = config.channelCount
         let bypassed = { [weak self] in self?._bypassed ?? false }
         // Note: Parameter getter prepared but currently unused - kept for future per-sample parameter interpolation
-        let _ = { [weak self] (address: AUParameterAddress) -> AUValue in
+        _ = { [weak self] (address: AUParameterAddress) -> AUValue in
             self?.parameterValues[address] ?? 0
         }
         let processFunc = { [weak self] (
@@ -331,15 +335,14 @@ open class AudioUnitScaffold: AUAudioUnit {
             self?.process(input: input, output: output, frameCount: frameCount, channel: channel)
         }
 
-        return { [helper, channelCount, bypassed, processFunc] (
-            actionFlags,
+        return { [helper, channelCount, bypassed, processFunc]
+            _,
             timestamp,
             frameCount,
-            outputBusNumber,
+            _,
             outputData,
-            realtimeEventListHead,
-            pullInputBlock
-        ) -> AUAudioUnitStatus in
+            _,
+            pullInputBlock -> AUAudioUnitStatus in
 
             // Pull input
             var pullFlags: AudioUnitRenderActionFlags = []
@@ -378,7 +381,7 @@ open class AudioUnitScaffold: AUAudioUnit {
                             // The output will remain unchanged (passthrough from input pull).
                             // NEVER crash the host DAW - that loses user work.
                             #if DEBUG
-                            print("AudioUnitScaffold: buffer baseAddress is nil for channel \(channel) - skipping processing")
+                            logger.debug("AudioUnitScaffold: buffer baseAddress is nil for channel \(channel) - skipping processing")
                             #endif
                             return
                         }
@@ -448,7 +451,7 @@ open class AudioUnitScaffold: AUAudioUnit {
 
     // MARK: - Preset Handling
 
-    open override var currentPreset: AUAudioUnitPreset? {
+    override open var currentPreset: AUAudioUnitPreset? {
         didSet {
             guard let preset = currentPreset else { return }
 
@@ -469,18 +472,6 @@ open class AudioUnitScaffold: AUAudioUnit {
                 }
             }
         }
-    }
-
-    // MARK: - Allocation Callbacks
-
-    open override func allocateRenderResources() throws {
-        try super.allocateRenderResources()
-        // Subclasses can override to allocate DSP resources
-    }
-
-    open override func deallocateRenderResources() {
-        super.deallocateRenderResources()
-        // Subclasses can override to deallocate DSP resources
     }
 }
 
@@ -517,13 +508,13 @@ public extension AudioUnitScaffold.ParameterDef {
               min: 0, max: 1, defaultValue: 0.5, unit: .percent)
     }
 
-    /// Create a frequency parameter (20-20000 Hz)
+    /// Create a frequency parameter (20-20_000 Hz)
     static func frequency(
         address: AUParameterAddress = StandardParameterAddress.frequency.rawValue,
         defaultValue: AUValue = 1000
     ) -> Self {
         .init(identifier: "frequency", name: "Frequency", address: address,
-              min: 20, max: 20000, defaultValue: defaultValue, unit: .hertz)
+              min: 20, max: 20_000, defaultValue: defaultValue, unit: .hertz)
     }
 
     /// Create a resonance/Q parameter (0.1-10)

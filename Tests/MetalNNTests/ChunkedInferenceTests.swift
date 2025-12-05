@@ -92,8 +92,8 @@ final class ChunkedInferenceTests: XCTestCase {
         let config = ChunkedInference.Configuration(chunkSize: 2048, overlap: 512)
 
         // Latency at 48kHz
-        let latencySeconds = Double(config.chunkSize) / 48000.0
-        XCTAssertEqual(latencySeconds, 2048.0 / 48000.0, accuracy: 0.0001)
+        let latencySeconds = Double(config.chunkSize) / 48_000.0
+        XCTAssertEqual(latencySeconds, 2048.0 / 48_000.0, accuracy: 0.0001)
     }
 
     // MARK: - Window COLA Tests

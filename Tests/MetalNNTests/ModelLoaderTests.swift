@@ -63,7 +63,7 @@ final class BinaryModelLoaderTests: XCTestCase {
     func testLoadInvalidMagicNumber() throws {
         // Create a file with invalid magic number
         var data = Data()
-        var invalidMagic: UInt32 = 0x12345678
+        var invalidMagic: UInt32 = 0x12_345_678
         withUnsafeBytes(of: &invalidMagic) { data.append(contentsOf: $0) }
         // Pad with more data to avoid "file too small" error
         data.append(Data(repeating: 0, count: 20))
@@ -76,7 +76,7 @@ final class BinaryModelLoaderTests: XCTestCase {
                 XCTFail("Expected invalidMagicNumber error, got \(error)")
                 return
             }
-            XCTAssertEqual(found, 0x12345678)
+            XCTAssertEqual(found, 0x12_345_678)
         }
     }
 
@@ -188,11 +188,11 @@ final class BinaryModelLoaderTests: XCTestCase {
     }
 
     func testHeaderInitialization() {
-        let header = BinaryModelLoader.Header(numTensors: 5, checksum: 12345)
+        let header = BinaryModelLoader.Header(numTensors: 5, checksum: 12_345)
         XCTAssertEqual(header.magic, BinaryModelLoader.Header.magic)
         XCTAssertEqual(header.version, BinaryModelLoader.Header.currentVersion)
         XCTAssertEqual(header.numTensors, 5)
-        XCTAssertEqual(header.checksum, 12345)
+        XCTAssertEqual(header.checksum, 12_345)
         XCTAssertEqual(header.reserved, 0)
     }
 
@@ -440,12 +440,12 @@ final class BinaryModelLoaderTests: XCTestCase {
         // Test error description coverage
         let errors: [ModelLoaderError] = [
             .fileTooSmall(expected: 20, actual: 10),
-            .invalidMagicNumber(found: 0x12345678),
+            .invalidMagicNumber(found: 0x12_345_678),
             .invalidVersion(found: 99, supported: 2),
             .unexpectedEndOfFile(at: 100, needed: 50, fileSize: 120),
             .invalidTensorName,
             .dataSizeMismatch(tensorName: "weights", declared: 100, shapeSize: 50),
-            .checksumMismatch(expected: 12345, actual: 54321)
+            .checksumMismatch(expected: 12_345, actual: 54_321)
         ]
 
         for error in errors {
@@ -861,4 +861,3 @@ final class LegacyModelLoadingTests: XCTestCase {
         XCTAssertEqual(loaded.count, 1)
     }
 }
-

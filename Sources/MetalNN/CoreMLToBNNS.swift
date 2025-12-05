@@ -1,5 +1,6 @@
 import Foundation
 import Accelerate
+import os.log
 
 /// Utilities for converting Core ML models to BNNS-ready format
 ///
@@ -20,12 +21,15 @@ import Accelerate
 ///
 /// // Check for warnings
 /// if !result.validation.warnings.isEmpty {
-///     print("Warnings: \(result.validation.warnings)")
+///     print("Warnings: \(result.validation.warnings)")  // TODO: Convert to os_log
 /// }
 ///
 /// // Use in audio callback
 /// result.inference.predict(input: inputPtr, output: outputPtr)
 /// ```
+
+private let logger = Logger(subsystem: "MetalNN", category: "CoreMLToBNNS")
+
 @available(macOS 15.0, iOS 18.0, *)
 public final class CoreMLToBNNS {
 
@@ -431,32 +435,32 @@ public extension CoreMLToBNNS {
 
     /// Print a human-readable validation report
     static func printValidationReport(_ result: ValidationResult) {
-        print("=== BNNS Compatibility Report ===")
-        print("Compatible: \(result.isCompatible ? "Yes" : "No")")
-        print("Model size: \(result.modelSizeBytes / 1024) KB")
+        logger.debug("=== BNNS Compatibility Report ===")
+        logger.debug("Compatible: \(result.isCompatible ? "Yes" : "No")")
+        logger.debug("Model size: \(result.modelSizeBytes / 1024) KB")
 
         if let workspace = result.estimatedWorkspaceBytes {
-            print("Workspace: \(workspace / 1024) KB")
+            logger.debug("Workspace: \(workspace / 1024) KB")
         }
 
         if let input = result.inputShape {
-            print("Input shape: \(input)")
+            logger.debug("Input shape: \(input)")
         }
         if let output = result.outputShape {
-            print("Output shape: \(output)")
+            logger.debug("Output shape: \(output)")
         }
 
         if !result.errors.isEmpty {
-            print("\nErrors:")
+            logger.debug("\nErrors:")
             for error in result.errors {
-                print("  - \(error)")
+                logger.debug("  - \(error)")
             }
         }
 
         if !result.warnings.isEmpty {
-            print("\nWarnings:")
+            logger.debug("\nWarnings:")
             for warning in result.warnings {
-                print("  - \(warning)")
+                logger.debug("  - \(warning)")
             }
         }
     }

@@ -47,8 +47,8 @@ final class RealtimeThreadSafetyTests: XCTestCase {
 
         // Generate test signals
         for i in 0..<fftSize {
-            input1[i] = sin(2.0 * Float.pi * 440.0 * Float(i) / 44100.0)
-            input2[i] = sin(2.0 * Float.pi * 880.0 * Float(i) / 44100.0)
+            input1[i] = sin(2.0 * Float.pi * 440.0 * Float(i) / 44_100.0)
+            input2[i] = sin(2.0 * Float.pi * 880.0 * Float(i) / 44_100.0)
         }
 
         // Run FFT from two separate threads with separate instances
@@ -114,8 +114,8 @@ final class RealtimeThreadSafetyTests: XCTestCase {
             var signal1 = [Float](repeating: 0, count: fftSize)
             var signal2 = [Float](repeating: 0, count: fftSize)
             for i in 0..<fftSize {
-                signal1[i] = sin(2.0 * Float.pi * Float(440 + b * 100) * Float(i) / 44100.0)
-                signal2[i] = sin(2.0 * Float.pi * Float(880 + b * 100) * Float(i) / 44100.0)
+                signal1[i] = sin(2.0 * Float.pi * Float(440 + b * 100) * Float(i) / 44_100.0)
+                signal2[i] = sin(2.0 * Float.pi * Float(880 + b * 100) * Float(i) / 44_100.0)
             }
             inputs1.append(signal1)
             inputs2.append(signal2)
@@ -282,15 +282,15 @@ final class RealtimeThreadSafetyTests: XCTestCase {
         let filter1 = BiquadFilter()
         let filter2 = BiquadFilter()
 
-        try filter1.configure(type: .lowpass, frequency: 1000, sampleRate: 44100, q: 0.707)
-        try filter2.configure(type: .highpass, frequency: 4000, sampleRate: 44100, q: 0.707)
+        try filter1.configure(type: .lowpass, frequency: 1000, sampleRate: 44_100, q: 0.707)
+        try filter2.configure(type: .highpass, frequency: 4000, sampleRate: 44_100, q: 0.707)
 
         var input1 = [Float](repeating: 0, count: bufferSize)
         var input2 = [Float](repeating: 0, count: bufferSize)
 
         // Generate test signals
         for i in 0..<bufferSize {
-            let t = Float(i) / 44100.0
+            let t = Float(i) / 44_100.0
             input1[i] = sin(2.0 * Float.pi * 440.0 * t)
             input2[i] = sin(2.0 * Float.pi * 8000.0 * t)
         }
@@ -418,7 +418,7 @@ final class RealtimeThreadSafetyTests: XCTestCase {
         var imag = [Float](repeating: 0, count: fftSize)
 
         for i in 0..<fftSize {
-            input[i] = sin(2.0 * Float.pi * 1000.0 * Float(i) / 44100.0)
+            input[i] = sin(2.0 * Float.pi * 1000.0 * Float(i) / 44_100.0)
         }
 
         // Create a high-priority queue simulating audio thread

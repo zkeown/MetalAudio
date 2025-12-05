@@ -1036,7 +1036,7 @@ final class LSTMErrorPathTests: XCTestCase {
         )
 
         // Should throw for memory budget exceeded
-        XCTAssertThrowsError(try lstm.prewarm(sequenceLength: 10000)) { error in
+        XCTAssertThrowsError(try lstm.prewarm(sequenceLength: 10_000)) { error in
             guard let audioError = error as? MetalAudioError else {
                 XCTFail("Expected MetalAudioError")
                 return
@@ -1138,7 +1138,7 @@ final class LSTMForwardValidationTests: XCTestCase {
         )
 
         // Large prewarm should fail due to budget
-        XCTAssertThrowsError(try lstm.prewarm(sequenceLength: 10000)) { error in
+        XCTAssertThrowsError(try lstm.prewarm(sequenceLength: 10_000)) { error in
             XCTAssertTrue(error is MetalAudioError, "Expected MetalAudioError")
         }
     }

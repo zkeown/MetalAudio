@@ -2,6 +2,7 @@ import Foundation
 import Accelerate
 import MetalAudioKit
 import QuartzCore
+import os.log
 
 /// Thread-safe async inference queue for offloading ML from audio thread
 ///
@@ -35,6 +36,9 @@ import QuartzCore
 ///     self.processOutput(output, count: count)
 /// }
 /// ```
+
+private let logger = Logger(subsystem: "MetalNN", category: "InferenceQueue")
+
 @available(macOS 15.0, iOS 18.0, *)
 public final class InferenceQueue {
 
@@ -324,7 +328,7 @@ public final class InferenceQueue {
                 // SAFETY: Must still call completion handler with empty result to avoid hanging caller
                 guard !item.input.isEmpty && outputCount > 0 else {
                     #if DEBUG
-                    print("InferenceQueue: Skipping inference for empty input or zero output count")
+                    logger.debug("InferenceQueue: Skipping inference for empty input or zero output count")
                     #endif
                     // Track failure
                     os_unfair_lock_lock(&self.statsLock)

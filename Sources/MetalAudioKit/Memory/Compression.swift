@@ -1,5 +1,6 @@
 import Foundation
 import Compression
+import os.log
 
 // MARK: - LZ4 Compression for Cold Weights
 
@@ -28,7 +29,7 @@ import Compression
 ///
 /// // Compress when going cold
 /// let saved = weights.compress()
-/// print("Saved \(saved / 1024)KB")
+/// print("Saved \(saved / 1024)KB")  // TODO: Convert to os_log
 ///
 /// // Access automatically decompresses
 /// weights.withData { ptr in
@@ -38,6 +39,9 @@ import Compression
 /// // Re-compress when done
 /// weights.compress()
 /// ```
+
+private let logger = Logger(subsystem: "MetalAudioKit", category: "Compression")
+
 public final class CompressedTensor {
 
     /// Original data size in bytes

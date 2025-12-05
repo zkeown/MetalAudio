@@ -29,13 +29,13 @@ final class AudioUnitScaffoldTests: XCTestCase {
             name: "Frequency",
             address: 10,
             min: 20,
-            max: 20000,
+            max: 20_000,
             defaultValue: 1000,
             unit: .hertz
         )
 
         XCTAssertEqual(param.min, 20)
-        XCTAssertEqual(param.max, 20000)
+        XCTAssertEqual(param.max, 20_000)
         XCTAssertEqual(param.defaultValue, 1000)
         XCTAssertEqual(param.unit, .hertz)
     }
@@ -67,7 +67,7 @@ final class AudioUnitScaffoldTests: XCTestCase {
 
         XCTAssertEqual(freq.identifier, "frequency")
         XCTAssertEqual(freq.min, 20)
-        XCTAssertEqual(freq.max, 20000)
+        XCTAssertEqual(freq.max, 20_000)
         XCTAssertEqual(freq.defaultValue, 500)
         XCTAssertEqual(freq.unit, .hertz)
     }
@@ -149,8 +149,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
     func testAudioUnitCreation() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x74657374,  // "test"
-            componentManufacturer: 0x64656D6F,  // "demo"
+            componentSubType: 0x74_657_374,  // "test"
+            componentManufacturer: 0x64_656D6F,  // "demo"
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -171,8 +171,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
     func testParameterTreeCreation() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x74657374,
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x74_657_374,
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -206,8 +206,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
     func testParameterAccess() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x74657374,
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x74_657_374,
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -239,8 +239,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
     func testBypass() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x74657374,
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x74_657_374,
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -259,8 +259,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
     func testLatency() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x74657374,
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x74_657_374,
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -279,8 +279,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
     func testCanProcessInPlace() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x74657374,
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x74_657_374,
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -296,8 +296,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
     func testSupportsUserPresets() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x74657374,
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x74_657_374,
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -335,8 +335,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
 
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x6761696E,  // "gain"
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x6_761_696E,  // "gain"
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -365,8 +365,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
     func testInputBusses() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x62757331,  // "bus1"
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x62_757_331,  // "bus1"
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -385,8 +385,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
     func testOutputBusses() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x62757332,  // "bus2"
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x62_757_332,  // "bus2"
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -399,14 +399,14 @@ final class AudioUnitScaffoldTests: XCTestCase {
         let outputBusses = audioUnit.outputBusses
         XCTAssertEqual(outputBusses.count, 1)
         XCTAssertNotNil(outputBusses[0].format)
-        XCTAssertEqual(outputBusses[0].format.sampleRate, 48000) // Default sample rate
+        XCTAssertEqual(outputBusses[0].format.sampleRate, 48_000) // Default sample rate
     }
 
     func testBussesWithCustomChannelCount() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x62757333,  // "bus3"
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x62_757_333,  // "bus3"
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -426,8 +426,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
     func testFactoryPresetsGeneration() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x70727374,  // "prst"
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x70_727_374,  // "prst"
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -461,7 +461,7 @@ final class AudioUnitScaffoldTests: XCTestCase {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
             componentSubType: 0x6E6F7072,  // "nopr"
-            componentManufacturer: 0x64656D6F,
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -481,8 +481,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
     func testFullStateGet() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x73746174,  // "stat"
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x73_746_174,  // "stat"
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -515,8 +515,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
     func testFullStateSet() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x73747332,  // "sts2"
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x73_747_332,  // "sts2"
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -547,8 +547,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
     func testFullStateRoundTrip() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x72747270,  // "rtrp"
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x72_747_270,  // "rtrp"
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -589,7 +589,7 @@ final class AudioUnitScaffoldTests: XCTestCase {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
             componentSubType: 0x6E696C73,  // "nils"
-            componentManufacturer: 0x64656D6F,
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -612,8 +612,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
     func testApplyFactoryPreset() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x61707072,  // "appr"
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x61_707_072,  // "appr"
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -654,7 +654,7 @@ final class AudioUnitScaffoldTests: XCTestCase {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
             componentSubType: 0x6E6F6578,  // "noex"
-            componentManufacturer: 0x64656D6F,
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -686,8 +686,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
     func testApplyUserPresetDoesNotApplyFactoryValues() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x75737270,  // "usrp"
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x75_737_270,  // "usrp"
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -722,7 +722,7 @@ final class AudioUnitScaffoldTests: XCTestCase {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
             componentSubType: 0x616C6C63,  // "allc"
-            componentManufacturer: 0x64656D6F,
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -739,8 +739,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
     func testDeallocateRenderResources() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x64616C63,  // "dalc"
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x64_616C63,  // "dalc"
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -759,8 +759,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
     func testAllocateDeallocateCycle() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x6379636C,  // "cycl"
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x6_379_636C,  // "cycl"
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -782,8 +782,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
     func testLatencyCalculation() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x6C617463,  // "latc"
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x6C617_463,  // "latc"
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -794,9 +794,9 @@ final class AudioUnitScaffoldTests: XCTestCase {
             config: config
         )
 
-        // Default sample rate is 48000
-        // Expected latency: 480 / 48000 = 0.01 seconds
-        let expectedLatency = 480.0 / 48000.0
+        // Default sample rate is 48_000
+        // Expected latency: 480 / 48_000 = 0.01 seconds
+        let expectedLatency = 480.0 / 48_000.0
         XCTAssertEqual(audioUnit.latency, expectedLatency, accuracy: 0.0001)
     }
 
@@ -804,7 +804,7 @@ final class AudioUnitScaffoldTests: XCTestCase {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
             componentSubType: 0x7A6C6174,  // "zlat"
-            componentManufacturer: 0x64656D6F,
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -823,7 +823,7 @@ final class AudioUnitScaffoldTests: XCTestCase {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
             componentSubType: 0x726E6472,  // "rndr"
-            componentManufacturer: 0x64656D6F,
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -844,8 +844,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
     func testParameterTreeObserverUpdatesValue() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x6F627376,  // "obsv"
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x6F627_376,  // "obsv"
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -869,8 +869,8 @@ final class AudioUnitScaffoldTests: XCTestCase {
     func testParameterTreeProviderReturnsCurrentValue() throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x70726F76,  // "prov"
-            componentManufacturer: 0x64656D6F,
+            componentSubType: 0x70_726F76,  // "prov"
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -898,7 +898,7 @@ final class AudioUnitScaffoldTests: XCTestCase {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
             componentSubType: 0x6E6F7074,  // "nopt"
-            componentManufacturer: 0x64656D6F,
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -917,7 +917,7 @@ final class AudioUnitScaffoldTests: XCTestCase {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
             componentSubType: 0x756E6B6E,  // "unkn"
-            componentManufacturer: 0x64656D6F,
+            componentManufacturer: 0x64_656D6F,
             componentFlags: 0,
             componentFlagsMask: 0
         )

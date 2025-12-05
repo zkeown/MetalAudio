@@ -76,7 +76,7 @@ public struct HardwareProfile: Sendable {
             case .aOlder:
                 return 8192    // Older iOS, favor CPU
             case .aLegacy:
-                return 16384   // A11, heavily favor CPU due to limited GPU
+                return 16_384   // A11, heavily favor CPU due to limited GPU
             case .intelMac, .unknown:
                 return 4096    // Conservative default
             }

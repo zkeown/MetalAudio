@@ -96,7 +96,7 @@ final class InferenceQueueStatisticsTests: XCTestCase {
         let stats = InferenceQueue.Statistics(
             queueDepth: Int.max / 2,
             averageInferenceTime: 1000.0,
-            maxInferenceTime: 10000.0,
+            maxInferenceTime: 10_000.0,
             totalProcessed: UInt64.max / 2,
             itemsDropped: UInt64.max / 4,
             inferencesFailed: UInt64.max / 8

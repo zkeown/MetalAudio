@@ -22,7 +22,7 @@ import Darwin
 /// ## Example
 /// ```swift
 /// // Open a large audio file
-/// let file = try MappedAudioFile(path: "/path/to/large.raw", sampleRate: 44100)
+/// let file = try MappedAudioFile(path: "/path/to/large.raw", sampleRate: 44_100)
 ///
 /// // Read samples on demand (pages fault in automatically)
 /// let samples = file.readSamples(offset: 0, count: 1024)
@@ -356,7 +356,6 @@ public final class MappedAudioFile {
     }
 }
 
-
 /// Errors for MappedAudioFile
 public enum MappedAudioError: Error, CustomStringConvertible {
     case fileOpenFailed(path: String, errno: Int32)
@@ -390,8 +389,8 @@ public enum MappedAudioError: Error, CustomStringConvertible {
 ///
 /// ## Example
 /// ```swift
-/// let file = try MappedAudioFile(path: "large.raw", sampleRate: 44100)
-/// let ring = StreamingRingBuffer(file: file, bufferSize: 16384)
+/// let file = try MappedAudioFile(path: "large.raw", sampleRate: 44_100)
+/// let ring = StreamingRingBuffer(file: file, bufferSize: 16_384)
 ///
 /// // Start streaming
 /// ring.startStreaming()
@@ -438,7 +437,7 @@ public final class StreamingRingBuffer: @unchecked Sendable {
     /// Prefetch ahead amount (samples)
     public var prefetchAhead: Int = 8192
 
-    public init(file: MappedAudioFile, bufferSize: Int = 32768) {
+    public init(file: MappedAudioFile, bufferSize: Int = 32_768) {
         self.file = file
         self.capacity = bufferSize
         self.buffer = [Float](repeating: 0, count: bufferSize)

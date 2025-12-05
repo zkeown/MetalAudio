@@ -1,9 +1,13 @@
 import Foundation
 import Metal
+import os.log
 
 // MARK: - Memory Budget Protocol
 
 /// Protocol for components that support memory budgets
+
+private let logger = Logger(subsystem: "MetalAudioKit", category: "MemoryManager")
+
 public protocol MemoryBudgetable: AnyObject {
     /// Current memory usage in bytes
     var currentMemoryUsage: Int { get }

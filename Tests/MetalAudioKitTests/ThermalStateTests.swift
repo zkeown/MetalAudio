@@ -95,7 +95,7 @@ final class ThermalStateTests: XCTestCase {
         XCTAssertLessThan(threshold, 1_000_000, "Threshold should be reasonable for audio")
 
         // For M-series Macs, threshold is typically 1024-2048
-        // For iOS A-series, can be higher (up to 16384)
+        // For iOS A-series, can be higher (up to 16_384)
         #if os(macOS)
         XCTAssertLessThanOrEqual(threshold, 8192, "macOS threshold should be relatively low")
         #endif

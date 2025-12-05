@@ -977,13 +977,13 @@ final class TensorFloat16ConversionTests: XCTestCase {
     }
 
     func testFloat16LargeValue() throws {
-        // Float16 max is ~65504
+        // Float16 max is ~65_504
         let tensor = try Tensor(device: device, shape: [2], dataType: .float16)
-        try tensor.copyFromFloat([65000.0, -65000.0])
+        try tensor.copyFromFloat([65_000.0, -65_000.0])
 
         let result = tensor.toFloatArray()
-        XCTAssertEqual(result[0], 65000.0, accuracy: 100)  // Some precision loss expected
-        XCTAssertEqual(result[1], -65000.0, accuracy: 100)
+        XCTAssertEqual(result[0], 65_000.0, accuracy: 100)  // Some precision loss expected
+        XCTAssertEqual(result[1], -65_000.0, accuracy: 100)
     }
 }
 

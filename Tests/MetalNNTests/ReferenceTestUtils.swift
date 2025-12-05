@@ -478,7 +478,7 @@ extension ReferenceTestUtils {
 
     /// Get ConvTranspose1D references
     public static func getConvTranspose1DReferences() throws -> (
-        weights: (weight: [[[Float]]], bias: [Float], inChannels: Int, outChannels: Int, kernelSize: Int),
+        weights: (weight: [[[Float]]], bias: [Float], inChannels: Int, outChannels: Int, kernelSize: Int, stride: Int),
         testCases: [(name: String, input: [[[Float]]], output: [[[Float]]])]
     ) {
         let refs = try loadPyTorchReferences()
@@ -492,6 +492,7 @@ extension ReferenceTestUtils {
         let inChannels = weightsData["in_channels"] as! Int
         let outChannels = weightsData["out_channels"] as! Int
         let kernelSize = weightsData["kernel_size"] as! Int
+        let stride = weightsData["stride"] as? Int ?? 1
 
         var testCases: [(String, [[[Float]]], [[[Float]]])] = []
         for (key, value) in convT {
@@ -502,7 +503,7 @@ extension ReferenceTestUtils {
             }
         }
 
-        return ((weight, bias, inChannels, outChannels, kernelSize), testCases)
+        return ((weight, bias, inChannels, outChannels, kernelSize, stride), testCases)
     }
 
     /// Get Bidirectional LSTM references
@@ -562,13 +563,15 @@ extension ReferenceTestUtils {
         var results: [(String, [Float], (Int, Int, Int), [[Float]])] = []
         for (name, value) in stft {
             guard let caseData = value as? [String: Any],
-                  let configData = caseData["config"] as? [String: Any] else { continue }
+                  let nFFT = caseData["n_fft"] as? Int,
+                  let hopLength = caseData["hop_length"] as? Int,
+                  let inputData = caseData["input"] as? [Double],
+                  let magnitudeData = caseData["magnitude"] as? [[Double]] else { continue }
 
-            let input = (caseData["input"] as! [Double]).map { Float($0) }
-            let nFFT = configData["n_fft"] as! Int
-            let hopLength = configData["hop_length"] as! Int
-            let winLength = configData["win_length"] as! Int
-            let magnitudes = (caseData["magnitudes"] as! [[Double]]).map { $0.map { Float($0) } }
+            let input = inputData.map { Float($0) }
+            // winLength defaults to nFFT if not specified
+            let winLength = (caseData["win_length"] as? Int) ?? nFFT
+            let magnitudes = magnitudeData.map { $0.map { Float($0) } }
 
             results.append((name, input, (nFFT, hopLength, winLength), magnitudes))
         }
@@ -633,6 +636,203 @@ extension ReferenceTestUtils {
             results.append((name, input, avgPoolK2, avgPoolK4))
         }
         return results
+    }
+
+    // MARK: - Multi-layer LSTM References
+
+    /// Get multi-layer LSTM references
+    public static func getMultiLayerLSTMReferences() throws -> [(
+        name: String,
+        config: (inputSize: Int, hiddenSize: Int, numLayers: Int, seqLength: Int),
+        input: [[Float]],
+        output: [[Float]],
+        finalHidden: [[[Float]]],
+        weights: [String: Any]
+    )] {
+        let refs = try loadPyTorchReferences()
+        guard let lstmMulti = refs["lstm_multilayer"] as? [String: Any] else {
+            throw ReferenceError.invalidFormat("Multi-layer LSTM references not found")
+        }
+
+        var results: [(String, (Int, Int, Int, Int), [[Float]], [[Float]], [[[Float]]], [String: Any])] = []
+        for (name, value) in lstmMulti {
+            guard let caseData = value as? [String: Any],
+                  let configData = caseData["config"] as? [String: Any] else { continue }
+
+            let inputSize = configData["input_size"] as! Int
+            let hiddenSize = configData["hidden_size"] as! Int
+            let numLayers = configData["num_layers"] as! Int
+            let seqLength = configData["seq_length"] as! Int
+
+            let input = (caseData["input"] as! [[Double]]).map { $0.map { Float($0) } }
+            let output = (caseData["output"] as! [[Double]]).map { $0.map { Float($0) } }
+            let finalHidden = (caseData["final_hidden"] as! [[[Double]]]).map { $0.map { $0.map { Float($0) } } }
+            let weights = caseData["weights"] as! [String: Any]
+
+            results.append((name, (inputSize, hiddenSize, numLayers, seqLength), input, output, finalHidden, weights))
+        }
+        return results
+    }
+
+    // MARK: - Sequential Model References
+
+    /// MLP model weights and config
+    public struct MLPModelReference {
+        public let layerSizes: [Int]
+        public let useLayerNorm: Bool
+        public let weights: [String: Any]
+        public let testCases: [(batchSize: Int, input: [[Float]], output: [[Float]])]
+    }
+
+    /// ConvNet model weights and config
+    public struct ConvNetModelReference {
+        public let inChannels: Int
+        public let hiddenChannels: Int
+        public let outChannels: Int
+        public let kernelSize: Int
+        public let weights: [String: Any]
+        public let testCases: [(length: Int, input: [[[Float]]], output: [[[Float]]])]
+    }
+
+    /// Get Sequential model references
+    public static func getSequentialModelReferences() throws -> (mlp: MLPModelReference, convnet: ConvNetModelReference) {
+        let refs = try loadPyTorchReferences()
+        guard let seqModels = refs["sequential_models"] as? [String: Any] else {
+            throw ReferenceError.invalidFormat("Sequential model references not found")
+        }
+
+        // Parse MLP
+        let mlpConfig = seqModels["mlp_config"] as! [String: Any]
+        let mlpWeights = seqModels["mlp_weights"] as! [String: Any]
+
+        var mlpTestCases: [(Int, [[Float]], [[Float]])] = []
+        for (key, value) in seqModels {
+            if key.hasPrefix("mlp_batch_"), let caseData = value as? [String: Any] {
+                let batchSize = Int(key.replacingOccurrences(of: "mlp_batch_", with: ""))!
+                let input = (caseData["input"] as! [[Double]]).map { $0.map { Float($0) } }
+                let output = (caseData["output"] as! [[Double]]).map { $0.map { Float($0) } }
+                mlpTestCases.append((batchSize, input, output))
+            }
+        }
+
+        let mlp = MLPModelReference(
+            layerSizes: mlpConfig["layer_sizes"] as! [Int],
+            useLayerNorm: mlpConfig["use_layernorm"] as! Bool,
+            weights: mlpWeights,
+            testCases: mlpTestCases
+        )
+
+        // Parse ConvNet
+        let convConfig = seqModels["convnet_config"] as! [String: Any]
+        let convWeights = seqModels["convnet_weights"] as! [String: Any]
+
+        var convTestCases: [(Int, [[[Float]]], [[[Float]]])] = []
+        for (key, value) in seqModels {
+            if key.hasPrefix("convnet_len_"), let caseData = value as? [String: Any] {
+                let length = Int(key.replacingOccurrences(of: "convnet_len_", with: ""))!
+                let input = (caseData["input"] as! [[[Double]]]).map { $0.map { $0.map { Float($0) } } }
+                let output = (caseData["output"] as! [[[Double]]]).map { $0.map { $0.map { Float($0) } } }
+                convTestCases.append((length, input, output))
+            }
+        }
+
+        let convnet = ConvNetModelReference(
+            inChannels: convConfig["in_channels"] as! Int,
+            hiddenChannels: convConfig["hidden_channels"] as! Int,
+            outChannels: convConfig["out_channels"] as! Int,
+            kernelSize: convConfig["kernel_size"] as! Int,
+            weights: convWeights,
+            testCases: convTestCases
+        )
+
+        return (mlp, convnet)
+    }
+
+    // MARK: - Numerical Precision References
+
+    /// Numerical precision test case
+    public struct PrecisionTestCase {
+        public let name: String
+        public let input: [Float]
+        public let output: [Float]
+    }
+
+    /// Get numerical precision test references
+    public static func getNumericalPrecisionReferences() throws -> [String: PrecisionTestCase] {
+        let refs = try loadPyTorchReferences()
+        guard let precision = refs["numerical_precision"] as? [String: Any] else {
+            throw ReferenceError.invalidFormat("Numerical precision references not found")
+        }
+
+        var results: [String: PrecisionTestCase] = [:]
+
+        // Simple input/output test cases
+        let simpleTestCases = [
+            "denormal_relu", "denormal_sigmoid", "large_tanh", "large_sigmoid",
+            "precision_softmax", "gelu_edge_cases", "layernorm_near_constant",
+            "layernorm_high_variance"
+        ]
+
+        for name in simpleTestCases {
+            guard let caseData = precision[name] as? [String: Any],
+                  let inputData = caseData["input"] as? [Double],
+                  let outputData = caseData["output"] as? [Double] else { continue }
+
+            results[name] = PrecisionTestCase(
+                name: name,
+                input: inputData.map { Float($0) },
+                output: outputData.map { Float($0) }
+            )
+        }
+
+        return results
+    }
+
+    /// Get long accumulation precision test
+    public static func getLongAccumulationReference() throws -> (input: [Float], weight: [Float], output: Float) {
+        let refs = try loadPyTorchReferences()
+        guard let precision = refs["numerical_precision"] as? [String: Any],
+              let accum = precision["long_accumulation"] as? [String: Any] else {
+            throw ReferenceError.invalidFormat("Long accumulation reference not found")
+        }
+
+        let input = (accum["input"] as! [Double]).map { Float($0) }
+        let weight = (accum["weight"] as! [Double]).map { Float($0) }
+        let output = Float(accum["output"] as! Double)
+
+        return (input, weight, output)
+    }
+
+    /// Get matrix multiplication precision reference
+    public static func getMatmulPrecisionReferences() throws -> [(
+        name: String,
+        size: Int,
+        trace: Float,
+        sum: Float,
+        max: Float,
+        min: Float
+    )] {
+        let refs = try loadPyTorchReferences()
+        guard let precision = refs["numerical_precision"] as? [String: Any] else {
+            throw ReferenceError.invalidFormat("Numerical precision references not found")
+        }
+
+        var results: [(String, Int, Float, Float, Float, Float)] = []
+        for (name, value) in precision {
+            if name.hasPrefix("matmul_"), let caseData = value as? [String: Any] {
+                // Parse size from name like "matmul_64x64"
+                let sizeStr = name.replacingOccurrences(of: "matmul_", with: "").split(separator: "x").first!
+                let size = Int(sizeStr)!
+
+                let trace = Float(caseData["result_trace"] as! Double)
+                let sum = Float(caseData["result_sum"] as! Double)
+                let max = Float(caseData["result_max"] as! Double)
+                let min = Float(caseData["result_min"] as! Double)
+
+                results.append((name, size, trace, sum, max, min))
+            }
+        }
+        return results.sorted { $0.1 < $1.1 }
     }
 }
 

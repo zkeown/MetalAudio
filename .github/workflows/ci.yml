@@ -10,9 +10,191 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+
 jobs:
-  build-and-test:
-    name: Build & Test
+  # =============================================================================
+  # Lint
+  # =============================================================================
+  lint:
+    name: SwiftLint
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install SwiftLint
+        run: brew install swiftlint
+
+      - name: Run SwiftLint
+        run: swiftlint lint --strict --reporter github-actions-logging
+
+  # =============================================================================
+  # Build & Test - macOS
+  # =============================================================================
+  test-macos:
+    name: Test macOS ${{ matrix.macos }} (Xcode ${{ matrix.xcode }})
+    runs-on: macos-${{ matrix.macos }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Latest stable
+          - macos: "14"
+            xcode: "15.4"
+          # Newer Xcode on macOS 14
+          - macos: "14"
+            xcode: "16.1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Xcode ${{ matrix.xcode }}
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: ${{ matrix.xcode }}
+
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-${{ matrix.xcode }}-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.xcode }}-spm-
+
+      - name: Build
+        run: swift build -c release
+
+      - name: Run Tests
+        run: swift test --parallel
+
+  # =============================================================================
+  # Build & Test - iOS Simulator
+  # =============================================================================
+  test-ios:
+    name: Test iOS ${{ matrix.ios }} (${{ matrix.device }})
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # iOS 17 (latest)
+          - ios: "17.5"
+            device: "iPhone 15 Pro"
+            xcode: "15.4"
+          # iOS 18 (newest)
+          - ios: "18.1"
+            device: "iPhone 16 Pro"
+            xcode: "16.1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Xcode ${{ matrix.xcode }}
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: ${{ matrix.xcode }}
+
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ios-${{ matrix.ios }}-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ios-${{ matrix.ios }}-spm-
+
+      - name: Build for iOS
+        run: |
+          xcodebuild build-for-testing \
+            -scheme MetalAudio \
+            -destination "platform=iOS Simulator,name=${{ matrix.device }},OS=${{ matrix.ios }}" \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Test on iOS Simulator
+        run: |
+          xcodebuild test-without-building \
+            -scheme MetalAudio \
+            -destination "platform=iOS Simulator,name=${{ matrix.device }},OS=${{ matrix.ios }}" \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO
+
+  # =============================================================================
+  # Code Coverage (runs on main branch only)
+  # =============================================================================
+  coverage:
+    name: Code Coverage
+    runs-on: macos-14
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "15.4"
+
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-coverage-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-coverage-spm-
+
+      - name: Run Tests with Coverage
+        run: swift test --enable-code-coverage --parallel
+
+      - name: Merge Coverage Data
+        run: |
+          xcrun llvm-profdata merge -sparse \
+            .build/arm64-apple-macosx/debug/codecov/*.profraw \
+            -o .build/coverage.profdata
+
+      - name: Generate Coverage Report
+        run: |
+          xcrun llvm-cov report \
+            .build/arm64-apple-macosx/debug/MetalAudioPackageTests.xctest/Contents/MacOS/MetalAudioPackageTests \
+            --instr-profile=.build/coverage.profdata \
+            --ignore-filename-regex='.*\.build/checkouts.*' \
+            --ignore-filename-regex='.*\.build/.*DerivedSources.*' \
+            --ignore-filename-regex='.*Tests/.*' \
+            > coverage.txt
+
+      - name: Display Coverage Summary
+        run: cat coverage.txt
+
+      - name: Generate LCOV Report
+        run: |
+          xcrun llvm-cov export \
+            .build/arm64-apple-macosx/debug/MetalAudioPackageTests.xctest/Contents/MacOS/MetalAudioPackageTests \
+            --instr-profile=.build/coverage.profdata \
+            --ignore-filename-regex='.*\.build/checkouts.*' \
+            --ignore-filename-regex='.*\.build/.*DerivedSources.*' \
+            --ignore-filename-regex='.*Tests/.*' \
+            --format=lcov \
+            > coverage.lcov
+
+      - name: Upload Coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.lcov
+          fail_ci_if_error: false
+          verbose: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  # =============================================================================
+  # Build Check (ensures all targets compile)
+  # =============================================================================
+  build-check:
+    name: Build All Targets
     runs-on: macos-14
 
     steps:
@@ -22,32 +204,21 @@ jobs:
       - name: Setup Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: latest-stable
+          xcode-version: "15.4"
 
       - name: Cache Swift packages
         uses: actions/cache@v4
         with:
           path: .build
-          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved') }}
+          key: ${{ runner.os }}-build-spm-${{ hashFiles('Package.resolved') }}
           restore-keys: |
-            ${{ runner.os }}-spm-
+            ${{ runner.os }}-build-spm-
 
-      - name: Build
+      - name: Build Debug
+        run: swift build
+
+      - name: Build Release
         run: swift build -c release
 
-      - name: Run Tests
-        run: swift test --parallel
-
-  lint:
-    name: Lint
-    runs-on: macos-14
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Check formatting
-        run: |
-          # Placeholder for SwiftLint or swift-format
-          # swiftlint lint --strict
-          echo "Linting placeholder - add SwiftLint config if desired"
+      - name: Build Benchmark
+        run: swift build --target Benchmark -c release

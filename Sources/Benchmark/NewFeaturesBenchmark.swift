@@ -96,7 +96,7 @@ private func benchmarkMappedAudio() {
     let beforeMapping = getProcessMemoryMB()
 
     // Map the file
-    let mapped = try! MappedAudioFile(path: tempPath, sampleRate: 44100)
+    let mapped = try! MappedAudioFile(path: tempPath, sampleRate: 44_100)
 
     // Memory after mapping (should be minimal - no actual load)
     let afterMapping = getProcessMemoryMB()
@@ -107,7 +107,7 @@ private func benchmarkMappedAudio() {
 
     // Read samples - triggers page faults
     let readStart = DispatchTime.now()
-    let readSamples = mapped.readSamples(offset: 0, count: 10000)
+    let readSamples = mapped.readSamples(offset: 0, count: 10_000)
     let readEnd = DispatchTime.now()
     let readTime = Double(readEnd.uptimeNanoseconds - readStart.uptimeNanoseconds) / 1_000_000
 
@@ -116,8 +116,8 @@ private func benchmarkMappedAudio() {
     // Sequential read after prefetch hint
     mapped.advise(.sequential)
     let seqStart = DispatchTime.now()
-    for offset in stride(from: 0, to: 100000, by: 10000) {
-        _ = mapped.readSamples(offset: offset, count: 10000)
+    for offset in stride(from: 0, to: 100_000, by: 10_000) {
+        _ = mapped.readSamples(offset: offset, count: 10_000)
     }
     let seqEnd = DispatchTime.now()
     let seqTime = Double(seqEnd.uptimeNanoseconds - seqStart.uptimeNanoseconds) / 1_000_000
@@ -125,8 +125,8 @@ private func benchmarkMappedAudio() {
     print("  Sequential read (100K samples): \(String(format: "%.2f", seqTime))ms")
 
     // Evict and check residency
-    mapped.evict(offset: 0, count: 100000)
-    let residency = mapped.residencyRatio(offset: 0, count: 100000)
+    mapped.evict(offset: 0, count: 100_000)
+    let residency = mapped.residencyRatio(offset: 0, count: 100_000)
     print("  Residency after evict hint: \(String(format: "%.0f", residency * 100))%")
 
     _ = readSamples.count // silence warning

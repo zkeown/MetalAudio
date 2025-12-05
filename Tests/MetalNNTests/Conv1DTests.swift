@@ -704,6 +704,7 @@ final class ConvTranspose1DTests: XCTestCase {
                 inputChannels: weights.inChannels,
                 outputChannels: weights.outChannels,
                 kernelSize: weights.kernelSize,
+                stride: weights.stride,
                 useBias: true,
                 inputLength: length
             )

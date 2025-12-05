@@ -7,7 +7,4 @@
 
 import MetalAudioKit
 
-@_exported import MetalAudioKit
-
-/// MetalDSP version
 public let metalDSPVersion = "0.1.0"

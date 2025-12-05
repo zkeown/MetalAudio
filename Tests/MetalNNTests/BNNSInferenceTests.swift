@@ -32,7 +32,7 @@ final class BNNSInferenceErrorTests: XCTestCase {
     }
 
     func testWorkspaceAllocationFailedDescription() {
-        let error = BNNSInferenceError.workspaceAllocationFailed(size: 1048576)
+        let error = BNNSInferenceError.workspaceAllocationFailed(size: 1_048_576)
         let description = error.errorDescription ?? ""
 
         XCTAssertTrue(description.contains("1048576"), "Should mention size")
@@ -352,7 +352,7 @@ final class BNNSInferenceFunctionalTests: XCTestCase {
 
         let inference = try BNNSInference(modelPath: path)
 
-        // Create input buffer matching model input shape [1, 100, 128] = 12800 elements
+        // Create input buffer matching model input shape [1, 100, 128] = 12_800 elements
         let inputCount = inference.inputElementCount
         let outputCount = inference.outputElementCount
 
@@ -521,9 +521,9 @@ final class BNNSStreamingInferenceFunctionalTests: XCTestCase {
     func testElementCountsAreCorrect() throws {
         let inference = try createStreamingInference()
 
-        // input [1, 100, 128] = 12800, output [1, 100, 256] = 25600
-        XCTAssertEqual(inference.inputElementCount, 1 * 100 * 128, "Input element count should be 12800")
-        XCTAssertEqual(inference.outputElementCount, 1 * 100 * 256, "Output element count should be 25600")
+        // input [1, 100, 128] = 12_800, output [1, 100, 256] = 25_600
+        XCTAssertEqual(inference.inputElementCount, 1 * 100 * 128, "Input element count should be 12_800")
+        XCTAssertEqual(inference.outputElementCount, 1 * 100 * 256, "Output element count should be 25_600")
     }
 
     // MARK: - 2. Prediction Tests
@@ -849,6 +849,159 @@ final class BNNSStreamingInferenceFunctionalTests: XCTestCase {
     }
 
     // MARK: - 7. Real-Time Safety Tests
+
+    func testResetStateIsRealtimeSafeProperty() throws {
+        let inference = try createStreamingInference()
+
+        // After successful init, resetStateIsRealtimeSafe should be true
+        // (secondary context was pre-allocated)
+        XCTAssertTrue(inference.resetStateIsRealtimeSafe,
+            "resetStateIsRealtimeSafe should be true after successful init")
+    }
+
+    func testResetStateNoAllocationDuringSwap() throws {
+        let inference = try createStreamingInference()
+        let input = [Float](repeating: 0.5, count: inference.inputElementCount)
+
+        // Build up state
+        for _ in 0..<5 {
+            _ = runPrediction(inference, input: input)
+        }
+
+        // Measure reset timing - should be fast (no allocation in hot path)
+        let iterations = 10
+        var resetTimes: [TimeInterval] = []
+
+        for _ in 0..<iterations {
+            // Build state
+            _ = runPrediction(inference, input: input)
+
+            // Wait briefly for background context recreation
+            Thread.sleep(forTimeInterval: 0.02)
+
+            let start = CACurrentMediaTime()
+            try inference.resetState()
+            let elapsed = CACurrentMediaTime() - start
+            resetTimes.append(elapsed)
+        }
+
+        let avgResetTime = resetTimes.reduce(0, +) / Double(iterations)
+        let maxResetTime = resetTimes.max() ?? 0
+
+        // Atomic swap should be very fast (< 1ms)
+        XCTAssertLessThan(avgResetTime, 0.001, "Average reset should be < 1ms (atomic swap)")
+        XCTAssertLessThan(maxResetTime, 0.010, "Max reset should be < 10ms")
+    }
+
+    func testResetStateConcurrentWithPredict() throws {
+        let inference = try createStreamingInference()
+        let input = [Float](repeating: 0.5, count: inference.inputElementCount)
+
+        let iterations = 100
+        let group = DispatchGroup()
+        let predictQueue = DispatchQueue(label: "test.predict", qos: .userInteractive)
+        let resetQueue = DispatchQueue(label: "test.reset", qos: .userInteractive)
+
+        var predictSuccessCount = 0
+        var resetSuccessCount = 0
+        var predictFailCount = 0
+        var resetFailCount = 0
+        let countLock = NSLock()
+
+        // Run concurrent predict and reset operations
+        for i in 0..<iterations {
+            group.enter()
+            predictQueue.async {
+                var inputCopy = input
+                var output = [Float](repeating: 0, count: inference.outputElementCount)
+                inputCopy.withUnsafeMutableBufferPointer { inPtr in
+                    output.withUnsafeMutableBufferPointer { outPtr in
+                        let success = inference.predict(
+                            input: inPtr.baseAddress!,
+                            output: outPtr.baseAddress!
+                        )
+                        countLock.lock()
+                        if success {
+                            predictSuccessCount += 1
+                        } else {
+                            predictFailCount += 1
+                        }
+                        countLock.unlock()
+                    }
+                }
+                group.leave()
+            }
+
+            if i % 10 == 0 {
+                group.enter()
+                resetQueue.async {
+                    // Brief delay to allow background recreation
+                    Thread.sleep(forTimeInterval: 0.01)
+                    do {
+                        try inference.resetState()
+                        countLock.lock()
+                        resetSuccessCount += 1
+                        countLock.unlock()
+                    } catch {
+                        countLock.lock()
+                        resetFailCount += 1
+                        countLock.unlock()
+                    }
+                    group.leave()
+                }
+            }
+        }
+
+        let result = group.wait(timeout: .now() + 10.0)
+        XCTAssertEqual(result, .success, "Concurrent operations should complete without deadlock")
+
+        // Most operations should succeed
+        XCTAssertGreaterThan(predictSuccessCount, iterations / 2, "Most predicts should succeed")
+        XCTAssertEqual(predictFailCount, 0, "No predicts should fail")
+    }
+
+    func testResetStateWaitsForInFlightPredictions() throws {
+        let inference = try createStreamingInference()
+        let input = [Float](repeating: 0.5, count: inference.inputElementCount)
+
+        let group = DispatchGroup()
+        let predictQueue = DispatchQueue(label: "test.predict", qos: .userInteractive)
+
+        // Start a slow prediction (run many times to keep busy)
+        for _ in 0..<50 {
+            group.enter()
+            predictQueue.async {
+                var inputCopy = input
+                var output = [Float](repeating: 0, count: inference.outputElementCount)
+                inputCopy.withUnsafeMutableBufferPointer { inPtr in
+                    output.withUnsafeMutableBufferPointer { outPtr in
+                        _ = inference.predict(input: inPtr.baseAddress!, output: outPtr.baseAddress!)
+                    }
+                }
+                group.leave()
+            }
+        }
+
+        // resetState should wait for predictions to complete
+        let resetExpectation = expectation(description: "Reset completes")
+        DispatchQueue.global().async {
+            do {
+                try inference.resetState()
+                resetExpectation.fulfill()
+            } catch {
+                // Reset might throw if context not yet available, but shouldn't crash
+                resetExpectation.fulfill()
+            }
+        }
+
+        // Wait for both predict and reset
+        _ = group.wait(timeout: .now() + 5.0)
+        wait(for: [resetExpectation], timeout: 5.0)
+
+        // Should not crash and should be able to continue
+        let output = runPrediction(inference, input: input)
+        XCTAssertFalse(output.contains(where: { $0.isNaN }), "Should produce valid output after concurrent reset")
+    }
 
     func testPredictTimingConsistency() throws {
         let inference = try createStreamingInference()

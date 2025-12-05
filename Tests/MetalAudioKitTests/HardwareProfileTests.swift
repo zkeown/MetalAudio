@@ -58,7 +58,7 @@ final class ToleranceConfigurationTests: XCTestCase {
         XCTAssertLessThan(tolerances.epsilon, 1e-5)
 
         XCTAssertGreaterThan(tolerances.gpuCpuThreshold, 256)
-        XCTAssertLessThanOrEqual(tolerances.gpuCpuThreshold, 16384)
+        XCTAssertLessThanOrEqual(tolerances.gpuCpuThreshold, 16_384)
 
         XCTAssertGreaterThan(tolerances.maxInFlightBuffers, 0)
         XCTAssertLessThanOrEqual(tolerances.maxInFlightBuffers, 6)
@@ -577,7 +577,7 @@ final class DeviceTypeAdditionalTests: XCTestCase {
 
     func testALegacyThreshold() {
         let threshold = HardwareProfile.DeviceType.aLegacy.recommendedGpuCpuThreshold
-        XCTAssertEqual(threshold, 16384, "A11 legacy should have highest threshold (heavily favor CPU)")
+        XCTAssertEqual(threshold, 16_384, "A11 legacy should have highest threshold (heavily favor CPU)")
     }
 
     func testALegacyNotHighBandwidth() {
@@ -619,7 +619,7 @@ final class ThreadgroupSizeTests: XCTestCase {
 
     func testOptimal1DThreadgroupSizeLargeWorkload() {
         let profile = makeProfile()
-        let size = profile.optimal1DThreadgroupSize(workloadSize: 100000)
+        let size = profile.optimal1DThreadgroupSize(workloadSize: 100_000)
 
         XCTAssertEqual(size, 256)
     }

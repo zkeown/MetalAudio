@@ -25,7 +25,7 @@ final class AllocationProfilingTests: XCTestCase {
         // Pre-allocate all buffers
         var input = [Float](repeating: 0, count: fftSize)
         for i in 0..<fftSize {
-            input[i] = sin(2.0 * Float.pi * 440.0 * Float(i) / 44100.0)
+            input[i] = sin(2.0 * Float.pi * 440.0 * Float(i) / 44_100.0)
         }
         var real = [Float](repeating: 0, count: fftSize)
         var imag = [Float](repeating: 0, count: fftSize)
@@ -229,7 +229,7 @@ final class AllocationProfilingTests: XCTestCase {
         try filter.configure(
             type: .lowpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
@@ -237,7 +237,7 @@ final class AllocationProfilingTests: XCTestCase {
         let bufferSize = 512
         var input = [Float](repeating: 0, count: bufferSize)
         for i in 0..<bufferSize {
-            input[i] = sin(2.0 * Float.pi * 440.0 * Float(i) / 44100.0)
+            input[i] = sin(2.0 * Float.pi * 440.0 * Float(i) / 44_100.0)
         }
 
         // Warmup
@@ -268,7 +268,7 @@ final class AllocationProfilingTests: XCTestCase {
     // MARK: - Tensor Operations Allocation Tests
 
     func testTensorCopyIsStable() throws {
-        let size = 10000
+        let size = 10_000
         let tensor = try Tensor(device: device, shape: [size])
 
         // Pre-allocate source data
@@ -312,7 +312,7 @@ final class AllocationProfilingTests: XCTestCase {
 
     func testTensorCopyToPreallocatedIsZeroAllocation() throws {
         // copy(to:) with pre-allocated buffer should not allocate
-        let size = 10000
+        let size = 10_000
         let tensor = try Tensor(device: device, shape: [size])
         tensor.fill(1.0)
 

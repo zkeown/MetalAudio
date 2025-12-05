@@ -1,5 +1,6 @@
 import Metal
 import Foundation
+import os.log
 
 /// Manages GPU compute execution with proper synchronization for audio callbacks
 ///
@@ -11,6 +12,9 @@ import Foundation
 /// All public methods can be safely called from any thread, including audio render
 /// callbacks. The implementation avoids allocations and blocking operations that
 /// could cause audio dropouts.
+
+private let logger = Logger(subsystem: "MetalAudioKit", category: "ComputeContext")
+
 public final class ComputeContext: @unchecked Sendable {
 
     private let device: AudioDevice
@@ -181,7 +185,7 @@ public final class ComputeContext: @unchecked Sendable {
             // Resources bound to this command buffer remain in use until GPU completes.
             // In extreme cases (GPU hang), the system watchdog will reset the GPU.
             #if DEBUG
-            print("[MetalAudio] Warning: GPU timeout after \(effectiveTimeout)s. Command buffer still executing on GPU.")
+            logger.debug("[MetalAudio] Warning: GPU timeout after \(effectiveTimeout)s. Command buffer still executing on GPU.")
             #endif
             throw MetalAudioError.gpuTimeout(effectiveTimeout)
         }
@@ -216,7 +220,7 @@ public final class ComputeContext: @unchecked Sendable {
     ///     // encode commands
     ///     return someResult
     /// }
-    /// print("GPU: \(timing.gpuMicroseconds)µs, Wall: \(timing.wallMicroseconds)µs")
+    /// print("GPU: \(timing.gpuMicroseconds)µs, Wall: \(timing.wallMicroseconds)µs")  // TODO: Convert to os_log
     /// ```
     public func executeSyncWithTiming<T>(
         timeout: TimeInterval? = nil,
@@ -255,7 +259,7 @@ public final class ComputeContext: @unchecked Sendable {
 
         if waitResult == .timedOut {
             #if DEBUG
-            print("[MetalAudio] Warning: GPU timeout after \(effectiveTimeout)s. Command buffer still executing on GPU.")
+            logger.debug("[MetalAudio] Warning: GPU timeout after \(effectiveTimeout)s. Command buffer still executing on GPU.")
             #endif
             throw MetalAudioError.gpuTimeout(effectiveTimeout)
         }
@@ -291,7 +295,7 @@ public final class ComputeContext: @unchecked Sendable {
         timeout: TimeInterval? = nil,
         _ encode: (MTLComputeCommandEncoder) throws -> Void
     ) throws -> GPUTimingInfo {
-        let (_, timing) = try executeSyncWithTiming(timeout: timeout) { encoder -> Void in
+        let (_, timing) = try executeSyncWithTiming(timeout: timeout) { encoder in
             try encode(encoder)
             return ()
         }

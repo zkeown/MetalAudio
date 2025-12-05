@@ -387,7 +387,7 @@ final class WeightInitializationTests: XCTestCase {
     }
 
     func testNormalInitialization() throws {
-        let tensor = try Tensor(device: device, shape: [10000])
+        let tensor = try Tensor(device: device, shape: [10_000])
         let targetMean: Float = 0.0
         let targetStd: Float = 1.0
         try WeightInitialization.normal(mean: targetMean, std: targetStd).apply(to: tensor, fanIn: 10, fanOut: 10)
@@ -1376,7 +1376,7 @@ final class WeightInitializationEdgeCaseTests: XCTestCase {
     }
 
     func testNormalWithNonStandardParameters() throws {
-        let tensor = try Tensor(device: device, shape: [10000])
+        let tensor = try Tensor(device: device, shape: [10_000])
         let targetMean: Float = 5.0
         let targetStd: Float = 2.0
         try WeightInitialization.normal(mean: targetMean, std: targetStd).apply(to: tensor, fanIn: 10, fanOut: 10)
@@ -1392,7 +1392,7 @@ final class WeightInitializationEdgeCaseTests: XCTestCase {
     }
 
     func testZerosLargeArray() throws {
-        let tensor = try Tensor(device: device, shape: [10000])
+        let tensor = try Tensor(device: device, shape: [10_000])
         try WeightInitialization.zeros.apply(to: tensor, fanIn: 100, fanOut: 100)
 
         let result = tensor.toArray()
@@ -1403,7 +1403,7 @@ final class WeightInitializationEdgeCaseTests: XCTestCase {
     }
 
     func testOnesLargeArray() throws {
-        let tensor = try Tensor(device: device, shape: [10000])
+        let tensor = try Tensor(device: device, shape: [10_000])
         try WeightInitialization.ones.apply(to: tensor, fanIn: 100, fanOut: 100)
 
         let result = tensor.toArray()
@@ -2043,4 +2043,3 @@ final class LinearCPUThresholdTests: XCTestCase {
         XCTAssertEqual(result.count, 4)
     }
 }
-

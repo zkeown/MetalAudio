@@ -11,29 +11,74 @@ Audio Units require strict real-time constraints:
 
 MetalAudio is designed with these constraints in mind, particularly:
 - `BNNSInference` - Zero-allocation inference after initialization
+- `BNNSStreamingInference.resetState()` - Real-time safe state reset
 - `FFT` - Pre-allocated buffers for real-time use
 - `AudioBufferPool` - Lock-free buffer management
 
-## Project Structure
+## Source Files
+
+This directory contains complete, runnable source files:
 
 ```
 AudioUnitExample/
-├── AudioUnitExample/           # Main app (host for testing)
-│   └── ContentView.swift
-├── AudioUnitExtension/         # Audio Unit extension
-│   ├── AudioUnitExtension.swift       # Entry point
-│   ├── AudioUnitDSPKernel.swift       # C++ DSP kernel
-│   ├── AudioUnitAudioUnit.swift       # Swift AU implementation
-│   └── ParameterSpecBase.swift        # Parameter handling
-└── Shared/
-    └── AudioProcessing.swift   # Shared processing code
+├── HostApp/                              # Host app for testing
+│   ├── AudioUnitHostApp.swift            # App entry point
+│   ├── ContentView.swift                 # SwiftUI interface
+│   └── Info.plist                        # App configuration
+├── AudioUnitExtension/                   # Audio Unit extension
+│   ├── NeuralEffectAudioUnit.swift       # AU implementation
+│   ├── AudioUnitExtensionAudioComponentFactory.swift  # Factory
+│   └── Info.plist                        # AU component description
+└── README.md
 ```
 
-## Quick Start
+## Creating the Xcode Project
 
-1. Create a new Audio Unit Extension target in Xcode
-2. Add MetalAudio as a dependency
-3. Copy the example code below into your DSP kernel
+### Step 1: Create a new macOS App project
+
+1. File → New → Project → macOS → App
+2. Product Name: `AudioUnitHost`
+3. Interface: SwiftUI
+4. Language: Swift
+5. Bundle Identifier: `com.example.AudioUnitHost`
+
+### Step 2: Add the Audio Unit Extension target
+
+1. File → New → Target → Audio Unit Extension
+2. Product Name: `NeuralEffect`
+3. **Uncheck** "Include UI Extension"
+4. Bundle Identifier: `com.example.AudioUnitHost.NeuralEffect`
+
+### Step 3: Copy source files
+
+**For the Host App target:**
+- Replace the generated App.swift with `HostApp/AudioUnitHostApp.swift`
+- Replace ContentView.swift with `HostApp/ContentView.swift`
+- Use `HostApp/Info.plist` for configuration
+
+**For the Audio Unit Extension target:**
+- Add `AudioUnitExtension/NeuralEffectAudioUnit.swift`
+- Replace the factory with `AudioUnitExtension/AudioUnitExtensionAudioComponentFactory.swift`
+- Replace Info.plist with `AudioUnitExtension/Info.plist`
+
+### Step 4: Add MetalAudio dependency
+
+1. File → Add Package Dependencies
+2. Add the MetalAudio package URL or local path
+3. Add `MetalAudioKit` and `MetalNN` to the extension target
+
+### Step 5: Configure signing
+
+- Both targets need valid signing identities
+- Enable "App Sandbox" capability for both targets
+- Add "Audio Input" entitlement for the host app
+
+### Step 6: Build and run
+
+1. Select the NeuralEffect extension scheme and build it first
+2. Then select the AudioUnitHost scheme and run
+3. Click "Load AU" to load the Neural Effect
+4. Use microphone input or AU Lab for testing
 
 ## Example: Neural Network Effect
 

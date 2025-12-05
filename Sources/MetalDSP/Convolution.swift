@@ -252,7 +252,7 @@ public final class Convolution {
         guard blockSize > 0 else {
             throw MetalAudioError.invalidConfiguration("Block size must be positive, got \(blockSize)")
         }
-        guard kernel.count > 0 else {
+        guard !kernel.isEmpty else {
             throw MetalAudioError.invalidConfiguration("Kernel must not be empty for partitioned convolution")
         }
 
@@ -377,7 +377,7 @@ public final class Convolution {
         switch mode {
         case .fft:
             return expectedInputSize
-        case .direct, .partitioned(_, _):
+        case .direct, .partitioned:
             return 0  // No practical limit
         }
     }
@@ -415,7 +415,7 @@ public final class Convolution {
         // Zero-pad input to prevent reading garbage beyond the buffer.
         //
         // SAFETY: Check for integer overflow in padding calculation
-        guard kernel.count > 0 else { return }
+        guard !kernel.isEmpty else { return }
         let (kernelMinusOne, overflow1) = kernel.count.subtractingReportingOverflow(1)
         let (paddingNeeded, overflow2) = kernelMinusOne.multipliedReportingOverflow(by: 2)
         guard !overflow1 && !overflow2 else {

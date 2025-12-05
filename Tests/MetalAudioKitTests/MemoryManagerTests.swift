@@ -280,14 +280,14 @@ final class AudioBufferPoolBudgetTests: XCTestCase {
             poolSize: 4
         )
 
-        // 4 buffers * 1024 samples * 1 channel * 4 bytes = 16384
-        XCTAssertEqual(pool.currentMemoryUsage, 16384)
+        // 4 buffers * 1024 samples * 1 channel * 4 bytes = 16_384
+        XCTAssertEqual(pool.currentMemoryUsage, 16_384)
 
         // Acquire one
         _ = try pool.acquire()
 
-        // 3 available * 4096 = 12288
-        XCTAssertEqual(pool.currentMemoryUsage, 12288)
+        // 3 available * 4096 = 12_288
+        XCTAssertEqual(pool.currentMemoryUsage, 12_288)
     }
 
     func testSetMemoryBudgetShrinks() throws {
@@ -303,7 +303,7 @@ final class AudioBufferPoolBudgetTests: XCTestCase {
         pool.setMemoryBudget(4 * 1024 * 4)  // 16KB
 
         XCTAssertEqual(pool.availableCount, 4)
-        XCTAssertEqual(pool.memoryBudget, 16384)
+        XCTAssertEqual(pool.memoryBudget, 16_384)
     }
 
     func testRemoveMemoryBudget() throws {
@@ -366,7 +366,7 @@ final class MemoryManagerAdditionalTests: XCTestCase {
         manager.register(pool)
 
         // Set budget lower than current usage
-        // Pool uses: 8 * 1024 * 4 = 32768 bytes
+        // Pool uses: 8 * 1024 * 4 = 32_768 bytes
         manager.globalMemoryBudget = 1000  // Much less than pool uses
 
         XCTAssertTrue(manager.isOverBudget, "Should be over budget when usage exceeds limit")
@@ -521,7 +521,7 @@ final class MemoryManagerAdditionalTests: XCTestCase {
 
         manager.register(pool)
 
-        // Pool starts with 8 buffers, each 4096 bytes = 32768 total
+        // Pool starts with 8 buffers, each 4096 bytes = 32_768 total
         let initialCount = pool.availableCount
         XCTAssertEqual(initialCount, 8)
 

@@ -1,0 +1,77 @@
+name: GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch: # Allow manual trigger
+
+# Sets permissions for GitHub Pages deployment
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Create site structure
+        run: |
+          mkdir -p _site
+
+          # Copy main docs
+          cp README.md _site/index.md
+          cp CHANGELOG.md _site/changelog.md
+          cp CONTRIBUTING.md _site/contributing.md
+          cp CODE_OF_CONDUCT.md _site/code-of-conduct.md
+          cp SECURITY.md _site/security.md
+
+          # Copy detailed documentation
+          mkdir -p _site/docs
+          cp -r docs/* _site/docs/
+
+          # Create simple navigation header for each file
+          for file in _site/*.md _site/docs/*.md; do
+            if [ -f "$file" ]; then
+              # Add navigation links at the top
+              sed -i '1i\[Home](/) | [Architecture](/docs/ARCHITECTURE) | [Performance](/docs/PERFORMANCE_TUNING) | [Troubleshooting](/docs/TROUBLESHOOTING) | [Changelog](/changelog)\n\n---\n' "$file"
+            fi
+          done
+
+      - name: Build with Jekyll
+        uses: actions/jekyll-build-pages@v1
+        with:
+          source: ./_site
+          destination: ./_site_output
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./_site_output
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

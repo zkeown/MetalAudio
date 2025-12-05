@@ -31,7 +31,7 @@ public final class AudioUnitHelper {
         public init(
             maxFrames: Int = 4096,
             channelCount: Int = 2,
-            sampleRate: Double = 48000,
+            sampleRate: Double = 48_000,
             interleaved: Bool = false
         ) {
             self.maxFrames = maxFrames

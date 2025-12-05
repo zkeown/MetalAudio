@@ -123,6 +123,155 @@ final class DropoutTests: XCTestCase {
             XCTAssertEqual(result[i], Float(i) * 0.1, accuracy: 0.001)
         }
     }
+
+    // MARK: - Additional Dropout Property Tests
+
+    func testDropoutCPUOnlyPropertyAccess() {
+        let dropout = Dropout(inputShape: [64], rate: 0.3)
+
+        // CPU-only mode should have pipelineCreationError as nil (no failure, just not created)
+        XCTAssertNil(dropout.pipelineCreationError)
+        XCTAssertFalse(dropout.isGPUAccelerated)
+        XCTAssertEqual(dropout.rate, 0.3)
+    }
+
+    func testDropoutGPUPropertyAccess() throws {
+        let dropout = try Dropout(device: device, inputShape: [128], rate: 0.5)
+
+        XCTAssertNil(dropout.pipelineCreationError)
+        XCTAssertTrue(dropout.isGPUAccelerated)
+        XCTAssertEqual(dropout.rate, 0.5)
+    }
+
+    func testDropout1DShape() throws {
+        let dropout = try Dropout(device: device, inputShape: [256], rate: 0.1)
+
+        XCTAssertEqual(dropout.inputShape, [256])
+        XCTAssertEqual(dropout.outputShape, [256])
+
+        let input = try Tensor(device: device, shape: [256])
+        var data = [Float](repeating: 0, count: 256)
+        for i in 0..<256 { data[i] = Float(i) }
+        try input.copy(from: data)
+
+        let output = try Tensor(device: device, shape: [256])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try dropout.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        for i in 0..<256 {
+            XCTAssertEqual(result[i], Float(i), accuracy: 0.001)
+        }
+    }
+
+    func testDropout2DShape() throws {
+        let dropout = try Dropout(device: device, inputShape: [8, 16], rate: 0.4)
+
+        XCTAssertEqual(dropout.inputShape, [8, 16])
+        XCTAssertEqual(dropout.outputShape, [8, 16])
+    }
+
+    func testDropout4DShape() throws {
+        // Common for batch, channel, height, width
+        let dropout = try Dropout(device: device, inputShape: [2, 3, 4, 5], rate: 0.25)
+
+        XCTAssertEqual(dropout.inputShape, [2, 3, 4, 5])
+        XCTAssertEqual(dropout.outputShape, [2, 3, 4, 5])
+    }
+
+    func testDropoutDifferentRates() throws {
+        // Rate 0.0 - no dropout
+        let dropout0 = try Dropout(device: device, inputShape: [10], rate: 0.0)
+        XCTAssertEqual(dropout0.rate, 0.0)
+
+        // Rate 1.0 - maximum dropout (still passthrough in inference)
+        let dropout1 = try Dropout(device: device, inputShape: [10], rate: 1.0)
+        XCTAssertEqual(dropout1.rate, 1.0)
+
+        // Both should behave identically during inference (passthrough)
+        let input = try Tensor(device: device, shape: [10])
+        try input.copy(from: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+
+        let output0 = try Tensor(device: device, shape: [10])
+        let output1 = try Tensor(device: device, shape: [10])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try dropout0.forward(input: input, output: output0, encoder: encoder)
+        }
+        try context.executeSync { encoder in
+            try dropout1.forward(input: input, output: output1, encoder: encoder)
+        }
+
+        let result0 = output0.toArray()
+        let result1 = output1.toArray()
+
+        for i in 0..<10 {
+            XCTAssertEqual(result0[i], Float(i + 1), accuracy: 0.001)
+            XCTAssertEqual(result1[i], Float(i + 1), accuracy: 0.001)
+        }
+    }
+
+    func testDropoutSmallInput() throws {
+        // Very small input - single element
+        let dropout = try Dropout(device: device, inputShape: [1], rate: 0.5)
+
+        let input = try Tensor(device: device, shape: [1])
+        try input.copy(from: [42.0])
+
+        let output = try Tensor(device: device, shape: [1])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try dropout.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        XCTAssertEqual(result[0], 42.0, accuracy: 0.001)
+    }
+
+    func testDropoutNegativeValues() throws {
+        let dropout = try Dropout(device: device, inputShape: [4], rate: 0.5)
+
+        let input = try Tensor(device: device, shape: [4])
+        try input.copy(from: [-1.0, -2.0, -3.0, -4.0])
+
+        let output = try Tensor(device: device, shape: [4])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try dropout.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        XCTAssertEqual(result[0], -1.0, accuracy: 0.001)
+        XCTAssertEqual(result[1], -2.0, accuracy: 0.001)
+        XCTAssertEqual(result[2], -3.0, accuracy: 0.001)
+        XCTAssertEqual(result[3], -4.0, accuracy: 0.001)
+    }
+
+    func testDropoutSpecialValues() throws {
+        let dropout = try Dropout(device: device, inputShape: [4], rate: 0.5)
+
+        let input = try Tensor(device: device, shape: [4])
+        try input.copy(from: [0.0, -0.0, Float.infinity, -Float.infinity])
+
+        let output = try Tensor(device: device, shape: [4])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try dropout.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        XCTAssertEqual(result[0], 0.0, accuracy: 0.001)
+        XCTAssertEqual(result[1], 0.0, accuracy: 0.001)  // -0.0 becomes 0.0
+        XCTAssertEqual(result[2], Float.infinity)
+        XCTAssertEqual(result[3], -Float.infinity)
+    }
 }
 
 // MARK: - GlobalAvgPool1D Tests
@@ -568,3 +717,197 @@ final class PoolingPyTorchReferenceTests: XCTestCase {
     // Add tests here when AvgPool1D is implemented using ReferenceTestUtils.getAvgPoolReferences()
 }
 
+// MARK: - Pooling Property and Edge Case Tests
+
+final class PoolingPropertyTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    // MARK: - GlobalAvgPool1D Property Tests
+
+    func testGlobalAvgPool1DPropertyAccess() throws {
+        let pool = try GlobalAvgPool1D(device: device, channels: 8, length: 64)
+
+        // Verify all properties are accessible
+        XCTAssertTrue(pool.isGPUAccelerated)
+        XCTAssertNil(pool.pipelineCreationError)
+        XCTAssertEqual(pool.inputShape, [8, 64])
+        XCTAssertEqual(pool.outputShape, [8])
+    }
+
+    func testGlobalAvgPool1DSmallLengthUsesSerialKernel() throws {
+        // Length < 64 uses serial kernel
+        let pool = try GlobalAvgPool1D(device: device, channels: 4, length: 32)
+
+        XCTAssertTrue(pool.isGPUAccelerated)
+        XCTAssertEqual(pool.outputShape, [4])
+    }
+
+    func testGlobalAvgPool1DSingleElement() throws {
+        // Single element per channel - edge case
+        let pool = try GlobalAvgPool1D(device: device, channels: 2, length: 1)
+
+        let input = try Tensor(device: device, shape: [2])
+        try input.copy(from: [5.0, 10.0])
+
+        let output = try Tensor(device: device, shape: [2])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try pool.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        // Mean of single element is the element itself
+        XCTAssertEqual(result[0], 5.0, accuracy: 0.001)
+        XCTAssertEqual(result[1], 10.0, accuracy: 0.001)
+    }
+
+    func testGlobalAvgPool1DAllZeros() throws {
+        let pool = try GlobalAvgPool1D(device: device, channels: 4, length: 16)
+
+        let input = try Tensor(device: device, shape: [64])
+        try input.copy(from: [Float](repeating: 0, count: 64))
+
+        let output = try Tensor(device: device, shape: [4])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try pool.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        for val in result {
+            XCTAssertEqual(val, 0.0, accuracy: 0.001)
+        }
+    }
+
+    func testGlobalAvgPool1DNegativeValues() throws {
+        let pool = try GlobalAvgPool1D(device: device, channels: 1, length: 4)
+
+        let input = try Tensor(device: device, shape: [4])
+        try input.copy(from: [-1.0, -2.0, -3.0, -4.0])
+
+        let output = try Tensor(device: device, shape: [1])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try pool.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        XCTAssertEqual(result[0], -2.5, accuracy: 0.001)  // Mean of -1,-2,-3,-4
+    }
+
+    // MARK: - MaxPool1D Property Tests
+
+    func testMaxPool1DPropertyAccess() throws {
+        let pool = try MaxPool1D(device: device, channels: 4, inputLength: 100, kernelSize: 2)
+
+        XCTAssertTrue(pool.isGPUAccelerated)
+        XCTAssertNil(pool.pipelineCreationError)
+        XCTAssertEqual(pool.inputShape, [4, 100])
+        XCTAssertEqual(pool.outputShape, [4, 50])
+    }
+
+    func testMaxPool1DOutputShapeCalculation() throws {
+        // Test various kernel/stride combinations
+
+        // kernelSize = inputLength results in single output element
+        let pool1 = try MaxPool1D(device: device, channels: 2, inputLength: 8, kernelSize: 8)
+        XCTAssertEqual(pool1.outputShape, [2, 1])
+
+        // Kernel size 1 with stride 1 = same size output
+        let pool2 = try MaxPool1D(device: device, channels: 1, inputLength: 10, kernelSize: 1, stride: 1)
+        XCTAssertEqual(pool2.outputShape, [1, 10])
+
+        // Non-divisible: (16 - 3) / 2 + 1 = 7
+        let pool3 = try MaxPool1D(device: device, channels: 1, inputLength: 16, kernelSize: 3, stride: 2)
+        XCTAssertEqual(pool3.outputShape, [1, 7])
+    }
+
+    func testMaxPool1DMinimalOutput() throws {
+        // Test with configuration that produces just 1 output element
+        let pool = try MaxPool1D(device: device, channels: 1, inputLength: 5, kernelSize: 5)
+        XCTAssertEqual(pool.outputShape, [1, 1])
+
+        let input = try Tensor(device: device, shape: [5])
+        try input.copy(from: [1.0, 5.0, 3.0, 2.0, 4.0])
+
+        let output = try Tensor(device: device, shape: [1])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try pool.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        XCTAssertEqual(result[0], 5.0, accuracy: 0.001)  // Max of all elements
+    }
+
+    func testMaxPool1DAllSameValues() throws {
+        let pool = try MaxPool1D(device: device, channels: 1, inputLength: 8, kernelSize: 2)
+
+        let input = try Tensor(device: device, shape: [8])
+        try input.copy(from: [Float](repeating: 3.14, count: 8))
+
+        let output = try Tensor(device: device, shape: [4])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try pool.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        for val in result {
+            XCTAssertEqual(val, 3.14, accuracy: 0.001)
+        }
+    }
+
+    func testMaxPool1DWithInfinity() throws {
+        let pool = try MaxPool1D(device: device, channels: 1, inputLength: 4, kernelSize: 2)
+
+        let input = try Tensor(device: device, shape: [4])
+        try input.copy(from: [1.0, Float.infinity, -Float.infinity, 2.0])
+
+        let output = try Tensor(device: device, shape: [2])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try pool.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        XCTAssertEqual(result[0], Float.infinity)  // max(1.0, inf) = inf
+        XCTAssertEqual(result[1], 2.0, accuracy: 0.001)  // max(-inf, 2.0) = 2.0
+    }
+
+    func testMaxPool1DStrideGreaterThanKernel() throws {
+        // stride > kernelSize means some elements are skipped (valid operation)
+        let pool = try MaxPool1D(device: device, channels: 1, inputLength: 10, kernelSize: 2, stride: 3)
+
+        // Output length = (10 - 2) / 3 + 1 = 3
+        XCTAssertEqual(pool.outputShape, [1, 3])
+
+        // Input: [0,1,2,3,4,5,6,7,8,9]
+        // Windows: [0,1] -> max=1, [3,4] -> max=4, [6,7] -> max=7
+        let input = try Tensor(device: device, shape: [10])
+        try input.copy(from: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+
+        let output = try Tensor(device: device, shape: [3])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try pool.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        XCTAssertEqual(result[0], 1.0, accuracy: 0.001)
+        XCTAssertEqual(result[1], 4.0, accuracy: 0.001)
+        XCTAssertEqual(result[2], 7.0, accuracy: 0.001)
+    }
+}

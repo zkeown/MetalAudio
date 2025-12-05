@@ -3,8 +3,12 @@ import MetalPerformanceShaders
 import Accelerate
 import Foundation
 import MetalAudioKit
+import os.log
 
 /// Protocol for neural network layers
+
+private let logger = Logger(subsystem: "MetalNN", category: "NNLayer")
+
 public protocol NNLayer: AnyObject {
     var inputShape: [Int] { get }
     var outputShape: [Int] { get }
@@ -112,7 +116,7 @@ public enum WeightInitialization {
             // With std=100, max weight ~566 from mean, which may cause training instability
             #if DEBUG
             if std > 10.0 {
-                print("WeightInitialization WARNING: std=\(std) is large. " +
+                print("WeightInitialization WARNING: std=\(std) is large. " +  // TODO: Convert to os_log
                       "Max possible weight: ±\(mean + 5.67 * std). This may cause training instability.")
             }
             #endif
@@ -165,11 +169,11 @@ public enum WeightInitialization {
 public enum MetalNNConfig {
     /// Callback for logging warnings. Set to a custom function to integrate with your logging system.
     /// Default prints to stderr.
-    public nonisolated(unsafe) static var logWarning: @Sendable (String) -> Void = { message in
+    nonisolated(unsafe) public static var logWarning: @Sendable (String) -> Void = { message in
         fputs("[MetalNN] Warning: \(message)\n", stderr)
     }
 
     /// If true, pipeline creation failures throw instead of falling back to CPU.
     /// Default is false for backwards compatibility.
-    public nonisolated(unsafe) static var strictGPUMode: Bool = false
+    nonisolated(unsafe) public static var strictGPUMode: Bool = false
 }

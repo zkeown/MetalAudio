@@ -28,7 +28,7 @@ let memoryOnlyMode = CommandLine.arguments.contains("--memory-only")
 let pressureTest = CommandLine.arguments.contains("--pressure-test")
 
 // Parse filter option (e.g., --filter FFT)
-var filterCategory: String? = nil
+var filterCategory: String?
 if let filterIdx = CommandLine.arguments.firstIndex(of: "--filter"),
    filterIdx + 1 < CommandLine.arguments.count {
     filterCategory = CommandLine.arguments[filterIdx + 1]
@@ -165,7 +165,7 @@ for size in fftSizes {
     var outputReal = [Float](repeating: 0, count: size)
     var outputImag = [Float](repeating: 0, count: size)
 
-    let iterations = 10000
+    let iterations = 10_000
     let (totalMs, avgUs) = measureTime(iterations) {
         input.withUnsafeBufferPointer { ptr in
             fft.forward(input: ptr.baseAddress!, outputReal: &outputReal, outputImag: &outputImag)
@@ -182,7 +182,7 @@ for size in fftSizes {
 // MARK: - GPU FFT Benchmarks
 
 if verboseOutput { print("\n--- FFT (GPU with pre-computed twiddles) ---") }
-let gpuSizes = [1024, 2048, 4096, 8192, 16384]
+let gpuSizes = [1024, 2048, 4096, 8192, 16_384]
 
 for size in gpuSizes {
     let fft = try! FFT(device: device, config: FFT.Config(size: size))
@@ -324,11 +324,11 @@ let crossoverConfigs: [(input: Int, kernel: Int)] = [
     (4096, 2048),
     (8192, 4096),
     // Very large kernels - find where FFT wins
-    (16384, 8192),
-    (16384, 16384),
-    (32768, 8192),
-    (32768, 16384),
-    (32768, 32768),
+    (16_384, 8192),
+    (16_384, 16_384),
+    (32_768, 8192),
+    (32_768, 16_384),
+    (32_768, 32_768)
 ]
 
 struct ConvCrossoverResult {
@@ -348,7 +348,7 @@ for cfg in crossoverConfigs {
 
     // Adjust iterations based on problem size
     let problemSize = cfg.input + cfg.kernel
-    let baseIterations = problemSize > 32768 ? 20 : (problemSize > 16384 ? 50 : 100)
+    let baseIterations = problemSize > 32_768 ? 20 : (problemSize > 16_384 ? 50 : 100)
 
     // Direct mode
     let convDirect = Convolution(device: device, mode: .direct)
@@ -433,7 +433,7 @@ for (inputLen, kernelLen) in directConvSizes {
 
 if verboseOutput { print("\n--- FFT Convolution ---") }
 
-let fftConvSizes = [(4096, 512), (8192, 1024), (16384, 2048)]
+let fftConvSizes = [(4096, 512), (8192, 1024), (16_384, 2048)]
 for (inputLen, kernelLen) in fftConvSizes {
     let conv = Convolution(device: device, mode: .fft)
     let input = (0..<inputLen).map { Float(sin(Double($0) * 0.1)) }
@@ -462,7 +462,7 @@ let conv1dConfigs = [
     (inCh: 32, outCh: 32, k: 3, len: 1024, name: "32ch k3"),
     (inCh: 64, outCh: 64, k: 3, len: 1024, name: "64ch k3"),
     (inCh: 48, outCh: 96, k: 8, len: 4096, name: "48→96 k8"),
-    (inCh: 128, outCh: 256, k: 3, len: 512, name: "128→256 k3"),
+    (inCh: 128, outCh: 256, k: 3, len: 512, name: "128→256 k3")
 ]
 
 for cfg in conv1dConfigs {
@@ -514,7 +514,7 @@ if verboseOutput { print("\n--- LSTM (Optimized with Batched GEMM) ---") }
 let lstmConfigs = [
     (input: 64, hidden: 128, layers: 1, seq: 50, bidir: false, name: "64→128 L1"),
     (input: 128, hidden: 256, layers: 2, seq: 100, bidir: false, name: "128→256 L2"),
-    (input: 128, hidden: 256, layers: 2, seq: 100, bidir: true, name: "128→256 L2 BiDir"),
+    (input: 128, hidden: 256, layers: 2, seq: 100, bidir: true, name: "128→256 L2 BiDir")
 ]
 
 for cfg in lstmConfigs {
@@ -616,14 +616,14 @@ for bufferSize in audioBufferSizes {
     var outputReal = [Float](repeating: 0, count: bufferSize * 2)
     var outputImag = [Float](repeating: 0, count: bufferSize * 2)
 
-    let iterations = 10000
+    let iterations = 10_000
     let (totalMs, avgUs) = measureTime(iterations) {
         input.withUnsafeBufferPointer { ptr in
             fft.forward(input: ptr.baseAddress!, outputReal: &outputReal, outputImag: &outputImag)
         }
     }
 
-    let budgetUs = Double(bufferSize) / 48000.0 * 1_000_000.0
+    let budgetUs = Double(bufferSize) / 48_000.0 * 1_000_000.0
     let utilization = avgUs / budgetUs * 100.0
 
     recordResult(category: "RT-Latency", operation: "buf=\(bufferSize)@48kHz", iterations: iterations, totalMs: totalMs, avgUs: avgUs, extra: "\(String(format: "%.1f", utilization))% util")
@@ -639,7 +639,7 @@ if verboseOutput { print("\n--- Linear Layer (Single Vector) ---") }
 let linearConfigs = [
     (inFeatures: 256, outFeatures: 512, name: "256→512"),
     (inFeatures: 512, outFeatures: 1024, name: "512→1024"),
-    (inFeatures: 1024, outFeatures: 2048, name: "1024→2048"),
+    (inFeatures: 1024, outFeatures: 2048, name: "1024→2048")
 ]
 
 for cfg in linearConfigs {
@@ -689,7 +689,7 @@ let batchedLinearConfigs = [
     (inFeatures: 512, outFeatures: 512, batch: 128, name: "512×512 batch=128"),
     (inFeatures: 512, outFeatures: 512, batch: 256, name: "512×512 batch=256"),
     (inFeatures: 1024, outFeatures: 1024, batch: 128, name: "1024×1024 batch=128"),
-    (inFeatures: 1024, outFeatures: 1024, batch: 256, name: "1024×1024 batch=256"),
+    (inFeatures: 1024, outFeatures: 1024, batch: 256, name: "1024×1024 batch=256")
 ]
 
 for cfg in batchedLinearConfigs {
@@ -739,7 +739,7 @@ let mpsCrossoverConfigs = [
     (inFeatures: 2048, outFeatures: 2048, batch: 64, name: "2048×2048 b=64"),
     (inFeatures: 2048, outFeatures: 2048, batch: 128, name: "2048×2048 b=128"),
     (inFeatures: 4096, outFeatures: 4096, batch: 32, name: "4096×4096 b=32"),
-    (inFeatures: 4096, outFeatures: 4096, batch: 64, name: "4096×4096 b=64"),
+    (inFeatures: 4096, outFeatures: 4096, batch: 64, name: "4096×4096 b=64")
 ]
 
 // Store original threshold
@@ -812,9 +812,9 @@ if verboseOutput { print("\n--- Partitioned Convolution (Long IRs) ---") }
 
 let partConvConfigs = [
     (inputLen: 4096, irLen: 8192, blockSize: 512, name: "4K input, 8K IR"),
-    (inputLen: 4096, irLen: 16384, blockSize: 512, name: "4K input, 16K IR"),
-    (inputLen: 4096, irLen: 32768, blockSize: 1024, name: "4K input, 32K IR"),
-    (inputLen: 8192, irLen: 65536, blockSize: 1024, name: "8K input, 64K IR (reverb)"),
+    (inputLen: 4096, irLen: 16_384, blockSize: 512, name: "4K input, 16K IR"),
+    (inputLen: 4096, irLen: 32_768, blockSize: 1024, name: "4K input, 32K IR"),
+    (inputLen: 8192, irLen: 65_536, blockSize: 1024, name: "8K input, 64K IR (reverb)")
 ]
 
 for cfg in partConvConfigs {
@@ -847,8 +847,8 @@ if verboseOutput { print("\n--- Partitioned Convolution (MPSGraph FFT) ---") }
 
 // Test with larger block sizes where MPSGraph shines
 let partConvMPSConfigs = [
-    (inputLen: 4096, irLen: 16384, blockSize: 2048, name: "4K input, 16K IR, 2K block"),
-    (inputLen: 8192, irLen: 65536, blockSize: 4096, name: "8K input, 64K IR, 4K block"),
+    (inputLen: 4096, irLen: 16_384, blockSize: 2048, name: "4K input, 16K IR, 2K block"),
+    (inputLen: 8192, irLen: 65_536, blockSize: 4096, name: "8K input, 64K IR, 4K block")
 ]
 
 for cfg in partConvMPSConfigs {
@@ -903,7 +903,7 @@ let batchFFTConfigs = [
     (size: 1024, batch: 16, name: "1024×16"),
     (size: 2048, batch: 8, name: "2048×8"),
     (size: 2048, batch: 16, name: "2048×16"),
-    (size: 4096, batch: 8, name: "4096×8"),
+    (size: 4096, batch: 8, name: "4096×8")
 ]
 
 for cfg in batchFFTConfigs {
@@ -939,12 +939,12 @@ let biquadConfigs = [
     (size: 256, name: "256 samples"),
     (size: 1024, name: "1K samples"),
     (size: 4096, name: "4K samples"),
-    (size: 16384, name: "16K samples"),
+    (size: 16_384, name: "16K samples")
 ]
 
 for cfg in biquadConfigs {
     let filter = BiquadFilter()
-    try! filter.configure(type: .lowpass, frequency: 1000, sampleRate: 48000)
+    try! filter.configure(type: .lowpass, frequency: 1000, sampleRate: 48_000)
     let input = (0..<cfg.size).map { Float(sin(Double($0) * 0.1)) }
     var output = input
 
@@ -967,7 +967,7 @@ if verboseOutput { print("\n--- GRU (Recurrent Layer) ---") }
 let gruConfigs = [
     (input: 64, hidden: 128, seq: 50, bidir: false, name: "64→128"),
     (input: 128, hidden: 256, seq: 100, bidir: false, name: "128→256"),
-    (input: 128, hidden: 256, seq: 100, bidir: true, name: "128→256 BiDir"),
+    (input: 128, hidden: 256, seq: 100, bidir: true, name: "128→256 BiDir")
 ]
 
 for cfg in gruConfigs {
@@ -1259,7 +1259,7 @@ if #available(macOS 15.0, iOS 18.0, *) {
 
             // 4. Audio callback simulation (real-time budget test)
             let bufferSizes = [128, 256, 512, 1024]
-            let sampleRate = 48000
+            let sampleRate = 48_000
 
             if verboseOutput {
                 print("  Audio callback simulation (@\(sampleRate) Hz):")
@@ -1348,7 +1348,6 @@ if #available(macOS 15.0, iOS 18.0, *) {
                     print("    Memory delta: \(String(format: "%.2f", deltaMB)) MB")
                 }
             }
-
         } catch BNNSInferenceError.contextCreationFailed {
             if verboseOutput {
                 print("  Model does not support streaming context (BNNSGraphContextMakeStreaming failed)")
@@ -1383,9 +1382,9 @@ if verboseOutput { print("\n--- STFT (Short-Time Fourier Transform) ---") }
 
 let stftConfigs: [(size: Int, hop: Int, inputLen: Int, name: String)] = [
     (512, 128, 4096, "512/128 in=4K"),
-    (1024, 256, 16384, "1024/256 in=16K"),
-    (2048, 512, 16384, "2048/512 in=16K"),
-    (4096, 1024, 65536, "4096/1024 in=64K"),
+    (1024, 256, 16_384, "1024/256 in=16K"),
+    (2048, 512, 16_384, "2048/512 in=16K"),
+    (4096, 1024, 65_536, "4096/1024 in=64K")
 ]
 
 for cfg in stftConfigs {
@@ -1413,9 +1412,9 @@ for cfg in stftConfigs {
 if verboseOutput { print("\n--- STFT/iSTFT Round-Trip (Batch Processing) ---") }
 
 let roundTripConfigs: [(size: Int, hop: Int, inputLen: Int, name: String)] = [
-    (1024, 256, 16384, "1024/256 in=16K"),
-    (2048, 512, 65536, "2048/512 in=64K"),
-    (4096, 1024, 131072, "4096/1024 in=128K"),
+    (1024, 256, 16_384, "1024/256 in=16K"),
+    (2048, 512, 65_536, "2048/512 in=64K"),
+    (4096, 1024, 131_072, "4096/1024 in=128K")
 ]
 
 for cfg in roundTripConfigs {
@@ -1465,12 +1464,12 @@ let filterBankConfigs: [(bands: Int, bufSize: Int)] = [
     (8, 1024),
     (16, 1024),
     (8, 4096),
-    (16, 4096),
+    (16, 4096)
 ]
 
 for cfg in filterBankConfigs {
     let filterBank = FilterBank(device: device, bandCount: cfg.bands)
-    try! filterBank.configureAsEQ(lowFreq: 100, highFreq: 10000, sampleRate: 48000, q: 1.414)
+    try! filterBank.configureAsEQ(lowFreq: 100, highFreq: 10_000, sampleRate: 48_000, q: 1.414)
 
     let input = (0..<cfg.bufSize).map { Float(sin(Double($0) * 0.1)) }
 
@@ -1503,7 +1502,7 @@ let tensorShapes: [([Int], String)] = [
     ([1024], "1K"),
     ([4096], "4K"),
     ([64, 1024], "64x1K"),
-    ([256, 4096], "256x4K"),
+    ([256, 4096], "256x4K")
 ]
 
 for (shape, name) in tensorShapes {
@@ -1547,14 +1546,14 @@ let poolConfigs: [(poolSize: Int, sampleCount: Int)] = [
     (8, 1024),
     (16, 1024),
     (16, 4096),
-    (32, 4096),
+    (32, 4096)
 ]
 
 for cfg in poolConfigs {
     let pool = try! AudioBufferPool(device: device, sampleCount: cfg.sampleCount, poolSize: cfg.poolSize)
 
     // Acquire/release cycle timing
-    let iterations = 10000
+    let iterations = 10_000
     let (cycleMs, cycleUs) = measureTime(iterations) {
         let buffer = try! pool.acquire()
         try! pool.release(buffer)
@@ -1585,7 +1584,7 @@ let threadCounts = [2, 4, 8]
 // Investigating the anomalous negative overhead
 if verboseOutput { print("\n  Partitioned Convolution (Contention Analysis):") }
 
-let irLength = 16384
+let irLength = 16_384
 let inputLength = 2048
 let blockSize = 512
 let baseInput = (0..<inputLength).map { Float(sin(Double($0) * 0.1)) }
@@ -1702,7 +1701,6 @@ for threadCount in threadCounts {
         print("    \(threadCount) threads: \(successCount)/\(iterations) success (\(String(format: "%.0f", successRate))%)")
     }
 }
-
 } // End of !memoryOnlyMode
 
 // MARK: - Memory Benchmarks
@@ -1753,7 +1751,7 @@ if memoryMode || memoryOnlyMode {
         ([4096], "4K"),
         ([64, 1024], "64x1K"),
         ([256, 4096], "256x4K"),
-        ([512, 8192], "512x8K (4MB)"),
+        ([512, 8192], "512x8K (4MB)")
     ]
 
     for (shape, name) in tensorAllocShapes {
@@ -1794,7 +1792,7 @@ if memoryMode || memoryOnlyMode {
     let poolConfigs: [(poolSize: Int, sampleCount: Int)] = [
         (8, 1024),
         (16, 4096),
-        (32, 4096),
+        (32, 4096)
     ]
 
     for cfg in poolConfigs {
@@ -1853,7 +1851,7 @@ if memoryMode || memoryOnlyMode {
     if verboseOutput { print("\n--- Memory-GPU: GPU Operations ---") }
 
     // FFT GPU memory
-    let fftGPUSizes = [2048, 4096, 8192, 16384]
+    let fftGPUSizes = [2048, 4096, 8192, 16_384]
 
     for size in fftGPUSizes {
         tracker.reset()
@@ -1896,7 +1894,7 @@ if memoryMode || memoryOnlyMode {
     }
 
     // Partitioned Convolution memory (long IRs)
-    let partConvIRs = [8192, 16384, 32768, 65536]
+    let partConvIRs = [8192, 16_384, 32_768, 65_536]
 
     for irLen in partConvIRs {
         tracker.reset()
@@ -2188,8 +2186,8 @@ func analyzeResults(_ results: [BenchmarkResult]) -> AnalysisReport {
     let budgets: [(buffer: Int, budgetUs: Double)] = [
         (128, 2666.67),
         (256, 5333.33),
-        (512, 10666.67),
-        (1024, 21333.33),
+        (512, 10_666.67),
+        (1024, 21_333.33)
     ]
 
     // Check for real-time budget violations
@@ -2202,7 +2200,7 @@ func analyzeResults(_ results: [BenchmarkResult]) -> AnalysisReport {
                     avgUs: result.avgUs,
                     budgetUs: budget.budgetUs,
                     bufferSize: budget.buffer,
-                    sampleRate: 48000
+                    sampleRate: 48_000
                 ))
                 break  // Only flag once per operation
             }

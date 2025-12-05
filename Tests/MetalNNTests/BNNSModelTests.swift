@@ -357,8 +357,8 @@ final class ChunkedInferenceModelTests: XCTestCase {
         let chunked = ChunkedInference(inference: inference, config: config)
 
         // Latency in seconds at 48kHz
-        let latencySeconds = chunked.latencySeconds(sampleRate: 48000.0)
-        XCTAssertEqual(latencySeconds, 2048.0 / 48000.0, accuracy: 0.0001)
+        let latencySeconds = chunked.latencySeconds(sampleRate: 48_000.0)
+        XCTAssertEqual(latencySeconds, 2048.0 / 48_000.0, accuracy: 0.0001)
     }
 
     func testChunkedInferenceBufferStatus() throws {

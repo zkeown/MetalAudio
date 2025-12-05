@@ -198,7 +198,6 @@ final class ValidateForBNNSTests: XCTestCase {
 
             // Model size should be captured
             XCTAssertGreaterThanOrEqual(result.modelSizeBytes, 0)
-
         } catch {
             // If we can't create temp dir, skip
             throw XCTSkip("Could not create temp directory: \(error)")

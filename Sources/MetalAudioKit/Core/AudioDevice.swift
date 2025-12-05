@@ -560,6 +560,79 @@ public final class AudioDevice: @unchecked Sendable {
         return pipeline
     }
 
+    /// Create a compute pipeline from a shader in a specific bundle
+    ///
+    /// Use this when loading shaders from a different module's bundle (e.g., MetalDSP
+    /// loading its own shaders). The pipeline is cached for reuse.
+    ///
+    /// - Parameters:
+    ///   - functionName: Name of the kernel function
+    ///   - bundle: Bundle containing the .metallib or .metal shader files
+    /// - Returns: Compiled compute pipeline state
+    /// - Throws: `MetalAudioError.functionNotFound` if function doesn't exist,
+    ///           `MetalAudioError.pipelineCreationFailed` if compilation fails
+    public func makeComputePipeline(functionName: String, bundle: Bundle) throws -> MTLComputePipelineState {
+        let cacheKey = "\(bundle.bundleIdentifier ?? "unknown"):\(functionName)"
+
+        // Fast path: check cache
+        os_unfair_lock_lock(&cacheLock)
+        if let cached = libraryPipelineCache[cacheKey] {
+            os_unfair_lock_unlock(&cacheLock)
+            return cached
+        }
+        os_unfair_lock_unlock(&cacheLock)
+
+        // Slow path: load library from bundle and compile
+        compilationLock.lock()
+        defer { compilationLock.unlock() }
+
+        // Double-check cache
+        os_unfair_lock_lock(&cacheLock)
+        let cached = libraryPipelineCache[cacheKey]
+        os_unfair_lock_unlock(&cacheLock)
+        if let cached = cached {
+            return cached
+        }
+
+        // Load library from bundle
+        let bundleLibrary: MTLLibrary
+        if let libURL = bundle.url(forResource: "default", withExtension: "metallib") {
+            bundleLibrary = try device.makeLibrary(URL: libURL)
+        } else if let libURL = bundle.url(forResource: "DSP", withExtension: "metallib") {
+            bundleLibrary = try device.makeLibrary(URL: libURL)
+        } else {
+            // Fall back to compiling from source files in bundle
+            // Check both root and Shaders subdirectory (SPM copies resources to subdirectory)
+            var shaderURLs = bundle.urls(forResourcesWithExtension: "metal", subdirectory: nil) ?? []
+            if shaderURLs.isEmpty {
+                shaderURLs = bundle.urls(forResourcesWithExtension: "metal", subdirectory: "Shaders") ?? []
+            }
+            guard !shaderURLs.isEmpty else {
+                throw MetalAudioError.functionNotFound(functionName)
+            }
+            let sources = try shaderURLs.map { try String(contentsOf: $0) }.joined(separator: "\n")
+            bundleLibrary = try device.makeLibrary(source: sources, options: nil)
+        }
+
+        guard let function = bundleLibrary.makeFunction(name: functionName) else {
+            throw MetalAudioError.functionNotFound(functionName)
+        }
+
+        let pipeline: MTLComputePipelineState
+        do {
+            pipeline = try device.makeComputePipelineState(function: function)
+        } catch {
+            throw MetalAudioError.pipelineCreationFailed(error.localizedDescription)
+        }
+
+        // Cache it
+        os_unfair_lock_lock(&cacheLock)
+        libraryPipelineCache[cacheKey] = pipeline
+        os_unfair_lock_unlock(&cacheLock)
+
+        return pipeline
+    }
+
     /// Create a compute pipeline from external source code
     ///
     /// This method caches compiled pipelines for reuse. Subsequent calls with

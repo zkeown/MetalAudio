@@ -236,7 +236,7 @@ final class CoreMLWeightLoaderTests: XCTestCase {
         XCTAssertEqual(info.name, "encoder.conv1")
         XCTAssertEqual(info.shape, [64, 32, 5])
         XCTAssertEqual(info.dataType, .float32)
-        XCTAssertEqual(info.sizeInBytes, 40960)
+        XCTAssertEqual(info.sizeInBytes, 40_960)
         XCTAssertEqual(info.offset, 0)
         XCTAssertEqual(info.file, "weights.bin")
     }

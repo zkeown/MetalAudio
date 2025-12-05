@@ -1,5 +1,6 @@
 import Foundation
 import MetalAudioKit
+import os.log
 
 /// Loads weights from compiled Core ML models (.mlmodelc)
 ///
@@ -12,7 +13,7 @@ import MetalAudioKit
 ///
 /// // List available weights
 /// for name in loader.availableWeights {
-///     print(name)
+///     print(name)  // TODO: Convert to os_log
 /// }
 ///
 /// // Load specific weights
@@ -23,6 +24,9 @@ import MetalAudioKit
 /// ## Supported Model Formats
 /// - `.mlmodelc` bundles with `weights/` directory
 /// - Float32 and Float16 weight formats
+
+private let logger = Logger(subsystem: "MetalNN", category: "CoreMLWeightLoader")
+
 public final class CoreMLWeightLoader {
 
     // MARK: - Types
@@ -170,7 +174,7 @@ public final class CoreMLWeightLoader {
         let ih = try loadWeights(name: ihName)
         let hh = try loadWeights(name: hhName)
 
-        var bias: [Float]? = nil
+        var bias: [Float]?
         if weightInfos[biasName] != nil {
             bias = try loadWeights(name: biasName)
         }
@@ -195,7 +199,7 @@ public final class CoreMLWeightLoader {
 
         let weights = try loadWeights(name: weightName)
 
-        var bias: [Float]? = nil
+        var bias: [Float]?
         if weightInfos[biasName] != nil {
             bias = try loadWeights(name: biasName)
         }
@@ -217,7 +221,7 @@ public final class CoreMLWeightLoader {
 
         let weights = try loadWeights(name: weightName)
 
-        var bias: [Float]? = nil
+        var bias: [Float]?
         if weightInfos[biasName] != nil {
             bias = try loadWeights(name: biasName)
         }
@@ -475,7 +479,7 @@ public struct Conv1DWeights {
 
     /// Derived: output channels
     public var outputChannels: Int {
-        shape.count > 0 ? shape[0] : 0
+        !shape.isEmpty ? shape[0] : 0
     }
 
     /// Derived: input channels
@@ -502,7 +506,7 @@ public struct LinearWeights {
 
     /// Derived: output features
     public var outputFeatures: Int {
-        shape.count > 0 ? shape[0] : 0
+        !shape.isEmpty ? shape[0] : 0
     }
 
     /// Derived: input features
