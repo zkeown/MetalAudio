@@ -75,7 +75,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # iOS 18 - latest stable
+          # iPhone SE 3rd gen (A15) - oldest available device in CI
+          - ios: "18.4"
+            device: "iPhone SE (3rd generation)"
+            xcode: "16.1"
+            macos: "15"
+          # iPhone 16 Pro (A18 Pro) - latest flagship
           - ios: "18.4"
             device: "iPhone 16 Pro"
             xcode: "16.1"
