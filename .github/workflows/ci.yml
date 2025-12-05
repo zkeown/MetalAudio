@@ -111,7 +111,7 @@ jobs:
         run: |
           xcodebuild test \
             -scheme MetalAudio-Package \
-            -destination "platform=iOS Simulator,name=${{ matrix.device }},OS=latest" \
+            -destination "platform=iOS Simulator,name=${{ matrix.device }},OS=18.4" \
             -skipPackagePluginValidation \
             CODE_SIGNING_ALLOWED=NO
 
