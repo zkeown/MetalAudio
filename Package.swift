@@ -1,6 +1,14 @@
 // swift-tools-version: 5.9
 import PackageDescription
 
+// StrictConcurrency is only available as a proper language feature in Swift 6.
+// On Swift 5.x, enabling it as an experimental feature causes certain concurrent
+// patterns (like DispatchQueue.concurrentPerform with inout captures) to error.
+var swiftSettings: [SwiftSetting] = []
+#if swift(>=6.0)
+swiftSettings.append(.enableExperimentalFeature("StrictConcurrency"))
+#endif
+
 let package = Package(
     name: "MetalAudio",
     platforms: [
@@ -53,9 +61,7 @@ let package = Package(
             resources: [
                 .copy("Shaders"),
             ],
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
-            ]
+            swiftSettings: swiftSettings
         ),
 
         // MARK: - DSP
@@ -67,9 +73,7 @@ let package = Package(
             resources: [
                 .copy("Shaders"),
             ],
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
-            ]
+            swiftSettings: swiftSettings
         ),
 
         // MARK: - Neural Networks
@@ -81,9 +85,7 @@ let package = Package(
             resources: [
                 .copy("Shaders"),
             ],
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
-            ]
+            swiftSettings: swiftSettings
         ),
 
         // MARK: - Tests
