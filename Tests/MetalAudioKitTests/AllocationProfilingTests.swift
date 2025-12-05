@@ -178,7 +178,7 @@ final class AllocationProfilingTests: XCTestCase {
         let delta = afterSnapshot - beforeSnapshot
 
         let perIterationBytes = abs(delta.processDelta) / Int64(iterations)
-        XCTAssertLessThan(perIterationBytes, 4096,
+        assertAllocationStable(perIterationBytes, lessThan: 4096,
             "Linear layer forward should have minimal allocations (got \(perIterationBytes) bytes/iteration)")
     }
 

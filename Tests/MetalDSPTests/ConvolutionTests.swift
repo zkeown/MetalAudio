@@ -517,6 +517,9 @@ final class ConvolutionCrossValidationTests: XCTestCase {
     // See testFFTConvolutionImpulseResponse in ConvolutionTests for this distinction.
 
     func testDirectMatchesVDSP() throws {
+        // GPU compute produces garbage results without a real GPU (CI environments)
+        try skipWithoutReliableGPU("Direct convolution requires reliable GPU compute")
+
         // Compare direct convolution against vDSP_conv (same semantics)
         let kernel: [Float] = [0.5, 0.3, 0.2]
         let signal: [Float] = [1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 3.0, 2.0, 1.0]

@@ -104,6 +104,10 @@ final class ShaderDiskCacheTests: XCTestCase {
 
     @available(macOS 11.0, iOS 14.0, *)
     func testStatisticsAfterSave() throws {
+        // Metal binary archive serialization is not supported in all environments (e.g., CI with software rendering)
+        // Skip this test in CI where shader caching typically fails
+        try skipWithoutReliableGPU("Shader disk cache requires real GPU with binary archive support")
+
         let testSource = """
             #include <metal_stdlib>
             using namespace metal;
