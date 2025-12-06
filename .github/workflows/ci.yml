@@ -88,6 +88,29 @@ jobs:
           restore-keys: |
             ios-${{ matrix.device }}-spm-
 
+      - name: Install xcodes
+        if: matrix.ios == '16.4'
+        run: |
+          brew install xcodesorg/made/xcodes
+          brew install aria2
+
+      - name: Install iOS 16.4 Runtime
+        if: matrix.ios == '16.4'
+        run: |
+          if ! xcrun simctl list runtimes | grep -q "iOS 16.4"; then
+            echo "Installing iOS 16.4 runtime..."
+            sudo xcodes runtimes install "iOS 16.4"
+          fi
+          xcrun simctl list runtimes
+
+      - name: Create iPhone 8 Simulator
+        if: matrix.device == 'iPhone 8'
+        run: |
+          xcrun simctl create "iPhone 8" \
+            com.apple.CoreSimulator.SimDeviceType.iPhone-8 \
+            com.apple.CoreSimulator.SimRuntime.iOS-16-4 || echo "Simulator may already exist"
+          xcrun simctl list devices available | grep -i "iphone 8"
+
       - name: List Available Simulators
         run: |
           echo "=== Available Runtimes ==="
