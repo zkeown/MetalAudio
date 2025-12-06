@@ -144,8 +144,10 @@ public final class RingBuffer {
     @discardableResult
     @inline(__always)
     public func write(_ samples: [Float]) -> Int {
+        guard !samples.isEmpty else { return 0 }
         return samples.withUnsafeBufferPointer { ptr in
-            write(ptr.baseAddress!, count: ptr.count)
+            guard let baseAddress = ptr.baseAddress else { return 0 }
+            return write(baseAddress, count: ptr.count)
         }
     }
 
@@ -221,7 +223,8 @@ public final class RingBuffer {
 
         var result = [Float](repeating: 0, count: toRead)
         result.withUnsafeMutableBufferPointer { ptr in
-            _ = read(into: ptr.baseAddress!, count: toRead)
+            guard let baseAddress = ptr.baseAddress else { return }
+            _ = read(into: baseAddress, count: toRead)
         }
         return result
     }
