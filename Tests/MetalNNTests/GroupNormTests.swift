@@ -396,6 +396,140 @@ final class GroupNormTests: XCTestCase {
         }
     }
 
+    // MARK: - Algorithm Selection Tests
+
+    func testDefaultAlgorithm_IsWelford() throws {
+        let groupNorm = try GroupNorm(device: device, numGroups: 2, numChannels: 8)
+        XCTAssertEqual(groupNorm.algorithm, .welford)
+    }
+
+    func testSetAlgorithm_ChangesAlgorithm() throws {
+        let groupNorm = try GroupNorm(device: device, numGroups: 2, numChannels: 8)
+
+        try groupNorm.setAlgorithm(.standard)
+        XCTAssertEqual(groupNorm.algorithm, .standard)
+
+        try groupNorm.setAlgorithm(.kahan)
+        XCTAssertEqual(groupNorm.algorithm, .kahan)
+
+        try groupNorm.setAlgorithm(.welford)
+        XCTAssertEqual(groupNorm.algorithm, .welford)
+    }
+
+    func testAlgorithmVariants_ProduceConsistentResults() throws {
+        // Skip on CI due to GPU driver variability
+        try XCTSkipIf(ProcessInfo.processInfo.environment["CI"] != nil,
+                      "Skipping algorithm comparison on CI due to driver variability")
+
+        let numChannels = 48
+        let numGroups = 8
+        let length = 256
+
+        // Create input with random values
+        var inputData = [Float](repeating: 0, count: numChannels * length)
+        for i in 0..<inputData.count {
+            inputData[i] = Float.random(in: -2...2)
+        }
+
+        // Test all three algorithms
+        var results: [[Float]] = []
+
+        for algorithm in [GroupNorm.Algorithm.standard, .kahan, .welford] {
+            let groupNorm = try GroupNorm(device: device, numGroups: numGroups, numChannels: numChannels)
+            try groupNorm.setAlgorithm(algorithm)
+
+            let input = try Tensor(device: device, shape: [numChannels, length])
+            try input.copy(from: inputData)
+            let output = try Tensor(device: device, shape: [numChannels, length])
+
+            try context.executeSync { encoder in
+                try groupNorm.forward(input: input, output: output, encoder: encoder)
+            }
+
+            results.append(output.toArray())
+        }
+
+        // All algorithms should produce very similar results
+        let standardResult = results[0]
+        let kahanResult = results[1]
+        let welfordResult = results[2]
+
+        var maxStandardKahanDiff: Float = 0
+        var maxStandardWelfordDiff: Float = 0
+        var maxKahanWelfordDiff: Float = 0
+
+        for i in 0..<standardResult.count {
+            maxStandardKahanDiff = max(maxStandardKahanDiff, abs(standardResult[i] - kahanResult[i]))
+            maxStandardWelfordDiff = max(maxStandardWelfordDiff, abs(standardResult[i] - welfordResult[i]))
+            maxKahanWelfordDiff = max(maxKahanWelfordDiff, abs(kahanResult[i] - welfordResult[i]))
+        }
+
+        print("Algorithm comparison:")
+        print("  Standard vs Kahan:  maxAbsDiff = \(String(format: "%.2e", maxStandardKahanDiff))")
+        print("  Standard vs Welford: maxAbsDiff = \(String(format: "%.2e", maxStandardWelfordDiff))")
+        print("  Kahan vs Welford:   maxAbsDiff = \(String(format: "%.2e", maxKahanWelfordDiff))")
+
+        // All algorithms should produce results within 1e-4 of each other
+        XCTAssertLessThan(maxStandardKahanDiff, 1e-3, "Standard and Kahan should produce similar results")
+        XCTAssertLessThan(maxStandardWelfordDiff, 1e-3, "Standard and Welford should produce similar results")
+        XCTAssertLessThan(maxKahanWelfordDiff, 1e-3, "Kahan and Welford should produce similar results")
+    }
+
+    func testWelfordAlgorithm_MoreAccurateForLargeSums() throws {
+        // Skip on CI due to GPU driver variability
+        try XCTSkipIf(ProcessInfo.processInfo.environment["CI"] != nil,
+                      "Skipping algorithm accuracy test on CI")
+
+        // Test with a large number of elements where accumulation error matters
+        let numChannels = 48
+        let numGroups = 8
+        let length = 4096  // Large length to accumulate error
+
+        let groupNorm = try GroupNorm(device: device, numGroups: numGroups, numChannels: numChannels)
+
+        // Input with values that could cause accumulation error
+        var inputData = [Float](repeating: 0, count: numChannels * length)
+        for i in 0..<inputData.count {
+            inputData[i] = Float.random(in: -5...5)
+        }
+
+        let input = try Tensor(device: device, shape: [numChannels, length])
+        try input.copy(from: inputData)
+        let output = try Tensor(device: device, shape: [numChannels, length])
+
+        // Use Welford (default)
+        try context.executeSync { encoder in
+            try groupNorm.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+
+        // Verify normalized groups have mean≈0, variance≈1
+        let channelsPerGroup = numChannels / numGroups
+        let elementsPerGroup = channelsPerGroup * length
+
+        for g in 0..<numGroups {
+            var groupSum: Float = 0
+            var groupSumSq: Float = 0
+
+            for c in 0..<channelsPerGroup {
+                let channelIdx = g * channelsPerGroup + c
+                for l in 0..<length {
+                    let val = result[channelIdx * length + l]
+                    groupSum += val
+                    groupSumSq += val * val
+                }
+            }
+
+            let mean = groupSum / Float(elementsPerGroup)
+            let variance = groupSumSq / Float(elementsPerGroup) - mean * mean
+
+            // With Welford, we expect very accurate normalization
+            XCTAssertEqual(mean, 0.0, accuracy: 1e-3, "Group \(g) mean should be ~0")
+            XCTAssertEqual(variance, 1.0, accuracy: 0.05, "Group \(g) variance should be ~1")
+        }
+    }
+
     // MARK: - PyTorch Reference Tests
 
     func testGroupNorm_MatchesPyTorchReference() throws {

@@ -267,6 +267,193 @@ for chunk in audioChunks {
 
 ---
 
+## SafeTensors Loading Issues
+
+### Symptom: "Tensor not found" error
+
+**Cause 1: Wrong naming convention**
+
+```swift
+// Check detected convention
+let loader = try SafeTensorsLoader(fileURL: url)
+let mapper = loader.createWeightMapper()
+print("Detected: \(mapper.convention)")  // .metalaudio, .demucs, or .unknown
+
+// List available tensors
+for name in loader.availableTensors.prefix(10) {
+    print(name)
+}
+```
+
+**Cause 2: Different model version**
+
+The weights file may be from a different model architecture.
+
+**Fix:** Verify tensor shapes match expected:
+
+```swift
+if let info = loader.tensorInfo(name: "encoder.0.conv.weight") {
+    print("Shape: \(info.shape)")  // Should match layer config
+}
+```
+
+### Symptom: "Corrupted weights" error
+
+**Cause:** Weights contain NaN or Inf values.
+
+**Diagnosis:**
+
+```swift
+// Try loading without validation
+let data = try Data(contentsOf: url)
+// Check if file is truncated or corrupted
+```
+
+**Fix:** Re-export weights from PyTorch ensuring tensors are contiguous:
+
+```python
+state_dict = {k: v.contiguous() for k, v in model.state_dict().items()}
+save_file(state_dict, "model.safetensors")
+```
+
+### Symptom: Shape mismatch when loading weights
+
+**Cause:** Model configuration doesn't match weights.
+
+**Fix:**
+
+```swift
+// Check expected vs actual shapes
+let info = loader.tensorInfo(name: tensorName)!
+print("Weight shape: \(info.shape)")
+print("Layer expects: \(layer.expectedWeightShape)")
+```
+
+---
+
+## GroupNorm Issues
+
+### Symptom: GroupNorm outputs NaN
+
+**Cause 1: GPU driver variability**
+
+Some GPU drivers have numerical issues with certain algorithms.
+
+**Fix:** Use the Welford algorithm:
+
+```swift
+let groupNorm = try GroupNorm(device: device, numGroups: 8, numChannels: 48)
+try groupNorm.setAlgorithm(.welford)  // Most stable
+```
+
+**Cause 2: Input contains extreme values**
+
+```swift
+// Check input range
+let inputData = input.toArray()
+let hasNaN = inputData.contains { $0.isNaN }
+let maxVal = inputData.map { abs($0) }.max()
+
+if hasNaN || maxVal! > 1e6 {
+    print("Input has extreme values!")
+}
+```
+
+### Symptom: GroupNorm accuracy differs from PyTorch
+
+**Cause:** Different algorithms have different numerical precision.
+
+**Fix:** Use Welford for maximum accuracy (~10x better than standard):
+
+```swift
+try groupNorm.setAlgorithm(.welford)  // ~5e-5 error vs PyTorch
+// vs .standard which has ~5e-4 error
+```
+
+---
+
+## HTDemucs Issues
+
+### Symptom: Weight loading fails with "tensor not found"
+
+**Cause:** Weights use Demucs naming convention.
+
+**Fix:**
+
+```swift
+// Option 1: Auto-detect (recommended)
+try model.loadWeights(from: url)
+
+// Option 2: Explicit convention
+try model.loadWeights(from: url, convention: .demucs)
+
+// Debug: Check what's in the file
+let loader = try SafeTensorsLoader(fileURL: url)
+for name in loader.availableTensors.prefix(20) {
+    print(name)
+}
+```
+
+### Symptom: Output is silent or very quiet
+
+**Cause 1: Input not in expected format**
+
+HTDemucs expects interleaved stereo: `[L0, R0, L1, R1, ...]`
+
+```swift
+// Check input format
+print("Input samples: \(audioSamples.count)")
+print("Expected: \(numSamples * 2) for stereo")
+```
+
+**Cause 2: Input amplitude too low**
+
+```swift
+// Normalize input to [-1, 1]
+let maxAmp = audioSamples.map { abs($0) }.max() ?? 1.0
+let normalized = audioSamples.map { $0 / maxAmp }
+```
+
+### Symptom: Memory exhaustion on long audio
+
+**Cause:** Processing entire file at once.
+
+**Fix:** Process in segments:
+
+```swift
+let segmentLength = sampleRate * 30  // 30 seconds
+let overlap = sampleRate * 2  // 2 second overlap
+
+for start in stride(from: 0, to: audio.count, by: segmentLength - overlap) {
+    let segment = Array(audio[start..<min(start + segmentLength, audio.count)])
+    let stems = try model.separate(input: segment, mode: .timeOnly)
+    // Process stems...
+}
+```
+
+### Symptom: Artifacts at segment boundaries
+
+**Cause:** No overlap/crossfade between segments.
+
+**Fix:** Use overlapping segments with crossfade:
+
+```swift
+let overlap = sampleRate * 2  // 2 seconds
+
+func crossfade(_ a: [Float], _ b: [Float], samples: Int) -> [Float] {
+    var result = a
+    for i in 0..<samples {
+        let t = Float(i) / Float(samples)
+        let idx = a.count - samples + i
+        result[idx] = a[idx] * (1 - t) + b[i] * t
+    }
+    result.append(contentsOf: b[samples...])
+    return result
+}
+```
+
+---
+
 ## Filter Issues
 
 ### Symptom: Filter output explodes (NaN or Inf)

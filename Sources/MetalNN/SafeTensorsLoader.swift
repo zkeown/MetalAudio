@@ -481,8 +481,17 @@ public final class SafeTensorsLoader {
             throw LoaderError.fileNotFound(path: fileURL.path)
         }
 
-        // Seek to tensor data position
-        let absoluteOffset = UInt64(headerSize + info.dataOffsets.start)
+        // SECURITY: Use overflow-checked arithmetic for offset calculation
+        // Malicious SafeTensors files could have large offset values that cause wraparound
+        let (offsetSum, overflow) = headerSize.addingReportingOverflow(info.dataOffsets.start)
+        guard !overflow && offsetSum >= 0 else {
+            throw LoaderError.offsetOutOfBounds(
+                tensor: info.name,
+                offset: info.dataOffsets.start,
+                dataSize: headerSize
+            )
+        }
+        let absoluteOffset = UInt64(offsetSum)
         try handle.seek(toOffset: absoluteOffset)
 
         // Read tensor data
@@ -507,6 +516,17 @@ public final class SafeTensorsLoader {
     }
 
     private func convertToFloat32(data: Data, dtype: TensorInfo.DType) throws -> [Float] {
+        // SECURITY: Validate data size is aligned to dtype size before bindMemory
+        // Unaligned data could cause buffer overread when accessing via typed pointer
+        guard data.count % dtype.byteSize == 0 else {
+            let alignedSize = ((data.count / dtype.byteSize) + 1) * dtype.byteSize
+            throw LoaderError.dataTruncated(
+                tensor: "unknown",
+                expected: alignedSize,
+                available: data.count
+            )
+        }
+
         switch dtype {
         case .F32:
             return data.withUnsafeBytes { ptr in

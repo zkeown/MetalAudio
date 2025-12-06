@@ -10,7 +10,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Nothing yet — but stay tuned!
+
+#### MetalNN — Neural Network Layers
+
+- `GroupNorm` — Group normalization with three algorithm variants (standard, kahan, welford) for accuracy/speed tradeoffs
+- `LayerNorm` — Layer normalization for transformers
+- `MultiHeadAttention` — Scaled dot-product attention with PyTorch-compatible weight layout
+- `TransformerEncoderBlock` — Pre-norm transformer encoder blocks with self/cross-attention
+- `CrossTransformerEncoder` — Bidirectional cross-attention for time-frequency fusion
+- `UNetEncoderBlock` / `UNetDecoderBlock` — 1D U-Net architecture blocks with skip connections
+- `FreqUNetEncoderBlock2D` / `FreqUNetDecoderBlock2D` — 2D U-Net blocks for spectrogram processing
+- `DynamicConv1D` / `DynamicConvTranspose1D` — Variable-length 1D convolutions with output caching
+- `DynamicConv2D` / `DynamicConvTranspose2D` — Variable-size 2D convolutions for spectrograms
+- `SkipConnectionPool` / `SkipConnectionPool2D` — Dictionary-based skip connection storage for U-Net
+
+#### MetalNN — Complete Models
+
+- `HTDemucs` — Hybrid Transformer Demucs for 6-stem music source separation (drums, bass, other, vocals, guitar, piano). Two inference modes: `.timeOnly` (fast) and `.full` (best quality with cross-transformer fusion)
+
+#### MetalNN — Weight Loading
+
+- `SafeTensorsLoader` — Load PyTorch weights from Hugging Face SafeTensors format with F32/F16/BF16 support
+- `WeightNameMapper` — Auto-detect and convert between naming conventions (MetalAudio ↔ Demucs)
+- Helper methods: `loadConv1DWeights()`, `loadGroupNormWeights()`, `loadLinearWeights()`, `loadAttentionWeights()`, `loadFFNWeights()`
+
+#### Testing Infrastructure
+
+- PyTorch reference validation testing pattern with `ReferenceTestUtils`
+- Hardware-adaptive test tolerances via `ToleranceProvider`
+- CI resilience patterns for GPU driver variability
+
+### Changed
+
+- Swift 6 strict concurrency compatibility improvements
+- Improved numerical stability in normalization layers
+
+### Fixed
+
+- GroupNorm GPU driver variability causing NaN on some systems (use Welford algorithm for stability)
 
 ---
 

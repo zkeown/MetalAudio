@@ -1,0 +1,26 @@
+{
+  "name": "full_model_test",
+  "type": "full_model",
+  "input_shape": [
+    2,
+    44100
+  ],
+  "output_shape": [
+    6,
+    2,
+    44100
+  ],
+  "stems": [
+    "drums",
+    "bass",
+    "other",
+    "vocals",
+    "guitar",
+    "piano"
+  ],
+  "sample_rate": 44100,
+  "config": {
+    "audio_length": 44100,
+    "seed": 42
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "tests": [
+    "basic_3x3_no_padding",
+    "3x3_same_padding",
+    "3x3_stride2_htdemucs",
+    "1x1_pointwise",
+    "3x3_large_channels",
+    "3x3_no_bias",
+    "3x3_asymmetric_input",
+    "conv_transpose_basic",
+    "conv_transpose_htdemucs",
+    "identity_like"
+  ],
+  "count": 10,
+  "pytorch_version": "2.8.0",
+  "generator": "generate_conv2d_reference.py"
+}

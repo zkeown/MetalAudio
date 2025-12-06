@@ -213,8 +213,99 @@ conv.warmup()
 ```
 
 **Block size tradeoffs:**
+
 - Smaller (256-512): Lower latency, higher CPU
 - Larger (1024-2048): Higher latency, lower CPU
+
+---
+
+## HTDemucs Optimization
+
+### Inference Mode Selection
+
+| Mode | Speed | Quality | Memory | Use Case |
+|------|-------|---------|--------|----------|
+| `.timeOnly` | ~3x faster | ~70% | Lower | Real-time preview, streaming |
+| `.full` | Baseline | 100% | Higher | Final render, offline |
+
+```swift
+// Real-time preview
+let stems = try model.separate(input: audio, mode: .timeOnly)
+
+// Final render
+let stems = try model.separate(input: audio, mode: .full)
+```
+
+### Segment Length Optimization
+
+For long audio, segment length affects both memory and boundary artifacts:
+
+| Segment | Memory | Artifacts | Best For |
+|---------|--------|-----------|----------|
+| 10s | ~200MB | Minimal | Real-time streaming |
+| 30s | ~500MB | None | Standard processing |
+| 60s+ | ~1GB+ | None | High-quality render |
+
+```swift
+// Recommended: 30s segments with 2s overlap
+let segmentSamples = sampleRate * 30
+let overlapSamples = sampleRate * 2
+```
+
+### Memory Budget
+
+```swift
+let model = try HTDemucs(device: device, config: .htdemucs6s)
+
+// ~100MB for weights
+print("Model memory: \(model.memoryUsage / 1_000_000)MB")
+
+// Runtime memory varies with audio length
+// Estimate: ~10MB per second of audio
+let runtimeMemory = audioLengthSeconds * 10_000_000
+```
+
+---
+
+## GroupNorm Algorithm Selection
+
+GroupNorm offers three algorithms with different accuracy/speed tradeoffs:
+
+| Algorithm | Accuracy | Speed | GPU Driver Stability |
+|-----------|----------|-------|---------------------|
+| `.standard` | ~5e-4 | Fastest | Variable |
+| `.kahan` | ~2e-4 | ~1.1x | Good |
+| `.welford` | ~5e-5 | ~1.2x | Best |
+
+```swift
+// Production: Use Welford for stability
+let groupNorm = try GroupNorm(device: device, numGroups: 8, numChannels: 48)
+try groupNorm.setAlgorithm(.welford)
+
+// Maximum speed (if driver is stable)
+try groupNorm.setAlgorithm(.standard)
+```
+
+**Recommendation:** Use `.welford` in production. The ~20% speed penalty is worth the numerical stability across different GPU drivers.
+
+---
+
+## Dynamic Convolution Caching
+
+`DynamicConv1D` and `DynamicConv2D` cache output tensors by input shape:
+
+```swift
+// First call - allocates output tensor
+let out1 = try conv.forward(input: tensor1, encoder: encoder)
+
+// Second call with same shape - reuses tensor
+let out2 = try conv.forward(input: tensor2, encoder: encoder)  // Faster!
+
+// Different shape - allocates new tensor
+let out3 = try conv.forward(input: largerTensor, encoder: encoder)
+```
+
+**Tip:** Keep input shapes consistent within a processing session to maximize cache hits.
 
 ---
 

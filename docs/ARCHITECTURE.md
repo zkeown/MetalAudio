@@ -252,6 +252,204 @@ For encoder-LSTM-decoder architectures (common in audio ML):
 
 ---
 
+## HTDemucs — Music Source Separation
+
+> *"Splitting the mix like a prism splits light — six stems of pure audio clarity."* 🎸
+
+HTDemucs (Hybrid Transformer Demucs) is a state-of-the-art neural network for music source separation, separating mixed audio into 6 stems: drums, bass, other, vocals, guitar, and piano.
+
+### Architecture Overview
+
+```text
+                        ┌─────────────────────────────────┐
+                        │         Input Audio             │
+                        │      [2, samples] stereo        │
+                        └───────────────┬─────────────────┘
+                                        │
+              ┌─────────────────────────┼─────────────────────────┐
+              │                         │                         │
+              ▼                         │                         ▼
+    ┌─────────────────┐                 │               ┌─────────────────┐
+    │  Time Encoder   │                 │               │   STFT          │
+    │  (1D U-Net)     │                 │               │  [nfft=4096]    │
+    │                 │                 │               └────────┬────────┘
+    │  Conv1D + GN    │                 │                        │
+    │  ×5 levels      │                 │                        ▼
+    └────────┬────────┘                 │               ┌─────────────────┐
+             │                          │               │  Freq Encoder   │
+             │ skip connections         │               │  (2D U-Net)     │
+             │                          │               │                 │
+             ▼                          │               │  Conv2D + GN    │
+    ┌─────────────────┐                 │               │  ×5 levels      │
+    │ Time Bottleneck │                 │               └────────┬────────┘
+    │   [768, T/256]  │◄────────────────┼───────────────►        │
+    └────────┬────────┘                 │               ┌────────┴────────┐
+             │                          │               │ Freq Bottleneck │
+             │          ┌───────────────┴───────────┐   │   [768, F, T']  │
+             └─────────►│   Cross-Transformer       │◄──┘
+                        │   (5 layers)              │
+                        │                           │
+                        │  • Self-attention (time)  │
+                        │  • Cross-attention (t↔f)  │
+                        │  • Self-attention (freq)  │
+                        │  • FFN                    │
+                        └───────────┬───────────────┘
+              ┌─────────────────────┼─────────────────────────┐
+              │                     │                         │
+              ▼                     │                         ▼
+    ┌─────────────────┐             │               ┌─────────────────┐
+    │  Time Decoder   │             │               │  Freq Decoder   │
+    │  (1D U-Net)     │             │               │  (2D U-Net)     │
+    │                 │             │               │                 │
+    │  ConvT1D + GN   │             │               │  ConvT2D + GN   │
+    │  + skip concat  │             │               │  + skip concat  │
+    └────────┬────────┘             │               └────────┬────────┘
+             │                      │                        │
+             ▼                      │                        ▼
+    ┌─────────────────┐             │               ┌─────────────────┐
+    │  Output Heads   │             │               │   iSTFT         │
+    │  (×6 stems)     │             │               │  + Output Heads │
+    └────────┬────────┘             │               └────────┬────────┘
+             │                      │                        │
+             └──────────────────────┼────────────────────────┘
+                                    │
+                                    ▼
+                        ┌─────────────────────────────────┐
+                        │         6 Stem Outputs          │
+                        │  drums, bass, other, vocals,    │
+                        │  guitar, piano                  │
+                        └─────────────────────────────────┘
+```
+
+### Inference Modes
+
+| Mode | Speed | Quality | Use Case |
+|------|-------|---------|----------|
+| `.timeOnly` | Fast (~3x) | ~70% | Real-time preview, streaming |
+| `.full` | Slow | 100% | Final render, offline processing |
+
+**Time-only mode** processes only the time-domain path, skipping STFT, frequency U-Net, and cross-transformer. Useful for real-time previews.
+
+**Full mode** processes both paths with cross-transformer fusion, providing maximum quality at the cost of latency.
+
+### Configuration
+
+```swift
+// Default configuration for htdemucs_6s
+let config = HTDemucs.Config.htdemucs6s
+// - encoderChannels: [48, 96, 192, 384, 768]
+// - kernelSize: 8, stride: 4
+// - numGroups: 8 (for GroupNorm)
+// - nfft: 4096, hopLength: 1024
+// - crossAttentionLayers: 5, heads: 8, dim: 512
+```
+
+---
+
+## Attention Mechanisms
+
+### Scaled Dot-Product Attention
+
+The core attention operation used throughout HTDemucs and transformer layers:
+
+```text
+Attention(Q, K, V) = softmax(Q·K^T / √d_k) · V
+```
+
+**Numerical Stability:**
+
+- Uses max-subtract trick in softmax: `softmax(x) = softmax(x - max(x))`
+- Prevents overflow for large attention scores
+- Handles variable-length sequences with masking
+
+### Multi-Head Attention
+
+```swift
+let attention = try MultiHeadAttention(
+    device: device,
+    embedDim: 512,
+    numHeads: 8,
+    dropoutRate: 0.0  // No dropout for inference
+)
+```
+
+**Weight Layout (PyTorch compatible):**
+
+- `in_proj_weight`: [3 * embedDim, embedDim] — packed Q, K, V projections
+- `in_proj_bias`: [3 * embedDim]
+- `out_proj.weight`: [embedDim, embedDim]
+- `out_proj.bias`: [embedDim]
+
+---
+
+## U-Net Architecture
+
+U-Net is an encoder-decoder architecture with skip connections, essential for preserving fine details in audio reconstruction.
+
+### 1D U-Net (Time Domain)
+
+```text
+Input [C, L]
+    │
+    ├──►[Encoder 0]──►[48, L/4]────────────────────────────┐
+    │                     │                                 │
+    │                     ├──►[Encoder 1]──►[96, L/16]─────┐│
+    │                     │                     │          ││
+    │                     │                     ...        ││
+    │                     │                     │          ││
+    │                     │                   [768, L/1024]←┘│
+    │                     │                     │          ││
+    │                     │                     ▼          ││
+    │                     │              [Decoder 4]──────►││
+    │                     │                     │          ││
+    │                     │                     ...        ││
+    │                     │                     │          ││
+    │                     └──►[Decoder 1]◄─────┘          │
+    │                              │                      │
+    └────────────────────►[Decoder 0]◄────────────────────┘
+                               │
+                               ▼
+                        Output [C, L]
+```
+
+**Skip Connection Strategy:**
+
+- Each encoder level stores output for corresponding decoder level
+- Decoder concatenates upsampled input with skip connection
+- `SkipConnectionPool` manages storage by level index
+
+### 2D U-Net (Frequency Domain)
+
+Same architecture but operates on spectrograms `[C, F, T]`:
+
+- Uses 2D convolutions with 3×3 kernels
+- Stride (2, 2) for downsampling
+- Reflect padding for edge handling
+- `SkipConnectionPool2D` for 3D tensors
+
+---
+
+## GroupNorm Algorithm Variants
+
+GroupNorm divides channels into groups and normalizes within each group. HTDemucs uses 8 groups throughout.
+
+### Algorithm Selection
+
+| Algorithm | Accuracy | Speed | Use Case |
+|-----------|----------|-------|----------|
+| `.standard` | ~5e-4 | Fastest | Production, when speed matters |
+| `.kahan` | ~2e-4 | ~1.1x | Balanced accuracy/speed |
+| `.welford` | ~5e-5 | ~1.2x | Maximum accuracy, validation |
+
+```swift
+let groupNorm = try GroupNorm(device: device, numGroups: 8, numChannels: 48)
+try groupNorm.setAlgorithm(.welford)  // Maximum accuracy
+```
+
+**Note:** GPU driver variability can cause NaN issues on some systems. The Welford algorithm is more numerically stable and recommended for production.
+
+---
+
 ## Thread Safety Summary
 
 | Component | Thread-Safe? | Notes |

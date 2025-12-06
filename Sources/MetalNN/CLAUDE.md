@@ -60,8 +60,182 @@ All layers validate weights on load:
 ## HybridPipeline
 
 Combines best execution strategies for encoder-LSTM-decoder architectures:
+
 - **Encoder** (Conv1D): Metal GPU
 - **Bottleneck** (LSTM): BNNS CPU (or Metal fallback)
 - **Decoder** (ConvTranspose1D): Metal GPU
 
 Zero-copy on Apple Silicon unified memory.
+
+## GroupNorm
+
+Group normalization with three algorithm variants for accuracy/speed tradeoffs.
+
+### Algorithm Selection
+
+| Algorithm | Accuracy | Speed | When to Use |
+|-----------|----------|-------|-------------|
+| `.standard` | ~5e-4 | Fastest | Production, real-time |
+| `.kahan` | ~2e-4 | ~1.1x slower | Balanced |
+| `.welford` | ~5e-5 | ~1.2x slower | Maximum accuracy, validation |
+
+```swift
+let groupNorm = try GroupNorm(device: device, numGroups: 8, numChannels: 48)
+try groupNorm.setAlgorithm(.welford)  // Best accuracy, recommended for production
+try groupNorm.loadParameters(weight: gamma, bias: beta)
+```
+
+**Note:** Welford's algorithm is recommended for production due to better numerical stability across different GPU drivers.
+
+## Attention Layers
+
+### MultiHeadAttention
+
+GPU-accelerated scaled dot-product attention with PyTorch-compatible weights.
+
+```swift
+let attention = try MultiHeadAttention(
+    device: device,
+    embedDim: 512,
+    numHeads: 8,
+    dropoutRate: 0.0
+)
+
+// Load PyTorch weights
+let loader = try SafeTensorsLoader(fileURL: weightsURL)
+let weights = try loader.loadAttentionWeights(prefix: "transformer.layer.0.self_attn")
+try attention.loadWeights(
+    inProjWeight: weights.inProjWeight,
+    inProjBias: weights.inProjBias,
+    outProjWeight: weights.outProjWeight,
+    outProjBias: weights.outProjBias
+)
+```
+
+### CrossTransformerEncoder
+
+Bidirectional cross-attention between time and frequency domains.
+
+```swift
+let transformer = try CrossTransformerEncoder(
+    device: device,
+    embedDim: 512,
+    numHeads: 8,
+    ffnDim: 2048,
+    numLayers: 5
+)
+
+// Forward pass
+try transformer.forward(
+    timeInput: timeBottleneck,
+    freqInput: freqBottleneck,
+    timeOutput: timeOut,
+    freqOutput: freqOut,
+    encoder: encoder
+)
+```
+
+## HTDemucs Execution
+
+### High-Level API
+
+```swift
+let model = try HTDemucs(device: device, config: .htdemucs6s)
+try model.loadWeights(from: weightsURL)
+
+// Separate audio (interleaved stereo)
+let stems = try model.separate(input: audioSamples, mode: .timeOnly)
+
+// Access stems
+let vocals = stems["vocals"]!
+let drums = stems["drums"]!
+```
+
+### Inference Modes
+
+- **`.timeOnly`**: Fast mode (~3x faster), processes only time-domain U-Net. Good for real-time preview.
+- **`.full`**: Best quality, processes both time and frequency paths with cross-transformer fusion.
+
+### Weight Loading with Convention Mapping
+
+```swift
+// Auto-detect naming convention (MetalAudio or Demucs)
+let loader = try SafeTensorsLoader(fileURL: weightsURL)
+let mapper = loader.createWeightMapper()
+
+print("Detected convention: \(mapper.convention)")  // .demucs or .metalaudio
+
+// Load with automatic mapping
+try model.loadWeights(from: weightsURL)
+
+// Or explicitly specify convention
+try model.loadWeights(from: weightsURL, convention: .demucs)
+```
+
+## Weight Loading Workflow
+
+### SafeTensorsLoader
+
+```swift
+let loader = try SafeTensorsLoader(fileURL: modelURL)
+
+// List available tensors
+for name in loader.availableTensors {
+    if let info = loader.tensorInfo(name: name) {
+        print("\(name): \(info.shape) [\(info.dtype)]")
+    }
+}
+
+// Load tensor
+let weights = try loader.loadTensor(name: "encoder.0.conv.weight")
+
+// Load with shape validation
+let weights = try loader.loadTensor(
+    name: "linear.weight",
+    expectedShape: [512, 256]
+)
+```
+
+### Helper Methods
+
+```swift
+// Conv1D weights
+let conv = try loader.loadConv1DWeights(prefix: "encoder.0.conv")
+try layer.loadWeights(conv.weights, bias: conv.bias)
+
+// GroupNorm weights
+let norm = try loader.loadGroupNormWeights(prefix: "encoder.0.norm")
+try groupNorm.loadParameters(weight: norm.weight, bias: norm.bias)
+
+// Linear weights
+let linear = try loader.loadLinearWeights(prefix: "fc1")
+
+// Attention weights
+let attn = try loader.loadAttentionWeights(prefix: "self_attn")
+
+// FFN weights
+let ffn = try loader.loadFFNWeights(prefix: "ffn")
+```
+
+### WeightNameMapper
+
+Auto-detect and convert between naming conventions:
+
+```swift
+// Auto-detection
+let mapper = WeightNameMapper(tensorNames: loader.availableTensors)
+
+switch mapper.convention {
+case .metalaudio:
+    print("Already in MetalAudio format")
+case .demucs:
+    print("Converting from Demucs format")
+    let metalName = mapper.toMetalAudio(name: "tencoder.0.conv.weight")
+    // Returns: "time_encoder.0.conv.weight"
+case .unknown:
+    print("Unknown format")
+}
+
+// Batch conversion
+let mappedWeights = mapper.mapAllToMetalAudio(weightDict)
+```
