@@ -94,11 +94,13 @@ public struct ReferenceTestUtils {
     /// Load reference data from JSON file
     /// - Parameter name: Name of the reference file (without .json extension)
     /// - Returns: Parsed reference data
+    /// - Throws: XCTSkip if reference file is not found (allows tests to skip gracefully)
     public static func loadReference(_ name: String) throws -> ReferenceData {
         let bundle = Bundle(for: DummyBundleClass.self)
 
         guard let url = bundle.url(forResource: name, withExtension: "json") else {
-            throw ReferenceError.fileNotFound(name)
+            // Skip tests gracefully when reference data is not available
+            throw XCTSkip("Reference file '\(name).json' not found - generate with Scripts/generate_pytorch_references.py")
         }
 
         let data = try Data(contentsOf: url)
@@ -108,15 +110,20 @@ public struct ReferenceTestUtils {
     /// Load all references matching a pattern
     /// - Parameter prefix: File name prefix to match
     /// - Returns: Array of reference data
+    /// - Throws: XCTSkip if no matching reference files are found
     public static func loadReferences(matching prefix: String) throws -> [ReferenceData] {
         let bundle = Bundle(for: DummyBundleClass.self)
         guard let resourcePath = bundle.resourcePath else {
-            throw ReferenceError.resourcePathNotFound
+            throw XCTSkip("Test bundle resource path not found")
         }
 
         let fileManager = FileManager.default
         let files = try fileManager.contentsOfDirectory(atPath: resourcePath)
             .filter { $0.hasPrefix(prefix) && $0.hasSuffix(".json") }
+
+        if files.isEmpty {
+            throw XCTSkip("No reference files matching '\(prefix)*.json' found - generate with Scripts/generate_pytorch_references.py")
+        }
 
         return try files.map { fileName in
             let name = String(fileName.dropLast(5))  // Remove .json
@@ -220,6 +227,7 @@ extension ReferenceTestUtils {
 
     /// Load PyTorch references JSON file
     /// - Returns: Dictionary containing all reference data
+    /// - Throws: XCTSkip if reference file is not found (allows tests to skip gracefully)
     public static func loadPyTorchReferences() throws -> [String: Any] {
         // Use Bundle(for:) as Bundle.module can be ambiguous on some iOS versions
         let bundle = Bundle(for: DummyBundleClass.self)
@@ -237,7 +245,9 @@ extension ReferenceTestUtils {
         }
 
         guard let finalUrl = url else {
-            throw ReferenceError.fileNotFound("pytorch_references")
+            // Skip tests gracefully when reference data is not available
+            // Reference data should be generated locally with Scripts/generate_pytorch_references.py
+            throw XCTSkip("pytorch_references.json not found - run Scripts/generate_pytorch_references.py to generate")
         }
 
         let data = try Data(contentsOf: finalUrl)
