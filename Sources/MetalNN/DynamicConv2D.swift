@@ -85,7 +85,10 @@ public final class DynamicConv2D: NNLayer {
     private var pipeline: MTLComputePipelineState?
 
     // Output tensor cache by (inputHeight, inputWidth) encoded as string
+    // LRU eviction when cache exceeds maxCacheSize
+    private static let maxCacheSize = 16
     private var outputTensorCache: [String: Tensor] = [:]
+    private var cacheAccessOrder: [String] = []  // LRU tracking: oldest first
 
     // Reflect padding buffer (reused)
     private var paddedInputBuffer: Tensor?
@@ -278,13 +281,24 @@ public final class DynamicConv2D: NNLayer {
         // Cache key based on input dimensions
         let cacheKey = "\(inputH)x\(inputW)"
 
-        // Get or create cached output tensor
+        // Get or create cached output tensor (LRU eviction)
         let output: Tensor
         if let cached = outputTensorCache[cacheKey] {
             output = cached
+            // Move to end of access order (most recently used)
+            if let index = cacheAccessOrder.firstIndex(of: cacheKey) {
+                cacheAccessOrder.remove(at: index)
+            }
+            cacheAccessOrder.append(cacheKey)
         } else {
+            // Evict oldest entry if cache is full
+            if outputTensorCache.count >= Self.maxCacheSize {
+                let oldestKey = cacheAccessOrder.removeFirst()
+                outputTensorCache.removeValue(forKey: oldestKey)
+            }
             output = try Tensor(device: device, shape: [outputChannels, outH, outW])
             outputTensorCache[cacheKey] = output
+            cacheAccessOrder.append(cacheKey)
         }
 
         try forward(input: input, output: output, encoder: encoder)
@@ -606,7 +620,10 @@ public final class DynamicConvTranspose2D: NNLayer {
     private let bias: Tensor?
     private var pipeline: MTLComputePipelineState?
 
+    // Output tensor cache with LRU eviction
+    private static let maxCacheSize = 16
     private var outputTensorCache: [String: Tensor] = [:]
+    private var cacheAccessOrder: [String] = []  // LRU tracking: oldest first
 
     /// Initialize DynamicConvTranspose2D
     public init(
@@ -724,12 +741,24 @@ public final class DynamicConvTranspose2D: NNLayer {
 
         let cacheKey = "\(inputH)x\(inputW)"
 
+        // Get or create cached output tensor (LRU eviction)
         let output: Tensor
         if let cached = outputTensorCache[cacheKey] {
             output = cached
+            // Move to end of access order (most recently used)
+            if let index = cacheAccessOrder.firstIndex(of: cacheKey) {
+                cacheAccessOrder.remove(at: index)
+            }
+            cacheAccessOrder.append(cacheKey)
         } else {
+            // Evict oldest entry if cache is full
+            if outputTensorCache.count >= Self.maxCacheSize {
+                let oldestKey = cacheAccessOrder.removeFirst()
+                outputTensorCache.removeValue(forKey: oldestKey)
+            }
             output = try Tensor(device: device, shape: [outputChannels, outH, outW])
             outputTensorCache[cacheKey] = output
+            cacheAccessOrder.append(cacheKey)
         }
 
         try forward(input: input, output: output, encoder: encoder)
