@@ -1,3 +1,5 @@
+// CoreMLToBNNS requires Swift 6 / Xcode 16 SDK (BNNS Graph API)
+#if compiler(>=6.0)
 import XCTest
 @testable import MetalNN
 
@@ -615,3 +617,4 @@ final class CoreMLToBNNSIntegrationTests: XCTestCase {
         }
     }
 }
+#endif  // compiler(>=6.0)

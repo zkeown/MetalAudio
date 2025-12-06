@@ -1,3 +1,5 @@
+// ChunkedInference requires Swift 6 / Xcode 16 SDK (BNNS Graph API)
+#if compiler(>=6.0)
 import XCTest
 @testable import MetalNN
 @testable import MetalAudioKit
@@ -242,3 +244,4 @@ final class ChunkedInferenceTests: XCTestCase {
         XCTAssertLessThan(abs(window[255]), 0.01)
     }
 }
+#endif  // compiler(>=6.0)

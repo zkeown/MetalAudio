@@ -79,7 +79,7 @@ let package = Package(
         // MARK: - Neural Networks
         .target(
             name: "MetalNN",
-            dependencies: ["MetalAudioKit"],
+            dependencies: ["MetalAudioKit", "MetalDSP"],
             path: "Sources/MetalNN",
             exclude: ["CLAUDE.md"],
             resources: [
