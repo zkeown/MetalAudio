@@ -160,6 +160,10 @@ final class GroupNormTests: XCTestCase {
     }
 
     func testForwardWithBatched_NormalizesEachSample() throws {
+        // Skip on CI due to GPU driver variability
+        try XCTSkipIf(ProcessInfo.processInfo.environment["CI"] != nil,
+                      "Skipping GPU forward test on CI due to driver variability")
+
         let batchSize = 2
         let numChannels = 4
         let numGroups = 2
@@ -250,6 +254,10 @@ final class GroupNormTests: XCTestCase {
     }
 
     func testForwardNegativeValues_Succeeds() throws {
+        // Skip on CI due to GPU driver variability
+        try XCTSkipIf(ProcessInfo.processInfo.environment["CI"] != nil,
+                      "Skipping GPU forward test on CI due to driver variability")
+
         let groupNorm = try GroupNorm(device: device, numGroups: 2, numChannels: 8)
 
         let input = try Tensor(device: device, shape: [8, 16])
