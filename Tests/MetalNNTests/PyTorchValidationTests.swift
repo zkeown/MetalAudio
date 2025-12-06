@@ -27,7 +27,9 @@ final class PyTorchValidationTests: XCTestCase {
         context = try ComputeContext(device: device)
 
         // Load reference data
-        guard let url = Bundle.module.url(forResource: "transformer_reference", withExtension: "json") else {
+        // Use Bundle(for:) as Bundle.module can be ambiguous on some iOS versions
+        let bundle = Bundle(for: type(of: self))
+        guard let url = bundle.url(forResource: "transformer_reference", withExtension: "json") else {
             throw XCTSkip("transformer_reference.json not found in Resources. Run Scripts/generate_transformer_reference.py first.")
         }
 

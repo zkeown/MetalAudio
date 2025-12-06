@@ -221,8 +221,8 @@ extension ReferenceTestUtils {
     /// Load PyTorch references JSON file
     /// - Returns: Dictionary containing all reference data
     public static func loadPyTorchReferences() throws -> [String: Any] {
-        // Use Bundle.module which SPM generates for test targets with resources
-        let bundle = Bundle.module
+        // Use Bundle(for:) as Bundle.module can be ambiguous on some iOS versions
+        let bundle = Bundle(for: DummyBundleClass.self)
 
         // Try finding the file in Resources subdirectory (SPM copies directory structure)
         var url = bundle.url(forResource: "pytorch_references", withExtension: "json", subdirectory: "Resources")
