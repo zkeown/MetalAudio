@@ -997,8 +997,8 @@ final class ComputeContextTests: XCTestCase {
         let context = try ComputeContext(device: device)
 
         let expectation = self.expectation(description: "Async execution completed")
-        var executionCompleted = false
-        var executionError: Error?
+        nonisolated(unsafe) var executionCompleted = false
+        nonisolated(unsafe) var executionError: Error?
 
         context.executeAsync({ _ in
             // Simple operation
@@ -1017,7 +1017,7 @@ final class ComputeContextTests: XCTestCase {
     func testTryExecuteAsyncSuccess() throws {
         let context = try ComputeContext(device: device)
 
-        var completionCalled = false
+        nonisolated(unsafe) var completionCalled = false
         let success = context.tryExecuteAsync({ _ in
             // Simple operation
         }, completion: { _ in
@@ -1241,7 +1241,7 @@ final class ComputeContextExtendedTests: XCTestCase {
         let context = try ComputeContext(device: device)
 
         let expectation = self.expectation(description: "Execute with fence completed")
-        var receivedFence: UInt64 = 0
+        nonisolated(unsafe) var receivedFence: UInt64 = 0
 
         context.executeWithFence({ _ in
             // Do some work
@@ -1265,7 +1265,7 @@ final class ComputeContextExtendedTests: XCTestCase {
 
         // Execute and get fence
         let expectation = self.expectation(description: "Got fence")
-        var fenceValue: UInt64 = 0
+        nonisolated(unsafe) var fenceValue: UInt64 = 0
 
         context.executeWithFence({ _ in
             // Do some work
@@ -2302,7 +2302,7 @@ final class ComputeContextEdgeCaseTests: XCTestCase {
         let context = try ComputeContext(device: device)
 
         let expectation = self.expectation(description: "Completion called")
-        var completionCalled = false
+        nonisolated(unsafe) var completionCalled = false
 
         context.executeAsync({ _ in
             // Valid encoding - does nothing but doesn't crash

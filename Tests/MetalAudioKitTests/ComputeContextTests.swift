@@ -194,7 +194,7 @@ final class ComputeContextExecutionTests: XCTestCase {
 
     func testExecuteAsyncBlocking() throws {
         let expectation = expectation(description: "Async completion")
-        var completionError: Error?
+        nonisolated(unsafe) var completionError: Error?
 
         context.executeAsyncBlocking({ _ in
             // Simple operation
@@ -209,7 +209,7 @@ final class ComputeContextExecutionTests: XCTestCase {
 
     func testExecuteAsyncBlockingWithError() throws {
         let expectation = expectation(description: "Async error completion")
-        var receivedError: Error?
+        nonisolated(unsafe) var receivedError: Error?
 
         context.executeAsyncBlocking({ _ in
             throw MetalAudioError.invalidConfiguration("test error")
