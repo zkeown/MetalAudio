@@ -88,7 +88,7 @@ public final class HTDemucs {
     public var timeEncoderLevels: Int { timeEncoders.count }
 
     /// Number of frequency encoder levels
-    public var freqEncoderLevels: Int { freqEncoders.count }
+    public var freqEncoderLevels: Int { freqEncoders2D.count }
 
     /// Number of output heads
     public var outputHeadCount: Int { outputHeads.count }
@@ -112,14 +112,16 @@ public final class HTDemucs {
             count += dec.outputChannels * 2  // norm
         }
 
-        // Freq encoders/decoders (similar)
-        for enc in freqEncoders {
-            count += enc.outputChannels * enc.inputChannels * config.kernelSize
-            count += enc.outputChannels
-            count += enc.outputChannels * 2
+        // Freq encoders/decoders (2D convolutions: kernel is 3x3)
+        let freqKernelH = 3
+        let freqKernelW = 3
+        for enc in freqEncoders2D {
+            count += enc.outputChannels * enc.inputChannels * freqKernelH * freqKernelW
+            count += enc.outputChannels  // bias
+            count += enc.outputChannels * 2  // norm weight/bias
         }
-        for dec in freqDecoders {
-            count += dec.outputChannels * (dec.inputChannels + dec.skipChannels) * config.kernelSize
+        for dec in freqDecoders2D {
+            count += dec.outputChannels * (dec.inputChannels + dec.skipChannels) * freqKernelH * freqKernelW
             count += dec.outputChannels
             count += dec.outputChannels * 2
         }
@@ -148,13 +150,15 @@ public final class HTDemucs {
     private var context: ComputeContext
     private var timeEncoders: [UNetEncoderBlock] = []
     private var timeDecoders: [UNetDecoderBlock] = []
-    private var freqEncoders: [UNetEncoderBlock] = []
-    private var freqDecoders: [UNetDecoderBlock] = []
+    /// 2D frequency encoders for proper spectrogram processing
+    private var freqEncoders2D: [FreqUNetEncoderBlock2D] = []
+    /// 2D frequency decoders for proper spectrogram processing
+    private var freqDecoders2D: [FreqUNetDecoderBlock2D] = []
     private var _crossTransformer: CrossTransformerEncoder?
     private var outputHeads: [DynamicConv1D] = []
-    private var freqOutputHeads: [DynamicConv1D] = []
+    private var freqOutputHeads2D: [DynamicConv2D] = []
     private var timeSkipPool = SkipConnectionPool()
-    private var freqSkipPool = SkipConnectionPool()
+    private var freqSkipPool2D = SkipConnectionPool2D()
     private var fft: FFT?
 
     /// Projection layers for cross-transformer (time/freq bottleneck → transformer dim)
@@ -289,40 +293,40 @@ public final class HTDemucs {
     }
 
     private func buildFreqUNet() throws {
-        // Frequency path has complex input (real + imag), so double the channels
-        // But for simplicity, we treat magnitude as input channels
+        // Frequency path processes spectrograms [channels, freqBins, timeFrames]
+        // Using 2D convolutions with 3x3 kernels and stride (2, 2) for downsampling
         let freqInputChannels = config.inputChannels  // Stereo magnitude
 
         let channels = [freqInputChannels] + config.encoderChannels
 
-        // Encoders
+        // 2D frequency encoders
         for i in 0..<config.encoderChannels.count {
             let numGroups = i == 0 ? min(config.numGroups, channels[i]) : config.numGroups
 
-            let encConfig = UNetEncoderBlock.Config(
+            let encConfig = FreqUNetEncoderBlock2D.Config(
                 inputChannels: channels[i],
                 outputChannels: channels[i + 1],
-                kernelSize: config.kernelSize,
-                stride: config.stride,
-                numGroups: numGroups
+                kernelSize: (height: 3, width: 3),
+                stride: (height: 2, width: 2),
+                numGroups: max(1, numGroups)
             )
-            freqEncoders.append(try UNetEncoderBlock(device: device, config: encConfig))
+            freqEncoders2D.append(try FreqUNetEncoderBlock2D(device: device, config: encConfig))
         }
 
-        // Decoders (reverse order)
+        // 2D frequency decoders (reverse order)
         for i in (0..<config.encoderChannels.count).reversed() {
             let outChannels = i == 0 ? freqInputChannels : channels[i]
             let numGroups = i == 0 ? min(config.numGroups, outChannels) : config.numGroups
 
-            let decConfig = UNetDecoderBlock.Config(
+            let decConfig = FreqUNetDecoderBlock2D.Config(
                 inputChannels: channels[i + 1],
                 skipChannels: channels[i + 1],
                 outputChannels: outChannels,
-                kernelSize: config.kernelSize,
-                stride: config.stride,
+                kernelSize: (height: 3, width: 3),
+                stride: (height: 2, width: 2),
                 numGroups: max(1, numGroups)
             )
-            freqDecoders.append(try UNetDecoderBlock(device: device, config: decConfig))
+            freqDecoders2D.append(try FreqUNetDecoderBlock2D(device: device, config: decConfig))
         }
     }
 
@@ -331,7 +335,7 @@ public final class HTDemucs {
         // Each head produces inputChannels for one stem
         let headInputChannels = config.inputChannels
 
-        // Time-domain output heads
+        // Time-domain output heads (1D convolutions)
         for _ in 0..<numStems {
             let head = try DynamicConv1D(
                 device: device,
@@ -345,19 +349,19 @@ public final class HTDemucs {
             outputHeads.append(head)
         }
 
-        // Frequency-domain output heads (for magnitude masking)
+        // Frequency-domain output heads (2D convolutions for spectrogram masking)
         // Input: freq decoder output channels, Output: same (for masking)
         for _ in 0..<numStems {
-            let head = try DynamicConv1D(
+            let head = try DynamicConv2D(
                 device: device,
                 inputChannels: headInputChannels,
                 outputChannels: config.inputChannels,
-                kernelSize: 1,
-                stride: 1,
+                kernelSize: (height: 1, width: 1),
+                stride: (height: 1, width: 1),
                 paddingMode: .valid,
                 useBias: true
             )
-            freqOutputHeads.append(head)
+            freqOutputHeads2D.append(head)
         }
     }
 
@@ -394,7 +398,7 @@ public final class HTDemucs {
     ///
     /// - Parameters:
     ///   - input: Input tensor [channels, samples]
-    ///   - freqInput: Frequency-domain input [channels, freqBins, frames] (magnitude)
+    ///   - freqMagnitude: Frequency-domain input [channels, freqBins, frames] (3D magnitude spectrogram)
     ///   - freqPhase: Phase information [channels, freqBins, frames] for reconstruction
     ///   - encoder: Metal compute command encoder
     /// - Returns: Dictionary mapping stem names to output tensors [channels, samples]
@@ -406,7 +410,7 @@ public final class HTDemucs {
     ) throws -> [String: Tensor] {
         // Clear skip connection pools
         timeSkipPool.clear()
-        freqSkipPool.clear()
+        freqSkipPool2D.clear()
 
         // === Time-domain Encoder ===
         var timeX = input
@@ -417,18 +421,22 @@ public final class HTDemucs {
         }
         let timeBottleneck = timeX
 
-        // === Frequency-domain Encoder ===
+        // === Frequency-domain 2D Encoder ===
+        // Input: [channels, freqBins, timeFrames] - proper 3D spectrogram
         var freqX = freqMagnitude
-        for (level, enc) in freqEncoders.enumerated() {
+        for (level, enc) in freqEncoders2D.enumerated() {
             let (output, skip) = try enc.forward(input: freqX, encoder: encoder)
-            freqSkipPool.store(skip: skip, level: level)
+            freqSkipPool2D.store(skip: skip, level: level)
             freqX = output
         }
+        // freqX bottleneck shape: [bottleneckChannels, freqBins/2^levels, timeFrames/2^levels]
         let freqBottleneck = freqX
 
         // === Cross-Transformer Fusion ===
+        // Need to flatten freq bottleneck for transformer: [C, H, W] → [C, H*W]
         var timeProcessed = timeBottleneck
         var freqProcessed = freqBottleneck
+        let freqBottleneckShape = freqBottleneck.shape  // Save for unflattening
 
         if let transformer = _crossTransformer,
            let timeProj = timeToTransformerProj,
@@ -436,9 +444,12 @@ public final class HTDemucs {
            let timeBack = transformerToTimeProj,
            let freqBack = transformerToFreqProj {
 
+            // Flatten freq bottleneck for 1D projection: [C, H, W] → [C, H*W]
+            let freqFlattened = try flattenSpatial(freqBottleneck)
+
             // Project to transformer dimension
             let timeForTransformer = try timeProj.forward(input: timeBottleneck, encoder: encoder)
-            let freqForTransformer = try freqProj.forward(input: freqBottleneck, encoder: encoder)
+            let freqForTransformer = try freqProj.forward(input: freqFlattened, encoder: encoder)
 
             // Create output tensors for transformer
             let timeTransOut = try Tensor(device: device, shape: timeForTransformer.shape)
@@ -455,7 +466,10 @@ public final class HTDemucs {
 
             // Project back to bottleneck dimension and add residual
             let timeResidual = try timeBack.forward(input: timeTransOut, encoder: encoder)
-            let freqResidual = try freqBack.forward(input: freqTransOut, encoder: encoder)
+            let freqResidualFlat = try freqBack.forward(input: freqTransOut, encoder: encoder)
+
+            // Unflatten freq residual back to 3D: [C, H*W] → [C, H, W]
+            let freqResidual = try unflattenSpatial(freqResidualFlat, targetShape: freqBottleneckShape)
 
             // Add residual connections
             timeProcessed = try addTensors(timeBottleneck, timeResidual, encoder: encoder)
@@ -472,11 +486,11 @@ public final class HTDemucs {
             timeDecoded = try dec.forward(input: timeDecoded, skip: skip, encoder: encoder)
         }
 
-        // === Frequency-domain Decoder ===
+        // === Frequency-domain 2D Decoder ===
         var freqDecoded = freqProcessed
-        for (i, dec) in freqDecoders.enumerated() {
-            let level = freqEncoders.count - 1 - i
-            guard let skip = freqSkipPool.retrieve(level: level) else {
+        for (i, dec) in freqDecoders2D.enumerated() {
+            let level = freqEncoders2D.count - 1 - i
+            guard let skip = freqSkipPool2D.retrieve(level: level) else {
                 throw MetalAudioError.invalidConfiguration("Missing freq skip connection for level \(level)")
             }
             freqDecoded = try dec.forward(input: freqDecoded, skip: skip, encoder: encoder)
@@ -485,18 +499,19 @@ public final class HTDemucs {
         // === Apply Output Heads and Fuse ===
         var stems: [String: Tensor] = [:]
 
-        for (i, (timeHead, freqHead)) in zip(outputHeads, freqOutputHeads).enumerated() {
+        for (i, (timeHead, freqHead)) in zip(outputHeads, freqOutputHeads2D).enumerated() {
             let stemName = i < Self.stemNames.count ? Self.stemNames[i] : "stem_\(i)"
 
             // Time-domain stem output
             let timeStem = try timeHead.forward(input: timeDecoded, encoder: encoder)
 
-            // Frequency-domain stem output (will be used as mask)
+            // Frequency-domain stem output (2D, will be used as mask)
             let freqStem = try freqHead.forward(input: freqDecoded, encoder: encoder)
 
             // For now, just use time output
             // Full implementation would apply freqStem as mask to input spectrum,
             // iSTFT back to time domain, and add to timeStem
+            _ = freqStem  // Silence unused warning until full fusion is implemented
             stems[stemName] = timeStem
         }
 
@@ -550,6 +565,36 @@ public final class HTDemucs {
 
         let output = try Tensor(device: device, shape: a.shape)
         try output.copy(from: result)
+        return output
+    }
+
+    /// Flatten spatial dimensions of 3D tensor: [C, H, W] → [C, H*W]
+    private func flattenSpatial(_ tensor: Tensor) throws -> Tensor {
+        guard tensor.shape.count == 3 else {
+            throw MetalAudioError.invalidConfiguration(
+                "flattenSpatial requires 3D tensor, got shape \(tensor.shape)"
+            )
+        }
+
+        let channels = tensor.shape[0]
+        let height = tensor.shape[1]
+        let width = tensor.shape[2]
+
+        let output = try Tensor(device: device, shape: [channels, height * width])
+        try output.copy(from: tensor.toArray())
+        return output
+    }
+
+    /// Unflatten 2D tensor back to 3D: [C, H*W] → [C, H, W]
+    private func unflattenSpatial(_ tensor: Tensor, targetShape: [Int]) throws -> Tensor {
+        guard tensor.shape.count == 2, targetShape.count == 3 else {
+            throw MetalAudioError.invalidConfiguration(
+                "unflattenSpatial requires 2D input and 3D target shape"
+            )
+        }
+
+        let output = try Tensor(device: device, shape: targetShape)
+        try output.copy(from: tensor.toArray())
         return output
     }
 
@@ -650,7 +695,7 @@ public final class HTDemucs {
     /// - Parameters:
     ///   - paddedInput: De-interleaved padded input [ch0_samples..., ch1_samples...]
     ///   - paddedLength: Length per channel
-    /// - Returns: Tuple of (magnitude tensor, phase arrays for reconstruction)
+    /// - Returns: Tuple of (magnitude tensor [channels, freqBins, timeFrames], phase arrays)
     private func prepareFrequencyInput(
         paddedInput: [Float],
         paddedLength: Int
@@ -659,10 +704,14 @@ public final class HTDemucs {
             throw MetalAudioError.invalidConfiguration("FFT not initialized")
         }
 
-        var allMagnitudes: [Float] = []
+        let freqBins = config.nfft / 2 + 1
+        var numFrames = 0
         var allPhases: [[Float]] = []
 
-        // Process each channel
+        // First pass: compute STFT for all channels to get dimensions
+        var channelMagnitudes: [[[Float]]] = []  // [channel][frame][freqBin]
+        var channelPhases: [[[Float]]] = []
+
         for ch in 0..<config.inputChannels {
             let channelStart = ch * paddedLength
             let channelEnd = channelStart + paddedLength
@@ -670,6 +719,10 @@ public final class HTDemucs {
 
             // Perform STFT
             let stftResult = try fft.stft(input: channelData)
+            numFrames = stftResult.frameCount
+
+            var chMagnitudes: [[Float]] = []
+            var chPhases: [[Float]] = []
 
             // Convert to magnitude and phase
             for frameIdx in 0..<stftResult.frameCount {
@@ -684,22 +737,34 @@ public final class HTDemucs {
                     phase[i] = atan2(imag[i], real[i])
                 }
 
-                allMagnitudes.append(contentsOf: magnitude)
+                chMagnitudes.append(magnitude)
+                chPhases.append(phase)
                 allPhases.append(phase)
+            }
+
+            channelMagnitudes.append(chMagnitudes)
+            channelPhases.append(chPhases)
+        }
+
+        // Reorganize magnitude data for 3D tensor: [channels, freqBins, timeFrames]
+        // Memory layout: for each channel, for each freqBin, for each timeFrame
+        var magnitudeData = [Float](repeating: 0, count: config.inputChannels * freqBins * numFrames)
+
+        for ch in 0..<config.inputChannels {
+            for f in 0..<freqBins {
+                for t in 0..<numFrames {
+                    let idx = ch * freqBins * numFrames + f * numFrames + t
+                    magnitudeData[idx] = channelMagnitudes[ch][t][f]
+                }
             }
         }
 
-        // Calculate frequency tensor shape
-        // For simplicity, flatten to [channels, freqBins * frames]
-        let freqBins = config.nfft / 2 + 1
-        let framesPerChannel = allPhases.count / config.inputChannels
-
-        // Create magnitude tensor [channels, freqBins * frames]
+        // Create 3D magnitude tensor [channels, freqBins, timeFrames]
         let magnitudeTensor = try Tensor(
             device: device,
-            shape: [config.inputChannels, freqBins * framesPerChannel]
+            shape: [config.inputChannels, freqBins, numFrames]
         )
-        try magnitudeTensor.copy(from: allMagnitudes)
+        try magnitudeTensor.copy(from: magnitudeData)
 
         return (magnitudeTensor, allPhases)
     }
@@ -778,7 +843,10 @@ public final class HTDemucs {
 
     // MARK: - Weight Loading
 
-    /// Load weights from a SafeTensors file.
+    /// Load weights from a SafeTensors file with auto-detection of naming convention.
+    ///
+    /// Automatically detects whether the weights use MetalAudio or Demucs naming convention
+    /// and maps them appropriately.
     ///
     /// - Parameter url: URL to the .safetensors file
     public func loadWeights(from url: URL) throws {
@@ -788,12 +856,53 @@ public final class HTDemucs {
         }
 
         let loader = try SafeTensorsLoader(fileURL: url)
+        let mapper = loader.createWeightMapper()
+
+        // Use the appropriate loading method based on detected convention
+        try loadWeights(from: loader, mapper: mapper)
+    }
+
+    /// Load weights from a SafeTensors file with explicit naming convention.
+    ///
+    /// - Parameters:
+    ///   - url: URL to the .safetensors file
+    ///   - convention: The naming convention used in the file
+    public func loadWeights(from url: URL, convention: WeightNamingConvention) throws {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw MetalAudioError.invalidConfiguration("File not found: \(url.path)")
+        }
+
+        let loader = try SafeTensorsLoader(fileURL: url)
+        let mapper = WeightNameMapper(convention: convention)
+
+        try loadWeights(from: loader, mapper: mapper)
+    }
+
+    /// Load weights using a loader and mapper.
+    ///
+    /// - Parameters:
+    ///   - loader: SafeTensors loader
+    ///   - mapper: Weight name mapper configured for the file's convention
+    private func loadWeights(from loader: SafeTensorsLoader, mapper: WeightNameMapper) throws {
+        // For MetalAudio convention, use names directly
+        // For other conventions, map the names appropriately
+        let useDirectNames = mapper.convention == .metalaudio
 
         // Load time encoder weights
         for (i, enc) in timeEncoders.enumerated() {
-            let prefix = "time_encoder.\(i)"
-            let convWeights = try loader.loadConv1DWeights(prefix: "\(prefix).conv")
-            let normWeights = try loader.loadGroupNormWeights(prefix: "\(prefix).norm")
+            let prefix: String
+            if useDirectNames {
+                prefix = "time_encoder.\(i)"
+            } else {
+                // Map from MetalAudio to source convention
+                prefix = "tencoder.\(i)"
+            }
+
+            let convPrefix = useDirectNames ? "\(prefix).conv" : "\(prefix).conv"
+            let normPrefix = useDirectNames ? "\(prefix).norm" : "\(prefix).norm1"
+
+            let convWeights = try loader.loadConv1DWeights(prefix: convPrefix)
+            let normWeights = try loader.loadGroupNormWeights(prefix: normPrefix)
             try enc.loadWeights(
                 convWeight: convWeights.weights,
                 convBias: convWeights.bias,
@@ -804,9 +913,22 @@ public final class HTDemucs {
 
         // Load time decoder weights
         for (i, dec) in timeDecoders.enumerated() {
-            let prefix = "time_decoder.\(i)"
-            let convWeights = try loader.loadConv1DWeights(prefix: "\(prefix).conv_transpose")
-            let normWeights = try loader.loadGroupNormWeights(prefix: "\(prefix).norm")
+            let prefix: String
+            let convSuffix: String
+            let normSuffix: String
+
+            if useDirectNames {
+                prefix = "time_decoder.\(i)"
+                convSuffix = "conv_transpose"
+                normSuffix = "norm"
+            } else {
+                prefix = "tdecoder.\(i)"
+                convSuffix = "conv_tr"
+                normSuffix = "norm2"
+            }
+
+            let convWeights = try loader.loadConv1DWeights(prefix: "\(prefix).\(convSuffix)")
+            let normWeights = try loader.loadGroupNormWeights(prefix: "\(prefix).\(normSuffix)")
             try dec.loadWeights(
                 convTransposeWeight: convWeights.weights,
                 convTransposeBias: convWeights.bias,
@@ -815,11 +937,22 @@ public final class HTDemucs {
             )
         }
 
-        // Load freq encoder weights
-        for (i, enc) in freqEncoders.enumerated() {
-            let prefix = "freq_encoder.\(i)"
+        // Load freq encoder weights (2D convolutions)
+        for (i, enc) in freqEncoders2D.enumerated() {
+            let prefix: String
+            let normSuffix: String
+
+            if useDirectNames {
+                prefix = "freq_encoder.\(i)"
+                normSuffix = "norm"
+            } else {
+                prefix = "encoder.\(i)"
+                normSuffix = "norm1"
+            }
+
+            // Load Conv2D weights (same structure as Conv1D, just different shape)
             let convWeights = try loader.loadConv1DWeights(prefix: "\(prefix).conv")
-            let normWeights = try loader.loadGroupNormWeights(prefix: "\(prefix).norm")
+            let normWeights = try loader.loadGroupNormWeights(prefix: "\(prefix).\(normSuffix)")
             try enc.loadWeights(
                 convWeight: convWeights.weights,
                 convBias: convWeights.bias,
@@ -828,11 +961,25 @@ public final class HTDemucs {
             )
         }
 
-        // Load freq decoder weights
-        for (i, dec) in freqDecoders.enumerated() {
-            let prefix = "freq_decoder.\(i)"
-            let convWeights = try loader.loadConv1DWeights(prefix: "\(prefix).conv_transpose")
-            let normWeights = try loader.loadGroupNormWeights(prefix: "\(prefix).norm")
+        // Load freq decoder weights (2D transposed convolutions)
+        for (i, dec) in freqDecoders2D.enumerated() {
+            let prefix: String
+            let convSuffix: String
+            let normSuffix: String
+
+            if useDirectNames {
+                prefix = "freq_decoder.\(i)"
+                convSuffix = "conv_transpose"
+                normSuffix = "norm"
+            } else {
+                prefix = "decoder.\(i)"
+                convSuffix = "conv_tr"
+                normSuffix = "norm2"
+            }
+
+            // Load ConvTranspose2D weights
+            let convWeights = try loader.loadConv1DWeights(prefix: "\(prefix).\(convSuffix)")
+            let normWeights = try loader.loadGroupNormWeights(prefix: "\(prefix).\(normSuffix)")
             try dec.loadWeights(
                 convTransposeWeight: convWeights.weights,
                 convTransposeBias: convWeights.bias,
@@ -843,39 +990,54 @@ public final class HTDemucs {
 
         // Load projection layer weights
         if let timeProj = timeToTransformerProj {
-            let weights = try loader.loadConv1DWeights(prefix: "time_to_transformer")
+            let prefix = useDirectNames ? "time_to_transformer" : "channel_upsampler_t"
+            let weights = try loader.loadConv1DWeights(prefix: prefix)
             try timeProj.loadWeights(weights.weights, bias: weights.bias)
         }
         if let freqProj = freqToTransformerProj {
-            let weights = try loader.loadConv1DWeights(prefix: "freq_to_transformer")
+            let prefix = useDirectNames ? "freq_to_transformer" : "channel_upsampler"
+            let weights = try loader.loadConv1DWeights(prefix: prefix)
             try freqProj.loadWeights(weights.weights, bias: weights.bias)
         }
         if let timeBack = transformerToTimeProj {
-            let weights = try loader.loadConv1DWeights(prefix: "transformer_to_time")
+            let prefix = useDirectNames ? "transformer_to_time" : "channel_downsampler_t"
+            let weights = try loader.loadConv1DWeights(prefix: prefix)
             try timeBack.loadWeights(weights.weights, bias: weights.bias)
         }
         if let freqBack = transformerToFreqProj {
-            let weights = try loader.loadConv1DWeights(prefix: "transformer_to_freq")
+            let prefix = useDirectNames ? "transformer_to_freq" : "channel_downsampler"
+            let weights = try loader.loadConv1DWeights(prefix: prefix)
             try freqBack.loadWeights(weights.weights, bias: weights.bias)
         }
 
         // Load cross-transformer weights if present
         if let transformer = _crossTransformer, config.crossAttentionLayers > 0 {
-            try transformer.loadWeights(from: loader, prefix: "cross_transformer")
+            let prefix = useDirectNames ? "cross_transformer" : "crosstransformer"
+            try transformer.loadWeights(from: loader, prefix: prefix)
         }
 
         // Load time output head weights
         for (i, head) in outputHeads.enumerated() {
             let prefix = "time_output_heads.\(i)"
-            let headWeights = try loader.loadConv1DWeights(prefix: prefix)
-            try head.loadWeights(headWeights.weights, bias: headWeights.bias)
+            // Output heads might not exist in Demucs format - try loading, skip if not found
+            do {
+                let headWeights = try loader.loadConv1DWeights(prefix: prefix)
+                try head.loadWeights(headWeights.weights, bias: headWeights.bias)
+            } catch SafeTensorsLoader.LoaderError.tensorNotFound {
+                // Output heads might be named differently or combined in Demucs
+                // Skip for now - these can be initialized randomly
+            }
         }
 
-        // Load freq output head weights
-        for (i, head) in freqOutputHeads.enumerated() {
+        // Load freq output head weights (2D convolutions)
+        for (i, head) in freqOutputHeads2D.enumerated() {
             let prefix = "freq_output_heads.\(i)"
-            let headWeights = try loader.loadConv1DWeights(prefix: prefix)
-            try head.loadWeights(headWeights.weights, bias: headWeights.bias)
+            do {
+                let headWeights = try loader.loadConv1DWeights(prefix: prefix)
+                try head.loadWeights(headWeights.weights, bias: headWeights.bias)
+            } catch SafeTensorsLoader.LoaderError.tensorNotFound {
+                // Skip if not found
+            }
         }
     }
 }

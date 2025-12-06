@@ -1,0 +1,50 @@
+{
+  "name": "intermediate_activations",
+  "type": "intermediate",
+  "input_shape": [
+    2,
+    8192
+  ],
+  "activations": {
+    "time_encoder_0": [
+      48,
+      85995
+    ],
+    "freq_encoder_0": [
+      48,
+      512,
+      336
+    ],
+    "time_encoder_1": [
+      96,
+      21499
+    ],
+    "freq_encoder_1": [
+      96,
+      128,
+      336
+    ],
+    "time_encoder_2": [
+      192,
+      5375
+    ],
+    "freq_encoder_2": [
+      192,
+      32,
+      336
+    ],
+    "time_encoder_3": [
+      384,
+      1344
+    ],
+    "freq_encoder_3": [
+      384,
+      8,
+      336
+    ]
+  },
+  "config": {
+    "audio_length": 8192,
+    "seed": 42
+  }
+}

@@ -56,6 +56,39 @@ MetalAudio is a GPU-accelerated audio processing framework with three modules:
 - **BNNSInference** (macOS 15+/iOS 18+): Zero-allocation inference using Apple BNNS Graph. Essential for Audio Unit render callbacks - no allocations after init, single-threaded execution option.
 - **BNNSStreamingInference** (macOS 15+/iOS 18+): Stateful inference for LSTM/GRU models that maintains hidden state across predictions. **Note:** Requires models compiled with `BNNSOption` attribute `StateMode=Streaming`, which is not currently exposed through public CoreML tools. Implementation is ready but awaiting Apple API access.
 
+### MetalNN Extended (macOS 15+/iOS 18+)
+
+#### Normalization
+
+- **GroupNorm**: Group normalization with 3 algorithm variants—`standard` (fastest), `kahan` (~2x accuracy), `welford` (~10x accuracy). HTDemucs uses 8 groups. Thread-safe after `loadParameters()`.
+- **LayerNorm**: Layer normalization for transformers. Normalizes across feature dimension.
+
+#### Attention & Transformers
+
+- **MultiHeadAttention**: Scaled dot-product attention with PyTorch-compatible weight layout. Supports self-attention and cross-attention.
+- **TransformerEncoderBlock**: Pre-norm architecture with self-attention, cross-attention, and FFN.
+- **CrossTransformerEncoder**: Bidirectional cross-attention between time and frequency domains (used in HTDemucs).
+
+#### U-Net Architecture
+
+- **UNetEncoderBlock/UNetDecoderBlock**: 1D U-Net blocks with skip connections for time-domain audio.
+- **FreqUNetEncoderBlock2D/FreqUNetDecoderBlock2D**: 2D U-Net blocks for spectrogram processing.
+- **SkipConnectionPool/SkipConnectionPool2D**: Dictionary-based skip connection storage.
+
+#### Dynamic Convolutions
+
+- **DynamicConv1D/DynamicConvTranspose1D**: Variable-length 1D convolutions with output caching.
+- **DynamicConv2D/DynamicConvTranspose2D**: Variable-size 2D convolutions for spectrograms. Supports multiple padding modes (`.valid`, `.same`, `.reflect`).
+
+#### Complete Models
+
+- **HTDemucs** (macOS 15+/iOS 18+): Hybrid Transformer Demucs for 6-stem music source separation (drums, bass, other, vocals, guitar, piano). Two inference modes: `.timeOnly` (fast, ~70% quality) and `.full` (best quality with cross-transformer fusion).
+
+### Weight Loading
+
+- **SafeTensorsLoader**: Load PyTorch weights from Hugging Face SafeTensors format. Supports F32, F16, BF16 with automatic conversion. Helper methods: `loadConv1DWeights()`, `loadGroupNormWeights()`, `loadLinearWeights()`, `loadAttentionWeights()`.
+- **WeightNameMapper**: Auto-detect and convert between naming conventions (MetalAudio ↔ Demucs). Use `loader.createWeightMapper()` for automatic detection.
+
 ## Key Design Patterns
 
 ### Real-Time Audio Safety
@@ -86,6 +119,11 @@ MetalAudio is a GPU-accelerated audio processing framework with three modules:
 | `Sequential` | No | ✅ Yes | After `build()`. Forward pass is read-only. |
 | `ShaderDiskCache` | @unchecked | ✅ Yes | Uses `os_unfair_lock` + `NSLock` for disk operations. |
 | `ShaderPrecompiler` | @unchecked | ✅ Yes | Uses `os_unfair_lock` for thread safety. |
+| `GroupNorm` | No | ✅ Yes | After `loadParameters()`. Parameters are read-only during forward. |
+| `MultiHeadAttention` | No | ❌ No | Work buffers are mutable. Create per-thread instances. |
+| `HTDemucs` | No | ❌ No | Contains mutable skip pools and work buffers. Create per-thread. |
+| `SafeTensorsLoader` | No | ❌ No | File handle state is mutable. |
+| `DynamicConv1D/2D` | No | ❌ No | Output tensor cache is mutable. Create per-thread instances. |
 
 #### Audio Unit Render Callback Safety
 

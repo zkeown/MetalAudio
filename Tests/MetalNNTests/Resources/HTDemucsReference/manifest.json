@@ -1,0 +1,14 @@
+{
+  "tests": [
+    "time_encoder_level0",
+    "time_encoder_level1",
+    "time_encoder_level2",
+    "freq_encoder_level0",
+    "freq_encoder_level1"
+  ],
+  "count": 5,
+  "has_full_model": false,
+  "pytorch_version": "2.8.0",
+  "demucs_available": true,
+  "generator": "generate_htdemucs_reference.py"
+}
