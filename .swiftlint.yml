@@ -1,0 +1,114 @@
+# SwiftLint configuration for MetalAudio
+# https://github.com/realm/SwiftLint
+#
+# Philosophy: Strict on code quality, relaxed on GPU/DSP conventions
+
+included:
+  - Sources
+  - Tests
+
+excluded:
+  - .build
+  - .swiftpm
+  - Package.swift
+  - Scripts
+  - Examples
+
+# Disabled rules - only for legitimate GPU/DSP/test patterns
+disabled_rules:
+  - todo # Tracked in issues
+  - line_length # GPU/DSP code has long Metal API calls
+  - identifier_name # DSP uses i, j, k, n, fft, etc.
+  - large_tuple # DSP returns (real, imag), (magnitude, phase), etc.
+  - function_parameter_count # Complex DSP functions need many params
+  - nesting # Metal completion handler patterns
+
+# Opt-in rules for better code quality
+opt_in_rules:
+  - array_init
+  - closure_spacing
+  - collection_alignment
+  - contains_over_filter_count
+  - contains_over_filter_is_empty
+  - contains_over_first_not_nil
+  - contains_over_range_nil_comparison
+  - empty_collection_literal
+  - empty_count
+  - empty_string
+  - enum_case_associated_values_count
+  - explicit_init
+  - fallthrough
+  - fatal_error_message
+  - first_where
+  - flatmap_over_map_reduce
+  - identical_operands
+  - joined_default_parameter
+  - last_where
+  - legacy_multiple
+  - legacy_random
+  - literal_expression_end_indentation
+  - lower_acl_than_parent
+  - modifier_order
+  - number_separator
+  - operator_usage_whitespace
+  - overridden_super_call
+  - prefer_self_type_over_type_of_self
+  - prefer_zero_over_explicit_init
+  - reduce_into
+  - redundant_nil_coalescing
+  - redundant_type_annotation
+  - sorted_first_last
+  - static_operator
+  - toggle_bool
+  - unavailable_function
+  - unneeded_parentheses_in_closure_argument
+  - unowned_variable_capture
+  - untyped_error_in_catch
+  - vertical_parameter_alignment_on_call
+  - vertical_whitespace_closing_braces
+  - xct_specific_matcher
+  - yoda_condition
+
+# Rule configurations
+force_cast:
+  severity: warning # Metal types sometimes require this
+
+force_try:
+  severity: warning # Test code uses this legitimately
+
+force_unwrapping:
+  severity: warning # Metal APIs and tests use this
+
+type_body_length:
+  warning: 800
+  error: 1500
+
+file_length:
+  warning: 1500
+  error: 4000
+  ignore_comment_only_lines: true
+
+function_body_length:
+  warning: 150
+  error: 300
+
+cyclomatic_complexity:
+  warning: 20
+  error: 40
+
+number_separator:
+  minimum_length: 5
+
+trailing_comma:
+  mandatory_comma: false
+
+# Custom rules
+custom_rules:
+  no_print_in_sources:
+    name: "No print() in production code"
+    regex: "\\bprint\\s*\\("
+    match_kinds:
+      - identifier
+    message: "Use os_log instead of print() in production code"
+    severity: warning
+    included: "Sources/(?!Benchmark/).*\\.swift$"

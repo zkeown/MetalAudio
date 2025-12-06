@@ -16,12 +16,12 @@ final class BiquadFilterAdditionalTests: XCTestCase {
         try filter.configure(
             type: .bandpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 2.0
         )
 
         // Should pass center frequency
-        let sampleRate: Float = 44100
+        let sampleRate: Float = 44_100
         let numSamples = 4096
 
         // Center frequency signal
@@ -43,11 +43,11 @@ final class BiquadFilterAdditionalTests: XCTestCase {
         try filter.configure(
             type: .notch,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 10.0
         )
 
-        let sampleRate: Float = 44100
+        let sampleRate: Float = 44_100
         let numSamples = 4096
 
         // Notch frequency signal
@@ -69,13 +69,13 @@ final class BiquadFilterAdditionalTests: XCTestCase {
         try filter.configure(
             type: .allpass,
             frequency: 1000,
-            sampleRate: 44100
+            sampleRate: 44_100
         )
 
         let numSamples = 4096
         var input = [Float](repeating: 0, count: numSamples)
         for i in 0..<numSamples {
-            input[i] = sin(2.0 * Float.pi * 440.0 * Float(i) / 44100)
+            input[i] = sin(2.0 * Float.pi * 440.0 * Float(i) / 44_100)
         }
 
         filter.reset()
@@ -93,7 +93,7 @@ final class BiquadFilterAdditionalTests: XCTestCase {
         try filter.configure(
             type: .peaking(gainDB: 6.0),
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 2.0
         )
 
@@ -105,7 +105,7 @@ final class BiquadFilterAdditionalTests: XCTestCase {
         try filter.configure(
             type: .lowshelf(gainDB: 6.0),
             frequency: 200,
-            sampleRate: 44100
+            sampleRate: 44_100
         )
 
         XCTAssertNotNil(filter)
@@ -116,7 +116,7 @@ final class BiquadFilterAdditionalTests: XCTestCase {
         try filter.configure(
             type: .highshelf(gainDB: -6.0),
             frequency: 5000,
-            sampleRate: 44100
+            sampleRate: 44_100
         )
 
         XCTAssertNotNil(filter)
@@ -128,22 +128,22 @@ final class BiquadFilterAdditionalTests: XCTestCase {
         // Frequency at Nyquist
         XCTAssertThrowsError(try filter.configure(
             type: .lowpass,
-            frequency: 22050,
-            sampleRate: 44100
+            frequency: 22_050,
+            sampleRate: 44_100
         ))
 
         // Negative frequency
         XCTAssertThrowsError(try filter.configure(
             type: .lowpass,
             frequency: -100,
-            sampleRate: 44100
+            sampleRate: 44_100
         ))
 
         // Zero frequency
         XCTAssertThrowsError(try filter.configure(
             type: .lowpass,
             frequency: 0,
-            sampleRate: 44100
+            sampleRate: 44_100
         ))
     }
 
@@ -159,7 +159,7 @@ final class BiquadFilterAdditionalTests: XCTestCase {
         XCTAssertThrowsError(try filter.configure(
             type: .lowpass,
             frequency: 1000,
-            sampleRate: -44100
+            sampleRate: -44_100
         ))
     }
 
@@ -169,14 +169,14 @@ final class BiquadFilterAdditionalTests: XCTestCase {
         XCTAssertThrowsError(try filter.configure(
             type: .lowpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0
         ))
 
         XCTAssertThrowsError(try filter.configure(
             type: .lowpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: -1.0
         ))
     }
@@ -186,7 +186,7 @@ final class BiquadFilterAdditionalTests: XCTestCase {
         try filter.configure(
             type: .lowpass,
             frequency: 1000,
-            sampleRate: 44100
+            sampleRate: 44_100
         )
 
         // Process some samples
@@ -209,7 +209,7 @@ final class BiquadFilterAdditionalTests: XCTestCase {
         try filter.configure(
             type: .lowpass,
             frequency: 1000,
-            sampleRate: 44100
+            sampleRate: 44_100
         )
 
         filter.reset()

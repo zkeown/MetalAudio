@@ -9,8 +9,8 @@ final class MappedTensorTests: XCTestCase {
         let tensor = try MappedTensor(shape: [100, 100])
 
         XCTAssertEqual(tensor.shape, [100, 100])
-        XCTAssertEqual(tensor.count, 10000)
-        XCTAssertEqual(tensor.byteSize, 10000 * 4)
+        XCTAssertEqual(tensor.count, 10_000)
+        XCTAssertEqual(tensor.byteSize, 10_000 * 4)
         XCTAssertNil(tensor.backingFilePath)
     }
 
@@ -232,11 +232,11 @@ final class AudioAllocatorZoneTests: XCTestCase {
         // Different size classes
         let small = zone.allocate(byteSize: 1000)!   // Rounds to 1024
         let medium = zone.allocate(byteSize: 5000)!  // Rounds to 8192
-        let large = zone.allocate(byteSize: 100000)! // Too large, uses malloc
+        let large = zone.allocate(byteSize: 100_000)! // Too large, uses malloc
 
         zone.deallocate(small, byteSize: 1000)
         zone.deallocate(medium, byteSize: 5000)
-        zone.deallocate(large, byteSize: 100000)
+        zone.deallocate(large, byteSize: 100_000)
 
         XCTAssertEqual(zone.totalAllocations, 3)
     }
@@ -469,7 +469,7 @@ final class SpeculativeBufferTests: XCTestCase {
         XCTAssertFalse(buffer.isAllocated)
 
         // Access should reallocate transparently
-        try buffer.withContents { ptr in
+        try buffer.withContents { _ in
             // Buffer is reallocated, but data is lost
             XCTAssertTrue(true, "Should not throw")
         }

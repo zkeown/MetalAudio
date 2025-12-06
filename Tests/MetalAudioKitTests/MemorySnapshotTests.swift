@@ -52,7 +52,7 @@ final class MemoryTypesCoverageTests: XCTestCase {
 
     func testMemoryDeltaTimeConversionsSmall() {
         let delta = MemoryDelta(
-            elapsedNanoseconds: 1_000,  // 1 microsecond
+            elapsedNanoseconds: 1000,  // 1 microsecond
             gpuDelta: 0,
             processDelta: 0,
             systemDelta: 0

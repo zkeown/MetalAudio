@@ -3,6 +3,7 @@ import MetalPerformanceShaders
 import Accelerate
 import Foundation
 import MetalAudioKit
+import os.log
 
 // MARK: - Linear Layer
 
@@ -20,6 +21,9 @@ import MetalAudioKit
 ///
 /// ## Thread Safety
 /// This layer is thread-safe for inference after initialization.
+
+private let logger = Logger(subsystem: "MetalNN", category: "Linear")
+
 public final class Linear: NNLayer {
 
     public let inputShape: [Int]
@@ -39,8 +43,8 @@ public final class Linear: NNLayer {
 
     /// Internal lock for thread-safe access to static thresholds
     private static let thresholdLock = NSLock()
-    private nonisolated(unsafe) static var _mpsBatchThreshold: Int = 4
-    private nonisolated(unsafe) static var _mpsGPUThreshold: Int = 32  // MPS wins at 4096×4096 starting at batch 32
+    nonisolated(unsafe) private static var _mpsBatchThreshold: Int = 4
+    nonisolated(unsafe) private static var _mpsGPUThreshold: Int = 32  // MPS wins at 4096×4096 starting at batch 32
 
     /// Batch size threshold for batched Accelerate vs single-vector path.
     /// Thread-safe. Set during app initialization before inference begins.
@@ -86,7 +90,7 @@ public final class Linear: NNLayer {
     /// Matrix dimension threshold for MPS GPU acceleration.
     /// MPS is only used when inputFeatures OR outputFeatures >= this threshold.
     /// Thread-safe. Default: 4096 (based on M4 Max benchmarks).
-    private nonisolated(unsafe) static var _mpsMatrixThreshold: Int = 4096
+    nonisolated(unsafe) private static var _mpsMatrixThreshold: Int = 4096
 
     public static var mpsMatrixThreshold: Int {
         get {
@@ -170,13 +174,13 @@ public final class Linear: NNLayer {
         // Validate weights for NaN/Inf
         if let warning = try validateWeights(weightData, name: "Linear weights") {
             #if DEBUG
-            print(warning)
+            logger.debug("\(warning)")
             #endif
         }
         if let biasData = biasData {
             if let warning = try validateWeights(biasData, name: "Linear bias") {
                 #if DEBUG
-                print(warning)
+                logger.debug("\(warning)")
                 #endif
             }
         }
@@ -530,13 +534,13 @@ public final class FusedLinear: NNLayer {
     public func loadWeights(_ weightData: [Float], bias biasData: [Float]? = nil) throws {
         if let warning = try validateWeights(weightData, name: "FusedLinear weights") {
             #if DEBUG
-            print(warning)
+            logger.debug("\(warning)")
             #endif
         }
         if let biasData = biasData {
             if let warning = try validateWeights(biasData, name: "FusedLinear bias") {
                 #if DEBUG
-                print(warning)
+                logger.debug("\(warning)")
                 #endif
             }
         }

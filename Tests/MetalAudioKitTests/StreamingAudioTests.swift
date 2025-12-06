@@ -32,10 +32,10 @@ final class MappedAudioFileTests: XCTestCase {
         try data.write(to: URL(fileURLWithPath: testPath))
 
         // Map the file
-        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44_100)
 
         XCTAssertEqual(mapped.sampleCount, sampleCount)
-        XCTAssertEqual(mapped.sampleRate, 44100)
+        XCTAssertEqual(mapped.sampleRate, 44_100)
         XCTAssertEqual(mapped.channelCount, 1)
         XCTAssertEqual(mapped.fileSize, sampleCount * 4)
     }
@@ -52,7 +52,7 @@ final class MappedAudioFileTests: XCTestCase {
         try data.write(to: URL(fileURLWithPath: testPath))
 
         // Map and read
-        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44_100)
         let readSamples = mapped.readSamples(offset: 10, count: 20)
 
         XCTAssertEqual(readSamples.count, 20)
@@ -68,7 +68,7 @@ final class MappedAudioFileTests: XCTestCase {
         try data.write(to: URL(fileURLWithPath: testPath))
 
         // Map and advise (should not crash)
-        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44_100)
         mapped.advise(.sequential)
         mapped.advise(.random)
         mapped.advise(.willneed)
@@ -79,11 +79,11 @@ final class MappedAudioFileTests: XCTestCase {
     func testPrefetchAndEvict() throws {
         // Create test file
         let testPath = tempDirectory.appendingPathComponent("test_prefetch.raw").path
-        let samples = [Float](repeating: 1.0, count: 10000)
+        let samples = [Float](repeating: 1.0, count: 10_000)
         let data = samples.withUnsafeBytes { Data($0) }
         try data.write(to: URL(fileURLWithPath: testPath))
 
-        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44_100)
 
         // Prefetch
         mapped.prefetch(offset: 0, count: 1000)
@@ -102,16 +102,16 @@ final class MappedAudioFileTests: XCTestCase {
     func testResidencyRatio() throws {
         // Create test file
         let testPath = tempDirectory.appendingPathComponent("test_residency.raw").path
-        let samples = [Float](repeating: 1.0, count: 10000)
+        let samples = [Float](repeating: 1.0, count: 10_000)
         let data = samples.withUnsafeBytes { Data($0) }
         try data.write(to: URL(fileURLWithPath: testPath))
 
-        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44_100)
 
         // Touch data to ensure resident
-        _ = mapped.readSamples(offset: 0, count: 10000)
+        _ = mapped.readSamples(offset: 0, count: 10_000)
 
-        let residency = mapped.residencyRatio(offset: 0, count: 10000)
+        let residency = mapped.residencyRatio(offset: 0, count: 10_000)
         XCTAssertGreaterThan(residency, 0.0, "Should have some resident pages")
     }
 
@@ -129,7 +129,7 @@ final class MappedAudioFileTests: XCTestCase {
         try data.write(to: URL(fileURLWithPath: testPath))
 
         // Map as stereo
-        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44100, channelCount: 2)
+        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44_100, channelCount: 2)
 
         XCTAssertEqual(mapped.sampleCount, frameCount)
         XCTAssertEqual(mapped.channelCount, 2)
@@ -156,7 +156,7 @@ final class MappedAudioFileTests: XCTestCase {
         let data = samples.withUnsafeBytes { Data($0) }
         try data.write(to: URL(fileURLWithPath: testPath))
 
-        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44100, channelCount: 2)
+        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44_100, channelCount: 2)
 
         let interleaved = mapped.readInterleavedSamples(offset: 5, count: 3)
         XCTAssertEqual(interleaved.count, 6) // 3 frames * 2 channels
@@ -166,12 +166,12 @@ final class MappedAudioFileTests: XCTestCase {
 
     func testDuration() throws {
         let testPath = tempDirectory.appendingPathComponent("test_duration.raw").path
-        let sampleCount = 44100 // 1 second at 44.1kHz
+        let sampleCount = 44_100 // 1 second at 44.1kHz
         let samples = [Float](repeating: 0, count: sampleCount)
         let data = samples.withUnsafeBytes { Data($0) }
         try data.write(to: URL(fileURLWithPath: testPath))
 
-        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44_100)
 
         XCTAssertEqual(mapped.duration, 1.0, accuracy: 0.001)
     }
@@ -184,7 +184,7 @@ final class MappedAudioFileTests: XCTestCase {
         let data = samples.withUnsafeBytes { Data($0) }
         try data.write(to: URL(fileURLWithPath: testPath))
 
-        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44_100)
 
         var sum: Float = 0
         mapped.withUnsafeSamples(offset: 0, count: 100) { ptr in
@@ -202,7 +202,7 @@ final class MappedAudioFileTests: XCTestCase {
     func testFileOpenFailed() {
         let nonExistentPath = "/nonexistent/path/to/file.raw"
 
-        XCTAssertThrowsError(try MappedAudioFile(path: nonExistentPath, sampleRate: 44100)) { error in
+        XCTAssertThrowsError(try MappedAudioFile(path: nonExistentPath, sampleRate: 44_100)) { error in
             guard case MappedAudioError.fileOpenFailed = error else {
                 XCTFail("Expected fileOpenFailed error, got \(error)")
                 return
@@ -236,7 +236,7 @@ final class MappedAudioFileTests: XCTestCase {
         let data = samples.withUnsafeBytes { Data($0) }
         try data.write(to: URL(fileURLWithPath: testPath))
 
-        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44_100)
 
         // Request more samples than available starting near end
         let result = mapped.readSamples(offset: 90, count: 50)
@@ -249,7 +249,7 @@ final class MappedAudioFileTests: XCTestCase {
         let data = samples.withUnsafeBytes { Data($0) }
         try data.write(to: URL(fileURLWithPath: testPath))
 
-        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44_100)
 
         // Read exactly at the end
         let result = mapped.readSamples(offset: 100, count: 10)
@@ -262,7 +262,7 @@ final class MappedAudioFileTests: XCTestCase {
         let data = samples.withUnsafeBytes { Data($0) }
         try data.write(to: URL(fileURLWithPath: testPath))
 
-        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44_100)
 
         let result = mapped.readSamples(offset: 0, count: 0)
         XCTAssertEqual(result.count, 0, "Zero count should return empty array")
@@ -275,7 +275,7 @@ final class MappedAudioFileTests: XCTestCase {
         let data = samples.withUnsafeBytes { Data($0) }
         try data.write(to: URL(fileURLWithPath: testPath))
 
-        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44100, channelCount: 2)
+        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44_100, channelCount: 2)
 
         // Request more frames than available
         let result = mapped.readInterleavedSamples(offset: 45, count: 20)
@@ -284,11 +284,11 @@ final class MappedAudioFileTests: XCTestCase {
 
     func testAdviseRegionVariants() throws {
         let testPath = tempDirectory.appendingPathComponent("test_advise_region.raw").path
-        let samples = [Float](repeating: 1.0, count: 10000)
+        let samples = [Float](repeating: 1.0, count: 10_000)
         let data = samples.withUnsafeBytes { Data($0) }
         try data.write(to: URL(fileURLWithPath: testPath))
 
-        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let mapped = try MappedAudioFile(path: testPath, sampleRate: 44_100)
 
         // Test all advice types on regions (should not crash)
         mapped.adviseRegion(offset: 0, count: 1000, advice: .sequential)
@@ -322,11 +322,11 @@ final class StreamingRingBufferTests: XCTestCase {
 
     func testRingBufferCreation() throws {
         let testPath = tempDirectory.appendingPathComponent("ring_test.raw").path
-        let samples = [Float](repeating: 1.0, count: 10000)
+        let samples = [Float](repeating: 1.0, count: 10_000)
         let data = samples.withUnsafeBytes { Data($0) }
         try data.write(to: URL(fileURLWithPath: testPath))
 
-        let file = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let file = try MappedAudioFile(path: testPath, sampleRate: 44_100)
         let ring = StreamingRingBuffer(file: file, bufferSize: 4096)
 
         XCTAssertEqual(ring.capacity, 4096)
@@ -335,13 +335,13 @@ final class StreamingRingBufferTests: XCTestCase {
 
     func testStreamingAndConsume() throws {
         let testPath = tempDirectory.appendingPathComponent("ring_stream.raw").path
-        var samples = [Float](repeating: 0, count: 10000)
-        for i in 0..<10000 { samples[i] = Float(i) }
+        var samples = [Float](repeating: 0, count: 10_000)
+        for i in 0..<10_000 { samples[i] = Float(i) }
 
         let data = samples.withUnsafeBytes { Data($0) }
         try data.write(to: URL(fileURLWithPath: testPath))
 
-        let file = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let file = try MappedAudioFile(path: testPath, sampleRate: 44_100)
         let ring = StreamingRingBuffer(file: file, bufferSize: 4096)
         ring.prefetchAhead = 2048
 
@@ -362,13 +362,13 @@ final class StreamingRingBufferTests: XCTestCase {
 
     func testSeek() throws {
         let testPath = tempDirectory.appendingPathComponent("ring_seek.raw").path
-        var samples = [Float](repeating: 0, count: 10000)
-        for i in 0..<10000 { samples[i] = Float(i) }
+        var samples = [Float](repeating: 0, count: 10_000)
+        for i in 0..<10_000 { samples[i] = Float(i) }
 
         let data = samples.withUnsafeBytes { Data($0) }
         try data.write(to: URL(fileURLWithPath: testPath))
 
-        let file = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let file = try MappedAudioFile(path: testPath, sampleRate: 44_100)
         let ring = StreamingRingBuffer(file: file, bufferSize: 4096)
 
         ring.startStreaming()
@@ -391,7 +391,7 @@ final class StreamingRingBufferTests: XCTestCase {
         let data = samples.withUnsafeBytes { Data($0) }
         try data.write(to: URL(fileURLWithPath: testPath))
 
-        let file = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let file = try MappedAudioFile(path: testPath, sampleRate: 44_100)
         let ring = StreamingRingBuffer(file: file, bufferSize: 4096)
 
         // Don't start streaming - buffer is empty
@@ -401,13 +401,13 @@ final class StreamingRingBufferTests: XCTestCase {
 
     func testMultipleStartStopCycles() throws {
         let testPath = tempDirectory.appendingPathComponent("ring_cycles.raw").path
-        var samples = [Float](repeating: 0, count: 10000)
-        for i in 0..<10000 { samples[i] = Float(i) }
+        var samples = [Float](repeating: 0, count: 10_000)
+        for i in 0..<10_000 { samples[i] = Float(i) }
 
         let data = samples.withUnsafeBytes { Data($0) }
         try data.write(to: URL(fileURLWithPath: testPath))
 
-        let file = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let file = try MappedAudioFile(path: testPath, sampleRate: 44_100)
         let ring = StreamingRingBuffer(file: file, bufferSize: 4096)
         ring.prefetchAhead = 1024
 
@@ -441,11 +441,11 @@ final class StreamingRingBufferTests: XCTestCase {
         let data = samples.withUnsafeBytes { Data($0) }
         try data.write(to: URL(fileURLWithPath: testPath))
 
-        let file = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let file = try MappedAudioFile(path: testPath, sampleRate: 44_100)
         let ring = StreamingRingBuffer(file: file, bufferSize: 4096)
 
         // Seek beyond end - should clamp to file end
-        ring.seek(to: 50000)
+        ring.seek(to: 50_000)
 
         // Should not crash, buffer should be empty
         XCTAssertEqual(ring.availableCount, 0)
@@ -453,13 +453,13 @@ final class StreamingRingBufferTests: XCTestCase {
 
     func testSeekToZero() throws {
         let testPath = tempDirectory.appendingPathComponent("ring_seek_zero.raw").path
-        var samples = [Float](repeating: 0, count: 10000)
-        for i in 0..<10000 { samples[i] = Float(i) }
+        var samples = [Float](repeating: 0, count: 10_000)
+        for i in 0..<10_000 { samples[i] = Float(i) }
 
         let data = samples.withUnsafeBytes { Data($0) }
         try data.write(to: URL(fileURLWithPath: testPath))
 
-        let file = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let file = try MappedAudioFile(path: testPath, sampleRate: 44_100)
         let ring = StreamingRingBuffer(file: file, bufferSize: 4096)
         ring.prefetchAhead = 1024
 
@@ -501,7 +501,7 @@ final class StreamingRingBufferTests: XCTestCase {
         let data = samples.withUnsafeBytes { Data($0) }
         try data.write(to: URL(fileURLWithPath: testPath))
 
-        let file = try MappedAudioFile(path: testPath, sampleRate: 44100)
+        let file = try MappedAudioFile(path: testPath, sampleRate: 44_100)
         let ring = StreamingRingBuffer(file: file, bufferSize: 4096)
 
         // Seek to negative - should clamp to 0

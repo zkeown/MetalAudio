@@ -40,8 +40,8 @@ final class AudioUnitFactoryTests: XCTestCase {
     func testNotRegisteredErrorDescription() {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x74657374, // "test"
-            componentManufacturer: 0x64656D6F, // "demo"
+            componentSubType: 0x74_657_374, // "test"
+            componentManufacturer: 0x64_656D6F, // "demo"
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -108,8 +108,8 @@ final class AudioUnitFactoryTests: XCTestCase {
     func testIsRegisteredReturnsFalseForUnregistered() {
         let desc = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
-            componentSubType: 0x78787878, // "xxxx" - unlikely to be registered
-            componentManufacturer: 0x79797979, // "yyyy"
+            componentSubType: 0x78_787_878, // "xxxx" - unlikely to be registered
+            componentManufacturer: 0x79_797_979, // "yyyy"
             componentFlags: 0,
             componentFlagsMask: 0
         )
@@ -251,7 +251,7 @@ final class AudioUnitViewFactoryTests: XCTestCase {
 
     func testRegisterViewFactory() {
         // Register a view factory
-        AudioUnitViewFactory.register(subType: "vwt1", manufacturer: "test") { audioUnit in
+        AudioUnitViewFactory.register(subType: "vwt1", manufacturer: "test") { _ in
             // Return nil for testing - in real use this would return a view controller
             return nil
         }
@@ -264,7 +264,7 @@ final class AudioUnitViewFactoryTests: XCTestCase {
         let desc = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
             componentSubType: 0x6E6F6D61, // "noma" - not matched
-            componentManufacturer: 0x74636820, // "tch "
+            componentManufacturer: 0x74_636_820, // "tch "
             componentFlags: 0,
             componentFlagsMask: 0
         )

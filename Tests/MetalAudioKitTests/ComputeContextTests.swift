@@ -140,7 +140,7 @@ final class ComputeContextExecutionTests: XCTestCase {
     }
 
     func testExecuteSyncReturnsValue() throws {
-        let result = try context.executeSync { encoder in
+        let result = try context.executeSync { _ in
             // Simple encoder test - just return a value
             return 42
         }
@@ -149,7 +149,7 @@ final class ComputeContextExecutionTests: XCTestCase {
     }
 
     func testExecuteSyncWithTimeout() throws {
-        let result = try context.executeSync(timeout: 5.0) { encoder in
+        let result = try context.executeSync(timeout: 5.0) { _ in
             return "success"
         }
 
@@ -161,7 +161,7 @@ final class ComputeContextExecutionTests: XCTestCase {
     }
 
     func testExecuteSyncWithTimingReturnsValue() throws {
-        let (result, timing) = try context.executeSyncWithTiming { encoder in
+        let (result, timing) = try context.executeSyncWithTiming { _ in
             return 42
         }
 
@@ -175,7 +175,7 @@ final class ComputeContextExecutionTests: XCTestCase {
     func testExecuteSyncWithTimingVoid() throws {
         var executed = false
 
-        let timing = try context.executeSyncWithTiming { encoder in
+        let timing = try context.executeSyncWithTiming { _ in
             executed = true
         }
 
@@ -184,7 +184,7 @@ final class ComputeContextExecutionTests: XCTestCase {
     }
 
     func testExecuteSyncWithTimingCustomTimeout() throws {
-        let (result, timing) = try context.executeSyncWithTiming(timeout: 5.0) { encoder in
+        let (result, timing) = try context.executeSyncWithTiming(timeout: 5.0) { _ in
             return "test"
         }
 
@@ -194,9 +194,9 @@ final class ComputeContextExecutionTests: XCTestCase {
 
     func testExecuteAsyncBlocking() throws {
         let expectation = expectation(description: "Async completion")
-        var completionError: Error?
+        nonisolated(unsafe) var completionError: Error?
 
-        context.executeAsyncBlocking({ encoder in
+        context.executeAsyncBlocking({ _ in
             // Simple operation
         }, completion: { error in
             completionError = error
@@ -209,9 +209,9 @@ final class ComputeContextExecutionTests: XCTestCase {
 
     func testExecuteAsyncBlockingWithError() throws {
         let expectation = expectation(description: "Async error completion")
-        var receivedError: Error?
+        nonisolated(unsafe) var receivedError: Error?
 
-        context.executeAsyncBlocking({ encoder in
+        context.executeAsyncBlocking({ _ in
             throw MetalAudioError.invalidConfiguration("test error")
         }, completion: { error in
             receivedError = error
@@ -377,7 +377,7 @@ final class ComputeContextAsyncExecutionTests: XCTestCase {
     }
 
     func testAsyncExecuteWithTimeout() async throws {
-        let result: Int = try await context.execute(timeout: 5.0) { encoder in
+        let result: Int = try await context.execute(timeout: 5.0) { _ in
             return 42
         }
 
@@ -385,7 +385,7 @@ final class ComputeContextAsyncExecutionTests: XCTestCase {
     }
 
     func testAsyncExecuteWithTimeoutString() async throws {
-        let result: String = try await context.execute(timeout: 3.0) { encoder in
+        let result: String = try await context.execute(timeout: 3.0) { _ in
             return "async result"
         }
 
@@ -395,7 +395,7 @@ final class ComputeContextAsyncExecutionTests: XCTestCase {
     func testAsyncExecuteVoid() async throws {
         var executed = false
 
-        try await context.execute { encoder in
+        try await context.execute { _ in
             executed = true
         }
 

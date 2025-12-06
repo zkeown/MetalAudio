@@ -76,7 +76,7 @@ public struct HardwareProfile: Sendable {
             case .aOlder:
                 return 8192    // Older iOS, favor CPU
             case .aLegacy:
-                return 16384   // A11, heavily favor CPU due to limited GPU
+                return 16_384   // A11, heavily favor CPU due to limited GPU
             case .intelMac, .unknown:
                 return 4096    // Conservative default
             }
@@ -198,42 +198,28 @@ public struct HardwareProfile: Sendable {
         return .unknown
     }
 
+    /// Bandwidth lookup table: (device name pattern, bandwidth in GB/s)
+    /// Order matters - more specific patterns must come before general ones
+    private static let bandwidthTable: [(pattern: String, bandwidth: Double)] = [
+        // M4 family
+        ("m4 max", 546), ("m4 pro", 273), ("m4", 120),
+        // M3 family
+        ("m3 max", 400), ("m3 pro", 150), ("m3", 100),
+        // M2 family
+        ("m2 ultra", 800), ("m2 max", 400), ("m2 pro", 200), ("m2", 100),
+        // M1 family
+        ("m1 ultra", 800), ("m1 max", 400), ("m1 pro", 200), ("m1", 68),
+        // iOS devices (A-series)
+        ("a17", 100), ("a16", 75), ("a15", 50), ("a14", 40),
+        ("a13", 35), ("a12", 30), ("a11", 25)
+    ]
+
     private static func estimateBandwidth(deviceName: String, family: GPUFamily) -> Double {
         let name = deviceName.lowercased()
-
-        // M4 family
-        if name.contains("m4 max") { return 546 }
-        if name.contains("m4 pro") { return 273 }
-        if name.contains("m4") { return 120 }
-
-        // M3 family
-        if name.contains("m3 max") { return 400 }
-        if name.contains("m3 pro") { return 150 }
-        if name.contains("m3") { return 100 }
-
-        // M2 family
-        if name.contains("m2 ultra") { return 800 }
-        if name.contains("m2 max") { return 400 }
-        if name.contains("m2 pro") { return 200 }
-        if name.contains("m2") { return 100 }
-
-        // M1 family
-        if name.contains("m1 ultra") { return 800 }
-        if name.contains("m1 max") { return 400 }
-        if name.contains("m1 pro") { return 200 }
-        if name.contains("m1") { return 68 }
-
-        // iOS devices (A-series)
-        if name.contains("a17") { return 100 }
-        if name.contains("a16") { return 75 }
-        if name.contains("a15") { return 50 }
-        if name.contains("a14") { return 40 }
-        if name.contains("a13") { return 35 }
-        if name.contains("a12") { return 30 }
-        if name.contains("a11") { return 25 }
-
-        // Conservative default
-        return 50
+        for (pattern, bandwidth) in bandwidthTable where name.contains(pattern) {
+            return bandwidth
+        }
+        return 50  // Conservative default
     }
 
     // MARK: - Threadgroup Sizing

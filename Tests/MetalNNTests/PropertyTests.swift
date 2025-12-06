@@ -39,7 +39,7 @@ final class PyTorchActivationReferenceTests: XCTestCase {
 
             let actual = outputTensor.toArray()
             ReferenceTestUtils.assertClose(actual, expected, rtol: tolerance, atol: tolerance,
-                message: "ReLU mismatch for \(testCase)")
+                                           message: "ReLU mismatch for \(testCase)")
         }
     }
 
@@ -71,7 +71,7 @@ final class PyTorchActivationReferenceTests: XCTestCase {
 
             let actual = outputTensor.toArray()
             ReferenceTestUtils.assertClose(actual, expected, rtol: geluTolerance, atol: geluTolerance,
-                message: "GELU mismatch for \(testCase)")
+                                           message: "GELU mismatch for \(testCase)")
         }
     }
 
@@ -97,7 +97,7 @@ final class PyTorchActivationReferenceTests: XCTestCase {
 
             let actual = outputTensor.toArray()
             ReferenceTestUtils.assertClose(actual, expected, rtol: tolerance, atol: tolerance,
-                message: "Sigmoid mismatch for \(testCase)")
+                                           message: "Sigmoid mismatch for \(testCase)")
         }
     }
 
@@ -123,7 +123,7 @@ final class PyTorchActivationReferenceTests: XCTestCase {
 
             let actual = outputTensor.toArray()
             ReferenceTestUtils.assertClose(actual, expected, rtol: tolerance, atol: tolerance,
-                message: "Tanh mismatch for \(testCase)")
+                                           message: "Tanh mismatch for \(testCase)")
         }
     }
 
@@ -149,7 +149,7 @@ final class PyTorchActivationReferenceTests: XCTestCase {
 
             let actual = outputTensor.toArray()
             ReferenceTestUtils.assertClose(actual, expected, rtol: tolerance, atol: tolerance,
-                message: "LeakyReLU mismatch for \(testCase)")
+                                           message: "LeakyReLU mismatch for \(testCase)")
         }
     }
 
@@ -175,7 +175,7 @@ final class PyTorchActivationReferenceTests: XCTestCase {
 
             let actual = outputTensor.toArray()
             ReferenceTestUtils.assertClose(actual, expected, rtol: tolerance, atol: tolerance,
-                message: "Swish mismatch for \(testCase)")
+                                           message: "Swish mismatch for \(testCase)")
         }
     }
 }
@@ -213,11 +213,11 @@ final class SoftmaxPyTorchReferenceTests: XCTestCase {
             // Verify sum is close to 1.0
             let actualSum = actual.reduce(0, +)
             XCTAssertEqual(actualSum, expectedSum, accuracy: tolerance,
-                "Softmax sum should be 1.0 for case '\(name)'")
+                           "Softmax sum should be 1.0 for case '\(name)'")
 
             // Verify values match PyTorch
             ReferenceTestUtils.assertClose(actual, expected, rtol: tolerance, atol: tolerance,
-                message: "Softmax mismatch for '\(name)'")
+                                           message: "Softmax mismatch for '\(name)'")
         }
     }
 }
@@ -313,7 +313,7 @@ final class ActivationPropertyTests: XCTestCase {
 
         let output = outputTensor.toArray()
         XCTAssertTrue(output.allSatisfy { $0 >= 0 && $0 <= 1 },
-            "Sigmoid output must be in [0, 1]")
+                      "Sigmoid output must be in [0, 1]")
 
         // For non-extreme values, output should be strictly bounded
         let moderateInput: [Float] = (-10...10).map { Float($0) }
@@ -323,12 +323,13 @@ final class ActivationPropertyTests: XCTestCase {
         let moderateOutputTensor = try Tensor(device: device, shape: [moderateInput.count])
 
         try context.executeSync { encoder in
-            try moderateSigmoid.forward(input: moderateInputTensor, output: moderateOutputTensor, encoder: encoder)
+            try moderateSigmoid.forward(input: moderateInputTensor, output: moderateOutputTensor,
+                                        encoder: encoder)
         }
 
         let moderateOutput = moderateOutputTensor.toArray()
         XCTAssertTrue(moderateOutput.allSatisfy { $0 > 0 && $0 < 1 },
-            "Sigmoid output for moderate inputs must be strictly in (0, 1)")
+                      "Sigmoid output for moderate inputs must be strictly in (0, 1)")
     }
 
     func testSigmoidMonotonicity() throws {
@@ -347,8 +348,8 @@ final class ActivationPropertyTests: XCTestCase {
 
         let output = outputTensor.toArray()
         for i in 1..<output.count {
-            XCTAssertGreaterThanOrEqual(output[i], output[i-1],
-                "Sigmoid should be monotonically increasing")
+            XCTAssertGreaterThanOrEqual(output[i], output[i - 1],
+                                        "Sigmoid should be monotonically increasing")
         }
     }
 
@@ -376,7 +377,7 @@ final class ActivationPropertyTests: XCTestCase {
 
         for i in 0..<output.count {
             XCTAssertEqual(negOutput[i], 1.0 - output[i], accuracy: 1e-5,
-                "sigmoid(-x) should equal 1 - sigmoid(x)")
+                           "sigmoid(-x) should equal 1 - sigmoid(x)")
         }
     }
 
@@ -399,7 +400,7 @@ final class ActivationPropertyTests: XCTestCase {
 
         let output = outputTensor.toArray()
         XCTAssertTrue(output.allSatisfy { $0 >= -1 && $0 <= 1 },
-            "Tanh output must be in [-1, 1]")
+                      "Tanh output must be in [-1, 1]")
 
         // For moderate values, output should be strictly bounded
         let moderateInput: [Float] = (-5...5).map { Float($0) }
@@ -409,12 +410,13 @@ final class ActivationPropertyTests: XCTestCase {
         let moderateOutputTensor = try Tensor(device: device, shape: [moderateInput.count])
 
         try context.executeSync { encoder in
-            try moderateTanh.forward(input: moderateInputTensor, output: moderateOutputTensor, encoder: encoder)
+            try moderateTanh.forward(input: moderateInputTensor, output: moderateOutputTensor,
+                                     encoder: encoder)
         }
 
         let moderateOutput = moderateOutputTensor.toArray()
         XCTAssertTrue(moderateOutput.allSatisfy { $0 > -1 && $0 < 1 },
-            "Tanh output for moderate inputs must be strictly in (-1, 1)")
+                      "Tanh output for moderate inputs must be strictly in (-1, 1)")
     }
 
     func testTanhOddFunction() throws {
@@ -441,7 +443,7 @@ final class ActivationPropertyTests: XCTestCase {
 
         for i in 0..<output.count {
             XCTAssertEqual(negOutput[i], -output[i], accuracy: 1e-5,
-                "tanh(-x) should equal -tanh(x)")
+                           "tanh(-x) should equal -tanh(x)")
         }
     }
 
@@ -453,7 +455,7 @@ final class ActivationPropertyTests: XCTestCase {
             [1.0, 2.0, 3.0, 4.0],
             [0.0, 0.0, 0.0, 0.0],
             [-1.0, -2.0, -3.0, -4.0],
-            [100.0, 100.0, 100.0, 100.0],
+            [100.0, 100.0, 100.0, 100.0]
         ]
 
         for input in inputs {
@@ -499,7 +501,8 @@ final class ActivationPropertyTests: XCTestCase {
         let moderateOutputTensor = try Tensor(device: device, shape: [moderateInput.count])
 
         try context.executeSync { encoder in
-            try moderateSoftmax.forward(input: moderateInputTensor, output: moderateOutputTensor, encoder: encoder)
+            try moderateSoftmax.forward(input: moderateInputTensor, output: moderateOutputTensor,
+                                        encoder: encoder)
         }
 
         let moderateOutput = moderateOutputTensor.toArray()
@@ -522,8 +525,8 @@ final class ActivationPropertyTests: XCTestCase {
 
         let output = outputTensor.toArray()
         for i in 1..<output.count {
-            XCTAssertGreaterThan(output[i], output[i-1],
-                "Softmax should preserve input ordering")
+            XCTAssertGreaterThan(output[i], output[i - 1],
+                                 "Softmax should preserve input ordering")
         }
     }
 
@@ -603,7 +606,7 @@ final class GELUPropertyTests: XCTestCase {
             XCTAssertFalse(o.isInfinite, "GELU should not produce Inf for input \(i)")
             // For large positive x, GELU ≈ x (within 1% for x > 3)
             XCTAssertEqual(o, i, accuracy: 0.01 * i,
-                "GELU should approximate identity for large positive inputs")
+                           "GELU should approximate identity for large positive inputs")
         }
     }
 
@@ -624,7 +627,7 @@ final class GELUPropertyTests: XCTestCase {
         let output = outputTensor.toArray()
         for o in output {
             XCTAssertEqual(o, 0.0, accuracy: 0.01,
-                "GELU should be ≈ 0 for large negative inputs")
+                           "GELU should be ≈ 0 for large negative inputs")
         }
     }
 
@@ -647,7 +650,7 @@ final class GELUPropertyTests: XCTestCase {
 
         // Check that changes between adjacent outputs are bounded
         for i in 1..<output.count {
-            let delta = abs(output[i] - output[i-1])
+            let delta = abs(output[i] - output[i - 1])
             XCTAssertLessThan(delta, 0.02, "GELU should change smoothly")
         }
     }

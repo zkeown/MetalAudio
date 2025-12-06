@@ -28,6 +28,11 @@ public final class Tensor {
         shape.reduce(1, *)
     }
 
+    /// Whether the tensor has zero elements
+    public var isEmpty: Bool {
+        count == 0 // swiftlint:disable:this empty_count
+    }
+
     /// Number of dimensions
     public var rank: Int {
         shape.count
@@ -100,12 +105,15 @@ public final class Tensor {
         // - Memory spikes during GPU operations
         // - System services allocating memory
         // - Background app memory reclamation
-        let safeAllocationLimit = Int(Double(availableMemory) * 0.6)
-        guard byteSize <= safeAllocationLimit else {
-            throw MetalAudioError.bufferTooLarge(
-                requested: byteSize,
-                maxAllowed: safeAllocationLimit
-            )
+        // Note: os_proc_available_memory() returns 0 on iOS simulator - skip check in that case
+        if availableMemory > 0 {
+            let safeAllocationLimit = Int(Double(availableMemory) * 0.6)
+            guard byteSize <= safeAllocationLimit else {
+                throw MetalAudioError.bufferTooLarge(
+                    requested: byteSize,
+                    maxAllowed: safeAllocationLimit
+                )
+            }
         }
         #endif
 
@@ -315,7 +323,7 @@ public final class Tensor {
     /// - Note: This allocates a new array each call. For zero-allocation reads,
     ///   use `copy(to:)` with a pre-allocated buffer instead.
     public func toArray() -> [Float] {
-        guard count > 0 else { return [] }
+        guard !isEmpty else { return [] }
         var result = [Float](repeating: 0, count: count)
         result.withUnsafeMutableBufferPointer { ptr in
             guard let baseAddress = ptr.baseAddress else { return }
@@ -336,7 +344,7 @@ public final class Tensor {
     /// - Returns: Tuple of (hasNaN, hasInf, firstBadIndex) where firstBadIndex is the
     ///   index of the first NaN or Inf found, or nil if all values are finite.
     public func validateNoNaNInf() -> (hasNaN: Bool, hasInf: Bool, firstBadIndex: Int?) {
-        guard count > 0, buffer.storageMode != .private else {
+        guard !isEmpty, buffer.storageMode != .private else {
             return (false, false, nil)
         }
 
@@ -386,7 +394,7 @@ public final class Tensor {
                 actual: destination.count
             )
         }
-        guard count > 0 else { return }
+        guard !isEmpty else { return }
         guard let baseAddress = destination.baseAddress else { return }
         memcpy(baseAddress, buffer.contents(), byteSize)
     }
@@ -687,7 +695,7 @@ extension Tensor {
     /// Copy half-precision tensor to Float array with conversion
     /// - Note: Uses vImage for optimized SIMD conversion on Apple Silicon
     public func toFloatArray() -> [Float] {
-        guard count > 0 else { return [] }
+        guard !isEmpty else { return [] }
 
         if dataType == .float32 {
             return toArray()

@@ -261,6 +261,205 @@ final class NormalizationTests: XCTestCase {
         XCTAssertEqual(batchNorm.inputShape, [4, 8])
     }
 
+    // MARK: - Property Access Tests
+
+    func testLayerNormPipelineCreationError() throws {
+        let layerNorm = try LayerNorm(device: device, featureSize: 64)
+        XCTAssertNil(layerNorm.pipelineCreationError)
+    }
+
+    func testBatchNorm1DPipelineCreationError() throws {
+        let batchNorm = try BatchNorm1D(device: device, inputShape: [8, 32])
+        XCTAssertNil(batchNorm.pipelineCreationError)
+    }
+
+    // MARK: - Additional LayerNorm Tests
+
+    func testLayerNormLargeFeatureSize() throws {
+        let layerNorm = try LayerNorm(device: device, featureSize: 512)
+        XCTAssertEqual(layerNorm.inputShape, [512])
+        XCTAssertEqual(layerNorm.outputShape, [512])
+        XCTAssertTrue(layerNorm.isGPUAccelerated)
+    }
+
+    func testLayerNormSmallFeatureSize() throws {
+        let layerNorm = try LayerNorm(device: device, featureSize: 2)
+        XCTAssertEqual(layerNorm.inputShape, [2])
+        XCTAssertEqual(layerNorm.outputShape, [2])
+    }
+
+    func testLayerNormWithCustomEpsilon() throws {
+        let layerNorm = try LayerNorm(device: device, featureSize: 4, epsilon: 1e-3)
+
+        let input = try Tensor(device: device, shape: [4])
+        try input.copy(from: [1.0, 2.0, 3.0, 4.0])
+        let output = try Tensor(device: device, shape: [4])
+
+        try context.executeSync { encoder in
+            try layerNorm.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        for val in result {
+            XCTAssertFalse(val.isNaN)
+            XCTAssertFalse(val.isInfinite)
+        }
+    }
+
+    func testLayerNormNegativeValues() throws {
+        let layerNorm = try LayerNorm(device: device, featureSize: 4)
+
+        let input = try Tensor(device: device, shape: [4])
+        try input.copy(from: [-2.0, -1.0, 1.0, 2.0])
+        let output = try Tensor(device: device, shape: [4])
+
+        try context.executeSync { encoder in
+            try layerNorm.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        // Mean of [-2, -1, 1, 2] = 0, so output should also have mean ≈ 0
+        let mean = result.reduce(0, +) / Float(result.count)
+        XCTAssertEqual(mean, 0.0, accuracy: 0.01)
+    }
+
+    func testLayerNormLargeBatch() throws {
+        let batchSize = 16
+        let featureSize = 32
+        let layerNorm = try LayerNorm(device: device, featureSize: featureSize, inputShape: [batchSize, featureSize])
+
+        let input = try Tensor(device: device, shape: [batchSize, featureSize])
+        var inputData = [Float](repeating: 0, count: batchSize * featureSize)
+        for i in 0..<inputData.count {
+            inputData[i] = Float(i % 10) - 5.0
+        }
+        try input.copy(from: inputData)
+
+        let output = try Tensor(device: device, shape: [batchSize, featureSize])
+
+        try context.executeSync { encoder in
+            try layerNorm.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        XCTAssertEqual(result.count, batchSize * featureSize)
+
+        // Check each batch is normalized
+        for b in 0..<batchSize {
+            let batchStart = b * featureSize
+            let batchEnd = batchStart + featureSize
+            let batchData = Array(result[batchStart..<batchEnd])
+            let batchMean = batchData.reduce(0, +) / Float(featureSize)
+            XCTAssertEqual(batchMean, 0.0, accuracy: 0.1, "Batch \(b) mean should be ≈ 0")
+        }
+    }
+
+    // MARK: - Additional BatchNorm1D Tests
+
+    func testBatchNorm1DLargerShape() throws {
+        let batchNorm = try BatchNorm1D(device: device, inputShape: [32, 128])
+        XCTAssertEqual(batchNorm.inputShape, [32, 128])
+        XCTAssertEqual(batchNorm.outputShape, [32, 128])
+    }
+
+    func testBatchNorm1DForwardWithLoadedWeights() throws {
+        let batchNorm = try BatchNorm1D(device: device, inputShape: [2, 4])
+
+        // Load identity weights: gamma=1, beta=0, mean=0, var=1
+        let gamma = [Float](repeating: 1.0, count: 2)
+        let beta = [Float](repeating: 0.0, count: 2)
+        let runningMean = [Float](repeating: 0.0, count: 2)
+        let runningVar = [Float](repeating: 1.0, count: 2)
+
+        try batchNorm.loadWeights(
+            gamma: gamma,
+            beta: beta,
+            runningMean: runningMean,
+            runningVar: runningVar
+        )
+
+        let input = try Tensor(device: device, shape: [2, 4])
+        try input.copy(from: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+        let output = try Tensor(device: device, shape: [2, 4])
+
+        try context.executeSync { encoder in
+            try batchNorm.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        // With identity weights (mean=0, var=1), output ≈ input
+        XCTAssertEqual(result[0], 1.0, accuracy: 0.001)
+        XCTAssertEqual(result[7], 8.0, accuracy: 0.001)
+    }
+
+    func testBatchNorm1DWithScaleAndShift() throws {
+        let batchNorm = try BatchNorm1D(device: device, inputShape: [2, 4])
+
+        // gamma=2, beta=10, mean=0, var=1 -> output = 2*x + 10
+        let gamma: [Float] = [2.0, 2.0]
+        let beta: [Float] = [10.0, 10.0]
+        let runningMean: [Float] = [0.0, 0.0]
+        let runningVar: [Float] = [1.0, 1.0]
+
+        try batchNorm.loadWeights(
+            gamma: gamma,
+            beta: beta,
+            runningMean: runningMean,
+            runningVar: runningVar
+        )
+
+        let input = try Tensor(device: device, shape: [2, 4])
+        try input.copy(from: [1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0])
+        let output = try Tensor(device: device, shape: [2, 4])
+
+        try context.executeSync { encoder in
+            try batchNorm.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        // Channel 0: 2*1 + 10 = 12
+        XCTAssertEqual(result[0], 12.0, accuracy: 0.1)
+        // Channel 1: 2*2 + 10 = 14
+        XCTAssertEqual(result[4], 14.0, accuracy: 0.1)
+    }
+
+    func testBatchNorm1DNegativeInput() throws {
+        let batchNorm = try BatchNorm1D(device: device, inputShape: [2, 4])
+
+        let input = try Tensor(device: device, shape: [2, 4])
+        try input.copy(from: [-1.0, -2.0, -3.0, -4.0, -5.0, -6.0, -7.0, -8.0])
+        let output = try Tensor(device: device, shape: [2, 4])
+
+        try context.executeSync { encoder in
+            try batchNorm.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        XCTAssertEqual(result.count, 8)
+        for val in result {
+            XCTAssertFalse(val.isNaN)
+            XCTAssertFalse(val.isInfinite)
+        }
+    }
+
+    func testBatchNorm1DZeroInput() throws {
+        let batchNorm = try BatchNorm1D(device: device, inputShape: [2, 4])
+
+        let input = try Tensor(device: device, shape: [2, 4])
+        try input.copy(from: [Float](repeating: 0.0, count: 8))
+        let output = try Tensor(device: device, shape: [2, 4])
+
+        try context.executeSync { encoder in
+            try batchNorm.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+        // With default weights (mean=0, var=1, gamma=1, beta=0), zeros should stay zeros
+        for val in result {
+            XCTAssertEqual(val, 0.0, accuracy: 0.001)
+        }
+    }
+
     // MARK: - PyTorch Reference Tests
 
     func testLayerNormMatchesPyTorch() throws {

@@ -3,6 +3,398 @@ import MetalPerformanceShaders
 import Accelerate
 import MetalAudioKit
 
+// MARK: - Group Normalization
+
+/// Group Normalization layer
+///
+/// Divides channels into groups and normalizes within each group.
+/// Used extensively in HTDemucs for audio source separation.
+///
+/// ## Formula
+/// ```
+/// y = gamma * (x - mean) / sqrt(var + eps) + beta
+/// ```
+/// where mean and variance are computed over (channels_per_group × spatial_size) elements.
+///
+/// ## Shape
+/// - Input: `[channels, length]` or `[batch, channels, length]`
+/// - Output: Same as input
+///
+/// ## Thread Safety
+/// Thread-safe after `loadParameters()`. Parameters are read-only during forward pass.
+///
+/// ## Example
+/// ```swift
+/// // HTDemucs uses 8 groups
+/// let groupNorm = try GroupNorm(device: device, numGroups: 8, numChannels: 48)
+/// try groupNorm.loadParameters(weight: gamma, bias: beta)
+/// ```
+public final class GroupNorm: NNLayer {
+    public let inputShape: [Int]
+    public var outputShape: [Int] { inputShape }
+
+    /// Number of groups to divide channels into
+    public let numGroups: Int
+
+    /// Total number of channels
+    public let numChannels: Int
+
+    /// Epsilon for numerical stability
+    public let epsilon: Float
+
+    /// Whether this layer has learnable affine parameters
+    public var hasAffineParameters: Bool { gammaTensor != nil }
+
+    private let device: AudioDevice
+    private let channelsPerGroup: Int
+    private let pipeline: MTLComputePipelineState?
+
+    // Learnable parameters (optional if affine=false)
+    private let gammaTensor: Tensor?
+    private let betaTensor: Tensor?
+
+    /// Indicates whether GPU acceleration is available
+    public var isGPUAccelerated: Bool { pipeline != nil }
+
+    /// Error during pipeline creation, if any
+    public let pipelineCreationError: Error?
+
+    /// Initialize GroupNorm
+    /// - Parameters:
+    ///   - device: Audio device
+    ///   - numGroups: Number of groups to divide channels into
+    ///   - numChannels: Total number of channels (must be divisible by numGroups)
+    ///   - epsilon: Small constant for numerical stability (default: 1e-5)
+    ///   - affine: Whether to include learnable gamma/beta (default: true)
+    ///   - inputShape: Optional full input shape for NNLayer conformance
+    public init(
+        device: AudioDevice,
+        numGroups: Int,
+        numChannels: Int,
+        epsilon: Float = 1e-5,
+        affine: Bool = true,
+        inputShape: [Int]? = nil
+    ) throws {
+        guard numChannels % numGroups == 0 else {
+            throw MetalAudioError.invalidConfiguration(
+                "numChannels (\(numChannels)) must be divisible by numGroups (\(numGroups))"
+            )
+        }
+
+        self.device = device
+        self.numGroups = numGroups
+        self.numChannels = numChannels
+        self.channelsPerGroup = numChannels / numGroups
+        self.epsilon = epsilon
+        self.inputShape = inputShape ?? [numChannels, 0]  // 0 = dynamic length
+
+        // Learnable parameters
+        if affine {
+            self.gammaTensor = try Tensor(device: device, shape: [numChannels])
+            self.betaTensor = try Tensor(device: device, shape: [numChannels])
+
+            // Initialize: gamma = 1, beta = 0
+            try gammaTensor!.copy(from: [Float](repeating: 1.0, count: numChannels))
+            betaTensor!.zero()
+        } else {
+            self.gammaTensor = nil
+            self.betaTensor = nil
+        }
+
+        // Create compute pipeline
+        do {
+            self.pipeline = try device.makeComputePipeline(
+                source: Self.shaderSource,
+                functionName: "group_norm_forward"
+            )
+            self.pipelineCreationError = nil
+        } catch {
+            if MetalNNConfig.strictGPUMode {
+                throw error
+            }
+            MetalNNConfig.logWarning("GroupNorm GPU pipeline creation failed: \(error). Falling back to CPU.")
+            self.pipeline = nil
+            self.pipelineCreationError = error
+        }
+    }
+
+    /// Load learned parameters
+    /// - Parameters:
+    ///   - weight: Scale parameters (gamma), one per channel
+    ///   - bias: Shift parameters (beta), one per channel
+    public func loadParameters(weight: [Float], bias: [Float]) throws {
+        guard let gammaTensor = gammaTensor, let betaTensor = betaTensor else {
+            throw MetalAudioError.invalidConfiguration("Cannot load parameters: affine=false")
+        }
+
+        guard weight.count == numChannels else {
+            throw MetalAudioError.invalidConfiguration(
+                "weight size \(weight.count) != numChannels \(numChannels)"
+            )
+        }
+        guard bias.count == numChannels else {
+            throw MetalAudioError.invalidConfiguration(
+                "bias size \(bias.count) != numChannels \(numChannels)"
+            )
+        }
+
+        try validateWeights(weight, name: "gamma")
+        try validateWeights(bias, name: "beta")
+
+        try gammaTensor.copy(from: weight)
+        try betaTensor.copy(from: bias)
+    }
+
+    // MARK: - Metal Shader
+
+    private static let shaderSource = """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct GroupNormParams {
+        uint numGroups;
+        uint numChannels;
+        uint channelsPerGroup;
+        uint spatialSize;
+        uint batchSize;
+        float epsilon;
+        uint affine;
+    };
+
+    constant uint GROUP_NORM_THREADGROUP_SIZE = 256;
+
+    /// Group Normalization using two-pass algorithm for numerical stability
+    kernel void group_norm_forward(
+        device const float* input [[buffer(0)]],
+        device float* output [[buffer(1)]],
+        device const float* gamma [[buffer(2)]],
+        device const float* beta [[buffer(3)]],
+        constant GroupNormParams& params [[buffer(4)]],
+        uint2 groupId [[threadgroup_position_in_grid]],
+        uint localId [[thread_index_in_threadgroup]]
+    ) {
+        threadgroup float sharedSum[GROUP_NORM_THREADGROUP_SIZE];
+        threadgroup float sharedMean;
+        threadgroup float sharedInvStd;
+
+        // groupId.x = batch index, groupId.y = group index
+        uint batchIdx = groupId.x;
+        uint groupIdx = groupId.y;
+
+        // Get threads per group from constant (we use 256 or less)
+        uint threadsPerGroup = GROUP_NORM_THREADGROUP_SIZE;
+
+        // Elements per group = channelsPerGroup * spatialSize
+        uint elementsPerGroup = params.channelsPerGroup * params.spatialSize;
+
+        // Starting offset in the input tensor
+        uint batchOffset = batchIdx * params.numChannels * params.spatialSize;
+        uint groupChannelStart = groupIdx * params.channelsPerGroup;
+
+        // Pass 1: Compute mean
+        float localSum = 0.0f;
+        for (uint i = localId; i < elementsPerGroup; i += threadsPerGroup) {
+            uint channelInGroup = i / params.spatialSize;
+            uint spatialIdx = i % params.spatialSize;
+            uint channelIdx = groupChannelStart + channelInGroup;
+            uint globalIdx = batchOffset + channelIdx * params.spatialSize + spatialIdx;
+            localSum += input[globalIdx];
+        }
+
+        sharedSum[localId] = localSum;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Tree reduction for sum
+        for (uint stride = threadsPerGroup / 2; stride > 0; stride >>= 1) {
+            if (localId < stride) {
+                sharedSum[localId] += sharedSum[localId + stride];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        if (localId == 0) {
+            sharedMean = sharedSum[0] / float(elementsPerGroup);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        float mean = sharedMean;
+
+        // Pass 2: Compute variance using E[(X-μ)²]
+        float localSumSq = 0.0f;
+        for (uint i = localId; i < elementsPerGroup; i += threadsPerGroup) {
+            uint channelInGroup = i / params.spatialSize;
+            uint spatialIdx = i % params.spatialSize;
+            uint channelIdx = groupChannelStart + channelInGroup;
+            uint globalIdx = batchOffset + channelIdx * params.spatialSize + spatialIdx;
+            float diff = input[globalIdx] - mean;
+            localSumSq += diff * diff;
+        }
+
+        sharedSum[localId] = localSumSq;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Tree reduction for variance
+        for (uint stride = threadsPerGroup / 2; stride > 0; stride >>= 1) {
+            if (localId < stride) {
+                sharedSum[localId] += sharedSum[localId + stride];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        if (localId == 0) {
+            float variance = sharedSum[0] / float(elementsPerGroup);
+            sharedInvStd = rsqrt(variance + params.epsilon);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        float invStd = sharedInvStd;
+
+        // Pass 3: Normalize and apply affine transform
+        for (uint i = localId; i < elementsPerGroup; i += threadsPerGroup) {
+            uint channelInGroup = i / params.spatialSize;
+            uint spatialIdx = i % params.spatialSize;
+            uint channelIdx = groupChannelStart + channelInGroup;
+            uint globalIdx = batchOffset + channelIdx * params.spatialSize + spatialIdx;
+
+            float val = input[globalIdx];
+            float normalized = (val - mean) * invStd;
+
+            if (params.affine != 0) {
+                output[globalIdx] = gamma[channelIdx] * normalized + beta[channelIdx];
+            } else {
+                output[globalIdx] = normalized;
+            }
+        }
+    }
+    """
+
+    private struct GroupNormParams {
+        var numGroups: UInt32
+        var numChannels: UInt32
+        var channelsPerGroup: UInt32
+        var spatialSize: UInt32
+        var batchSize: UInt32
+        var epsilon: Float
+        var affine: UInt32
+    }
+
+    public func forward(input: Tensor, output: Tensor, encoder: MTLComputeCommandEncoder) throws {
+        // Determine shape: [C, L] or [B, C, L]
+        let (batchSize, spatialSize) = inferBatchAndSpatialSize(from: input)
+
+        guard let pipeline = pipeline else {
+            try forwardCPU(input: input, output: output, batchSize: batchSize, spatialSize: spatialSize)
+            return
+        }
+
+        var params = GroupNormParams(
+            numGroups: UInt32(numGroups),
+            numChannels: UInt32(numChannels),
+            channelsPerGroup: UInt32(channelsPerGroup),
+            spatialSize: UInt32(spatialSize),
+            batchSize: UInt32(batchSize),
+            epsilon: epsilon,
+            affine: hasAffineParameters ? 1 : 0
+        )
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(input.buffer, offset: 0, index: 0)
+        encoder.setBuffer(output.buffer, offset: 0, index: 1)
+
+        if let gammaTensor = gammaTensor, let betaTensor = betaTensor {
+            encoder.setBuffer(gammaTensor.buffer, offset: 0, index: 2)
+            encoder.setBuffer(betaTensor.buffer, offset: 0, index: 3)
+        } else {
+            // Set dummy buffers for non-affine case
+            encoder.setBuffer(input.buffer, offset: 0, index: 2)
+            encoder.setBuffer(input.buffer, offset: 0, index: 3)
+        }
+
+        encoder.setBytes(&params, length: MemoryLayout<GroupNormParams>.stride, index: 4)
+
+        // One threadgroup per (batch, group) pair
+        let threadsPerGroup = min(256, channelsPerGroup * spatialSize)
+        let threadgroupSize = MTLSize(width: threadsPerGroup, height: 1, depth: 1)
+        let gridSize = MTLSize(width: batchSize, height: numGroups, depth: 1)
+
+        encoder.dispatchThreadgroups(gridSize, threadsPerThreadgroup: threadgroupSize)
+    }
+
+    private func inferBatchAndSpatialSize(from input: Tensor) -> (batchSize: Int, spatialSize: Int) {
+        if input.shape.count == 2 {
+            // [C, L]
+            return (batchSize: 1, spatialSize: input.shape[1])
+        } else if input.shape.count == 3 {
+            // [B, C, L]
+            return (batchSize: input.shape[0], spatialSize: input.shape[2])
+        } else {
+            // Fallback: assume flat [C * L]
+            return (batchSize: 1, spatialSize: input.count / numChannels)
+        }
+    }
+
+    private func forwardCPU(input: Tensor, output: Tensor, batchSize: Int, spatialSize: Int) throws {
+        let inputPtr = input.floatPointer
+        let outputPtr = output.floatPointer
+        let gammaPtr = gammaTensor?.floatPointer
+        let betaPtr = betaTensor?.floatPointer
+
+        let elementsPerGroup = channelsPerGroup * spatialSize
+
+        for b in 0..<batchSize {
+            let batchOffset = b * numChannels * spatialSize
+
+            for g in 0..<numGroups {
+                let groupChannelStart = g * channelsPerGroup
+
+                // Pass 1: Compute mean
+                var sum: Float = 0
+                for c in 0..<channelsPerGroup {
+                    let channelIdx = groupChannelStart + c
+                    for s in 0..<spatialSize {
+                        let idx = batchOffset + channelIdx * spatialSize + s
+                        sum += inputPtr[idx]
+                    }
+                }
+                let mean = sum / Float(elementsPerGroup)
+
+                // Pass 2: Compute variance
+                var sumSq: Float = 0
+                for c in 0..<channelsPerGroup {
+                    let channelIdx = groupChannelStart + c
+                    for s in 0..<spatialSize {
+                        let idx = batchOffset + channelIdx * spatialSize + s
+                        let diff = inputPtr[idx] - mean
+                        sumSq += diff * diff
+                    }
+                }
+                let variance = sumSq / Float(elementsPerGroup)
+                var invStd = 1.0 / sqrt(variance + epsilon)
+
+                // Safety check
+                if !invStd.isFinite {
+                    invStd = 0.0
+                }
+
+                // Pass 3: Normalize and apply affine
+                for c in 0..<channelsPerGroup {
+                    let channelIdx = groupChannelStart + c
+                    for s in 0..<spatialSize {
+                        let idx = batchOffset + channelIdx * spatialSize + s
+                        let normalized = (inputPtr[idx] - mean) * invStd
+
+                        if let gammaPtr = gammaPtr, let betaPtr = betaPtr {
+                            outputPtr[idx] = gammaPtr[channelIdx] * normalized + betaPtr[channelIdx]
+                        } else {
+                            outputPtr[idx] = normalized
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Normalization Layers
 
 /// Layer Normalization

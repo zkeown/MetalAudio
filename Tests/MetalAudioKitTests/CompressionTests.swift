@@ -17,8 +17,8 @@ final class CompressedTensorTests: XCTestCase {
 
     func testCompress() {
         // Create data with some redundancy (compressible)
-        var data = [Float](repeating: 0, count: 10000)
-        for i in 0..<10000 {
+        var data = [Float](repeating: 0, count: 10_000)
+        for i in 0..<10_000 {
             data[i] = Float(i % 100)  // Repeating pattern
         }
 
@@ -34,8 +34,8 @@ final class CompressedTensorTests: XCTestCase {
 
     func testDecompress() {
         // Use highly compressible data (mostly zeros with some pattern)
-        var data = [Float](repeating: 0, count: 10000)
-        for i in 0..<10000 { data[i] = Float(i % 20) }
+        var data = [Float](repeating: 0, count: 10_000)
+        for i in 0..<10_000 { data[i] = Float(i % 20) }
 
         let tensor = CompressedTensor(data: data)
         let saved = tensor.compress()
@@ -73,8 +73,8 @@ final class CompressedTensorTests: XCTestCase {
 
     func testAutoDecompress() {
         // Use highly compressible data
-        var data = [Float](repeating: 0, count: 10000)
-        for i in 0..<10000 { data[i] = Float(i % 50) }
+        var data = [Float](repeating: 0, count: 10_000)
+        for i in 0..<10_000 { data[i] = Float(i % 50) }
 
         let tensor = CompressedTensor(data: data)
         let saved = tensor.compress()
@@ -92,7 +92,7 @@ final class CompressedTensorTests: XCTestCase {
 
     func testCompressionRatio() {
         // Highly compressible data
-        let zeros = [Float](repeating: 0.0, count: 10000)
+        let zeros = [Float](repeating: 0.0, count: 10_000)
         let tensorZeros = CompressedTensor(data: zeros)
         tensorZeros.compress()
 
@@ -100,8 +100,8 @@ final class CompressedTensorTests: XCTestCase {
                           "Zeros should compress well")
 
         // Less compressible data
-        var random = [Float](repeating: 0, count: 10000)
-        for i in 0..<10000 { random[i] = Float.random(in: -1...1) }
+        var random = [Float](repeating: 0, count: 10_000)
+        for i in 0..<10_000 { random[i] = Float.random(in: -1...1) }
 
         let tensorRandom = CompressedTensor(data: random)
         tensorRandom.compress()
@@ -137,8 +137,8 @@ final class CompressedTensorTests: XCTestCase {
     }
 
     func testMemorySaved() {
-        var data = [Float](repeating: 0, count: 10000)
-        for i in 0..<10000 { data[i] = Float(i % 10) }
+        var data = [Float](repeating: 0, count: 10_000)
+        for i in 0..<10_000 { data[i] = Float(i % 10) }
 
         let tensor = CompressedTensor(data: data)
         XCTAssertEqual(tensor.memorySaved, 0)
@@ -168,8 +168,8 @@ final class CompressedTensorTests: XCTestCase {
     }
 
     func testCompressAlreadyCompressed() {
-        var data = [Float](repeating: 0, count: 10000)
-        for i in 0..<10000 { data[i] = Float(i % 20) }
+        var data = [Float](repeating: 0, count: 10_000)
+        for i in 0..<10_000 { data[i] = Float(i % 20) }
 
         let tensor = CompressedTensor(data: data)
 
@@ -217,8 +217,8 @@ final class CompressedTensorTests: XCTestCase {
     }
 
     func testConcurrentAccess() {
-        var data = [Float](repeating: 0, count: 10000)
-        for i in 0..<10000 { data[i] = Float(i % 50) }
+        var data = [Float](repeating: 0, count: 10_000)
+        for i in 0..<10_000 { data[i] = Float(i % 50) }
 
         let tensor = CompressedTensor(data: data)
         let iterations = 50
@@ -251,7 +251,7 @@ final class CompressedTensorTests: XCTestCase {
 
         // Verify data integrity after concurrent access
         let result = tensor.toArray()
-        XCTAssertEqual(result.count, 10000)
+        XCTAssertEqual(result.count, 10_000)
         XCTAssertEqual(result[500], Float(500 % 50), accuracy: 0.001)
     }
 }
@@ -290,8 +290,8 @@ final class CompressedWeightStoreTests: XCTestCase {
         let store = CompressedWeightStore()
 
         // Add compressible data
-        var data = [Float](repeating: 0, count: 10000)
-        for i in 0..<10000 { data[i] = Float(i % 50) }
+        var data = [Float](repeating: 0, count: 10_000)
+        for i in 0..<10_000 { data[i] = Float(i % 50) }
 
         store.add(name: "weight1", data: data)
         store.add(name: "weight2", data: data)
@@ -367,8 +367,8 @@ final class CompressedWeightStoreTests: XCTestCase {
     func testMemoryPressureResponse() {
         let store = CompressedWeightStore()
 
-        var data = [Float](repeating: 0, count: 10000)
-        for i in 0..<10000 { data[i] = Float(i % 20) }
+        var data = [Float](repeating: 0, count: 10_000)
+        for i in 0..<10_000 { data[i] = Float(i % 20) }
 
         store.add(name: "weights", data: data)
 
@@ -385,8 +385,8 @@ final class CompressedWeightStoreTests: XCTestCase {
         let store = CompressedWeightStore()
 
         // Use highly compressible data
-        var data = [Float](repeating: 0, count: 10000)
-        for i in 0..<10000 { data[i] = Float(i % 30) }
+        var data = [Float](repeating: 0, count: 10_000)
+        for i in 0..<10_000 { data[i] = Float(i % 30) }
 
         store.add(name: "tensor1", data: data)
         store.add(name: "tensor2", data: data)
@@ -472,8 +472,8 @@ final class CompressedWeightStoreTests: XCTestCase {
         let store = CompressedWeightStore()
         store.coldThreshold = 0  // Everything is cold immediately
 
-        var data = [Float](repeating: 0, count: 10000)
-        for i in 0..<10000 { data[i] = Float(i % 20) }
+        var data = [Float](repeating: 0, count: 10_000)
+        for i in 0..<10_000 { data[i] = Float(i % 20) }
 
         store.add(name: "weights", data: data)
 
@@ -489,8 +489,8 @@ final class CompressedWeightStoreTests: XCTestCase {
     func testMemoryPressureNormal() {
         let store = CompressedWeightStore()
 
-        var data = [Float](repeating: 0, count: 10000)
-        for i in 0..<10000 { data[i] = Float(i % 20) }
+        var data = [Float](repeating: 0, count: 10_000)
+        for i in 0..<10_000 { data[i] = Float(i % 20) }
 
         store.add(name: "weights", data: data)
 

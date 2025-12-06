@@ -1,3 +1,5 @@
+// ChunkedInference requires Swift 6 / Xcode 16 SDK (BNNS Graph API)
+#if compiler(>=6.0)
 import XCTest
 @testable import MetalNN
 @testable import MetalAudioKit
@@ -92,8 +94,8 @@ final class ChunkedInferenceTests: XCTestCase {
         let config = ChunkedInference.Configuration(chunkSize: 2048, overlap: 512)
 
         // Latency at 48kHz
-        let latencySeconds = Double(config.chunkSize) / 48000.0
-        XCTAssertEqual(latencySeconds, 2048.0 / 48000.0, accuracy: 0.0001)
+        let latencySeconds = Double(config.chunkSize) / 48_000.0
+        XCTAssertEqual(latencySeconds, 2048.0 / 48_000.0, accuracy: 0.0001)
     }
 
     // MARK: - Window COLA Tests
@@ -242,3 +244,4 @@ final class ChunkedInferenceTests: XCTestCase {
         XCTAssertLessThan(abs(window[255]), 0.01)
     }
 }
+#endif  // compiler(>=6.0)

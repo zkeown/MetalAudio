@@ -467,7 +467,7 @@ final class Conv1DReferenceTests: XCTestCase {
         )
 
         // Moving average kernel
-        let weights: [Float] = [1.0/3.0, 1.0/3.0, 1.0/3.0]
+        let weights: [Float] = [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]
         let bias: [Float] = [0.0]
         try conv.loadWeights(weights, bias: bias)
 

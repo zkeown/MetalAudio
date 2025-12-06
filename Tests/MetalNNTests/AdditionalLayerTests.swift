@@ -379,6 +379,8 @@ final class BatchNorm1DTests: XCTestCase {
 
 // MARK: - ChunkedInference Window Tests
 
+// ChunkedInference requires Swift 6 / Xcode 16 SDK (BNNS Graph API)
+#if compiler(>=6.0)
 @available(macOS 15.0, iOS 18.0, *)
 final class ChunkedInferenceWindowTests: XCTestCase {
 
@@ -428,7 +430,7 @@ final class ChunkedInferenceWindowTests: XCTestCase {
         let hann = ChunkedInference.WindowType.hann.generate(size: size)
 
         // Symmetric windows should be symmetric
-        for i in 0..<size/2 {
+        for i in 0..<size / 2 {
             XCTAssertEqual(hann[i], hann[size - 1 - i], accuracy: 0.0001)
         }
     }
@@ -466,6 +468,7 @@ final class ChunkedInferenceWindowTests: XCTestCase {
         XCTAssertEqual(config.hopSize, 1536)
     }
 }
+#endif  // compiler(>=6.0)
 
 // MARK: - Conv1D Additional Tests
 
@@ -554,8 +557,8 @@ final class Conv1DAdditionalTests: XCTestCase {
             device: device,
             inputChannels: 1,
             outputChannels: 1,
-            kernelSize: 1000000,
-            dilation: 1000000,
+            kernelSize: 1_000_000,
+            dilation: 1_000_000,
             inputLength: 10
         ))
     }

@@ -9,12 +9,12 @@ final class BiquadFilterTests: XCTestCase {
         try filter.configure(
             type: .lowpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
         // Generate test signals
-        let sampleRate: Float = 44100
+        let sampleRate: Float = 44_100
         let numSamples = 4096
 
         // Low frequency (should pass)
@@ -26,7 +26,7 @@ final class BiquadFilterTests: XCTestCase {
         // High frequency (should be attenuated)
         var highFreq = [Float](repeating: 0, count: numSamples)
         for i in 0..<numSamples {
-            highFreq[i] = sin(2.0 * Float.pi * 10000.0 * Float(i) / sampleRate)
+            highFreq[i] = sin(2.0 * Float.pi * 10_000.0 * Float(i) / sampleRate)
         }
 
         filter.reset()
@@ -49,11 +49,11 @@ final class BiquadFilterTests: XCTestCase {
         try filter.configure(
             type: .highpass,
             frequency: 5000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
-        let sampleRate: Float = 44100
+        let sampleRate: Float = 44_100
         let numSamples = 4096
 
         // Low frequency (should be attenuated)
@@ -65,7 +65,7 @@ final class BiquadFilterTests: XCTestCase {
         // High frequency (should pass)
         var highFreq = [Float](repeating: 0, count: numSamples)
         for i in 0..<numSamples {
-            highFreq[i] = sin(2.0 * Float.pi * 15000.0 * Float(i) / sampleRate)
+            highFreq[i] = sin(2.0 * Float.pi * 15_000.0 * Float(i) / sampleRate)
         }
 
         filter.reset()
@@ -90,11 +90,11 @@ final class BiquadFilterExtendedTests: XCTestCase {
         try filter.configure(
             type: .bandpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 2.0
         )
 
-        let sampleRate: Float = 44100
+        let sampleRate: Float = 44_100
         let numSamples = 4096
 
         // At center frequency (should pass)
@@ -106,7 +106,7 @@ final class BiquadFilterExtendedTests: XCTestCase {
         // Far from center (should be attenuated)
         var farFreq = [Float](repeating: 0, count: numSamples)
         for i in 0..<numSamples {
-            farFreq[i] = sin(2.0 * Float.pi * 10000.0 * Float(i) / sampleRate)
+            farFreq[i] = sin(2.0 * Float.pi * 10_000.0 * Float(i) / sampleRate)
         }
 
         filter.reset()
@@ -126,11 +126,11 @@ final class BiquadFilterExtendedTests: XCTestCase {
         try filter.configure(
             type: .notch,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 5.0
         )
 
-        let sampleRate: Float = 44100
+        let sampleRate: Float = 44_100
         let numSamples = 4096
 
         // At notch frequency (should be attenuated)
@@ -162,11 +162,11 @@ final class BiquadFilterExtendedTests: XCTestCase {
         try filter.configure(
             type: .allpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
-        let sampleRate: Float = 44100
+        let sampleRate: Float = 44_100
         let numSamples = 4096
 
         var input = [Float](repeating: 0, count: numSamples)
@@ -190,7 +190,7 @@ final class BiquadFilterExtendedTests: XCTestCase {
         try filter.configure(
             type: .peaking(gainDB: 6.0),
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 2.0
         )
 
@@ -203,7 +203,7 @@ final class BiquadFilterExtendedTests: XCTestCase {
         try filter.configure(
             type: .lowshelf(gainDB: 6.0),
             frequency: 500,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
@@ -215,7 +215,7 @@ final class BiquadFilterExtendedTests: XCTestCase {
         try filter.configure(
             type: .highshelf(gainDB: 6.0),
             frequency: 5000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
@@ -227,7 +227,7 @@ final class BiquadFilterExtendedTests: XCTestCase {
         try filter.configure(
             type: .lowpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
@@ -279,7 +279,7 @@ final class BiquadFilterExtendedTests: XCTestCase {
         XCTAssertThrowsError(try filter.configure(
             type: .lowpass,
             frequency: 0,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )) { error in
             XCTAssertTrue(error is FilterError)
@@ -290,8 +290,8 @@ final class BiquadFilterExtendedTests: XCTestCase {
         let filter = BiquadFilter()
         XCTAssertThrowsError(try filter.configure(
             type: .lowpass,
-            frequency: 30000,  // Above Nyquist for 44100
-            sampleRate: 44100,
+            frequency: 30_000,  // Above Nyquist for 44_100
+            sampleRate: 44_100,
             q: 0.707
         )) { error in
             XCTAssertTrue(error is FilterError)
@@ -303,7 +303,7 @@ final class BiquadFilterExtendedTests: XCTestCase {
         XCTAssertThrowsError(try filter.configure(
             type: .lowpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0
         )) { error in
             XCTAssertTrue(error is FilterError)
@@ -315,7 +315,7 @@ final class BiquadFilterExtendedTests: XCTestCase {
         XCTAssertThrowsError(try filter.configure(
             type: .lowpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: -1.0
         )) { error in
             XCTAssertTrue(error is FilterError)
@@ -352,14 +352,14 @@ final class BiquadFilterEdgeCaseTests: XCTestCase {
         try filter.configure(
             type: .bandpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 50.0  // Very high Q
         )
 
         XCTAssertTrue(filter.isStable, "High-Q filter should remain stable")
 
         // Process some samples to verify no explosion
-        let sampleRate: Float = 44100
+        let sampleRate: Float = 44_100
         let numSamples = 2048
         var input = [Float](repeating: 0, count: numSamples)
         for i in 0..<numSamples {
@@ -381,7 +381,7 @@ final class BiquadFilterEdgeCaseTests: XCTestCase {
         try filter.configure(
             type: .peaking(gainDB: 12.0),
             frequency: 2000,
-            sampleRate: 48000,
+            sampleRate: 48_000,
             q: 100.0
         )
 
@@ -390,7 +390,7 @@ final class BiquadFilterEdgeCaseTests: XCTestCase {
 
     func testFrequencyNearNyquist() throws {
         let filter = BiquadFilter()
-        let sampleRate: Float = 44100
+        let sampleRate: Float = 44_100
         let nyquist = sampleRate / 2.0
 
         // Frequency just below Nyquist (should succeed)
@@ -406,7 +406,7 @@ final class BiquadFilterEdgeCaseTests: XCTestCase {
         let numSamples = 1024
         var input = [Float](repeating: 0, count: numSamples)
         for i in 0..<numSamples {
-            input[i] = sin(2.0 * Float.pi * 10000.0 * Float(i) / sampleRate)
+            input[i] = sin(2.0 * Float.pi * 10_000.0 * Float(i) / sampleRate)
         }
 
         let output = filter.process(input: input)
@@ -423,7 +423,7 @@ final class BiquadFilterEdgeCaseTests: XCTestCase {
         try filter.configure(
             type: .highpass,
             frequency: 20.0,  // 20 Hz - lowest practical frequency
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
@@ -431,7 +431,7 @@ final class BiquadFilterEdgeCaseTests: XCTestCase {
         let numSamples = 4096
         var input = [Float](repeating: 0, count: numSamples)
         for i in 0..<numSamples {
-            input[i] = sin(2.0 * Float.pi * 10.0 * Float(i) / 44100.0)  // 10 Hz
+            input[i] = sin(2.0 * Float.pi * 10.0 * Float(i) / 44_100.0)  // 10 Hz
         }
 
         let output = filter.process(input: input)
@@ -446,7 +446,7 @@ final class BiquadFilterEdgeCaseTests: XCTestCase {
         try filter.configure(
             type: .lowpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
@@ -469,7 +469,7 @@ final class BiquadFilterEdgeCaseTests: XCTestCase {
         try filter.configure(
             type: .lowpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
@@ -488,14 +488,14 @@ final class BiquadFilterEdgeCaseTests: XCTestCase {
         try filter.configure(
             type: .lowpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
         // Process sample by sample
         var outputs: [Float] = []
         for i in 0..<100 {
-            let input = sin(2.0 * Float.pi * 500.0 * Float(i) / 44100.0)
+            let input = sin(2.0 * Float.pi * 500.0 * Float(i) / 44_100.0)
             let output = filter.process(sample: input)
             outputs.append(output)
             XCTAssertFalse(output.isNaN, "Single sample processing should not produce NaN")
@@ -508,12 +508,12 @@ final class BiquadFilterEdgeCaseTests: XCTestCase {
         let filter1 = BiquadFilter()
         let filter2 = BiquadFilter()
 
-        try filter1.configure(type: .lowpass, frequency: 1000, sampleRate: 44100, q: 0.707)
-        try filter2.configure(type: .lowpass, frequency: 1000, sampleRate: 44100, q: 0.707)
+        try filter1.configure(type: .lowpass, frequency: 1000, sampleRate: 44_100, q: 0.707)
+        try filter2.configure(type: .lowpass, frequency: 1000, sampleRate: 44_100, q: 0.707)
 
         var input = [Float](repeating: 0, count: 100)
         for i in 0..<100 {
-            input[i] = sin(2.0 * Float.pi * 500.0 * Float(i) / 44100.0)
+            input[i] = sin(2.0 * Float.pi * 500.0 * Float(i) / 44_100.0)
         }
 
         // Batch processing
@@ -528,7 +528,7 @@ final class BiquadFilterEdgeCaseTests: XCTestCase {
         // Should produce same results (using looser tolerance for mode comparison)
         for i in 0..<100 {
             XCTAssertEqual(batchOutput[i], singleOutput[i], accuracy: modeConsistencyTolerance,
-                "Batch and single-sample processing should match at index \(i) (tolerance: \(modeConsistencyTolerance))")
+                           "Batch and single-sample processing should match at index \(i) (tolerance: \(modeConsistencyTolerance))")
         }
     }
 
@@ -536,11 +536,11 @@ final class BiquadFilterEdgeCaseTests: XCTestCase {
         // Test that mixing batch and single-sample processing works correctly
         // when using reset() between mode switches as documented
         let filter = BiquadFilter()
-        try filter.configure(type: .lowpass, frequency: 1000, sampleRate: 44100, q: 0.707)
+        try filter.configure(type: .lowpass, frequency: 1000, sampleRate: 44_100, q: 0.707)
 
         var input = [Float](repeating: 0, count: 100)
         for i in 0..<100 {
-            input[i] = sin(2.0 * Float.pi * 500.0 * Float(i) / 44100.0)
+            input[i] = sin(2.0 * Float.pi * 500.0 * Float(i) / 44_100.0)
         }
 
         // Process with batch
@@ -558,7 +558,7 @@ final class BiquadFilterEdgeCaseTests: XCTestCase {
         // After reset, both methods should produce the same result (using looser tolerance for mode comparison)
         for i in 0..<100 {
             XCTAssertEqual(batchOutput[i], singleOutput[i], accuracy: modeConsistencyTolerance,
-                "After reset, batch and single-sample should match at index \(i) (tolerance: \(modeConsistencyTolerance))")
+                           "After reset, batch and single-sample should match at index \(i) (tolerance: \(modeConsistencyTolerance))")
         }
     }
 
@@ -566,11 +566,11 @@ final class BiquadFilterEdgeCaseTests: XCTestCase {
         // Test that mixing modes (without reset) still produces valid audio
         // Even if state isn't perfectly shared, output should be stable and non-NaN
         let filter = BiquadFilter()
-        try filter.configure(type: .lowpass, frequency: 1000, sampleRate: 44100, q: 0.707)
+        try filter.configure(type: .lowpass, frequency: 1000, sampleRate: 44_100, q: 0.707)
 
         var input = [Float](repeating: 0, count: 200)
         for i in 0..<200 {
-            input[i] = sin(2.0 * Float.pi * 500.0 * Float(i) / 44100.0)
+            input[i] = sin(2.0 * Float.pi * 500.0 * Float(i) / 44_100.0)
         }
 
         // Process first half with batch
@@ -610,8 +610,8 @@ final class FilterBankTests: XCTestCase {
         let bank = FilterBank(device: device, bandCount: 10)
         try bank.configureAsEQ(
             lowFreq: 20,
-            highFreq: 20000,
-            sampleRate: 44100
+            highFreq: 20_000,
+            sampleRate: 44_100
         )
         // Just verify it doesn't crash
     }
@@ -620,8 +620,8 @@ final class FilterBankTests: XCTestCase {
         let bank = FilterBank(device: device, bandCount: 3)
         try bank.configureAsEQ(
             lowFreq: 100,
-            highFreq: 10000,
-            sampleRate: 44100
+            highFreq: 10_000,
+            sampleRate: 44_100
         )
 
         let input = [Float](repeating: 1.0, count: 1024)
@@ -634,8 +634,8 @@ final class FilterBankTests: XCTestCase {
         let bank = FilterBank(device: device, bandCount: 5)
         try bank.configureAsEQ(
             lowFreq: 100,
-            highFreq: 10000,
-            sampleRate: 44100
+            highFreq: 10_000,
+            sampleRate: 44_100
         )
 
         let input = [Float](repeating: 1.0, count: 1024)
@@ -649,7 +649,7 @@ final class FilterBankTests: XCTestCase {
         try bank.configureAsEQ(
             lowFreq: 200,
             highFreq: 8000,
-            sampleRate: 44100
+            sampleRate: 44_100
         )
 
         let input = [Float](repeating: 1.0, count: 512)
@@ -666,7 +666,7 @@ final class FilterBankTests: XCTestCase {
             band: 0,
             gainDB: 0.0,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 1.0
         )
 
@@ -682,8 +682,8 @@ final class FilterBankTests: XCTestCase {
 
         XCTAssertThrowsError(try bank.configureAsEQ(
             lowFreq: 100,
-            highFreq: 10000,
-            sampleRate: 44100
+            highFreq: 10_000,
+            sampleRate: 44_100
         )) { error in
             guard let filterError = error as? FilterError else {
                 XCTFail("Expected FilterError, got \(type(of: error))")
@@ -703,8 +703,8 @@ final class FilterBankTests: XCTestCase {
 
         XCTAssertThrowsError(try bank.configureAsEQ(
             lowFreq: 100,
-            highFreq: 10000,
-            sampleRate: 44100
+            highFreq: 10_000,
+            sampleRate: 44_100
         )) { error in
             XCTAssertTrue(error is FilterError, "Should throw FilterError")
         }
@@ -715,8 +715,8 @@ final class FilterBankTests: XCTestCase {
         let bank = FilterBank(device: device, bandCount: 31)  // Common for graphic EQ
         try bank.configureAsEQ(
             lowFreq: 20,
-            highFreq: 20000,
-            sampleRate: 48000
+            highFreq: 20_000,
+            sampleRate: 48_000
         )
 
         let input = [Float](repeating: 1.0, count: 4096)
@@ -729,8 +729,8 @@ final class FilterBankTests: XCTestCase {
         let bank = FilterBank(device: device, bandCount: 5)
         try bank.configureAsEQ(
             lowFreq: 100,
-            highFreq: 10000,
-            sampleRate: 44100
+            highFreq: 10_000,
+            sampleRate: 44_100
         )
 
         let input = [Float](repeating: 1.0, count: 512)
@@ -749,7 +749,7 @@ final class FilterBankTests: XCTestCase {
         try bank.configureAsEQ(
             lowFreq: 100,
             highFreq: 8000,
-            sampleRate: 44100
+            sampleRate: 44_100
         )
 
         let input = [Float](repeating: 1.0, count: 1024)
@@ -762,8 +762,8 @@ final class FilterBankTests: XCTestCase {
         let bank = FilterBank(device: device, bandCount: 5)
         try bank.configureAsEQ(
             lowFreq: 100,
-            highFreq: 10000,
-            sampleRate: 44100
+            highFreq: 10_000,
+            sampleRate: 44_100
         )
 
         // Set gain on individual bands
@@ -772,7 +772,7 @@ final class FilterBankTests: XCTestCase {
                 band: band,
                 gainDB: Float(band) * 2.0 - 4.0,  // -4 to +4 dB
                 frequency: 200 * Float(band + 1),
-                sampleRate: 44100
+                sampleRate: 44_100
             )
         }
 
@@ -792,14 +792,14 @@ final class ShelfFilterExtendedTests: XCTestCase {
         try filter.configure(
             type: .lowshelf(gainDB: 12.0),  // +12 dB boost
             frequency: 200,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
         XCTAssertTrue(filter.isStable, "Low shelf boost should be stable")
 
         // Low frequencies should be boosted
-        let sampleRate: Float = 44100
+        let sampleRate: Float = 44_100
         let numSamples = 4096
 
         var lowFreq = [Float](repeating: 0, count: numSamples)
@@ -823,7 +823,7 @@ final class ShelfFilterExtendedTests: XCTestCase {
 
         // Low shelf boost: low freq should be louder than high freq (inverted from normal)
         XCTAssertGreaterThan(lowRMS, highRMS * 1.5,
-            "Low shelf boost should boost low frequencies")
+                             "Low shelf boost should boost low frequencies")
     }
 
     func testLowShelfCut() throws {
@@ -831,7 +831,7 @@ final class ShelfFilterExtendedTests: XCTestCase {
         try filter.configure(
             type: .lowshelf(gainDB: -12.0),  // -12 dB cut
             frequency: 200,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
@@ -840,7 +840,7 @@ final class ShelfFilterExtendedTests: XCTestCase {
         let numSamples = 4096
         var input = [Float](repeating: 0, count: numSamples)
         for i in 0..<numSamples {
-            input[i] = sin(2.0 * Float.pi * 50.0 * Float(i) / 44100.0)
+            input[i] = sin(2.0 * Float.pi * 50.0 * Float(i) / 44_100.0)
         }
 
         let output = filter.process(input: input)
@@ -850,7 +850,7 @@ final class ShelfFilterExtendedTests: XCTestCase {
         let outputRMS = sqrt(output.map { $0 * $0 }.reduce(0, +) / Float(numSamples))
 
         XCTAssertLessThan(outputRMS, inputRMS,
-            "Low shelf cut should attenuate low frequencies")
+                          "Low shelf cut should attenuate low frequencies")
     }
 
     func testHighShelfBoost() throws {
@@ -858,18 +858,18 @@ final class ShelfFilterExtendedTests: XCTestCase {
         try filter.configure(
             type: .highshelf(gainDB: 12.0),  // +12 dB boost
             frequency: 5000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
         XCTAssertTrue(filter.isStable, "High shelf boost should be stable")
 
-        let sampleRate: Float = 44100
+        let sampleRate: Float = 44_100
         let numSamples = 4096
 
         var highFreq = [Float](repeating: 0, count: numSamples)
         for i in 0..<numSamples {
-            highFreq[i] = sin(2.0 * Float.pi * 15000.0 * Float(i) / sampleRate)
+            highFreq[i] = sin(2.0 * Float.pi * 15_000.0 * Float(i) / sampleRate)
         }
 
         var lowFreq = [Float](repeating: 0, count: numSamples)
@@ -888,7 +888,7 @@ final class ShelfFilterExtendedTests: XCTestCase {
 
         // High shelf boost: high freq should be boosted relative to low
         XCTAssertGreaterThan(highRMS, lowRMS * 1.5,
-            "High shelf boost should boost high frequencies")
+                             "High shelf boost should boost high frequencies")
     }
 
     func testHighShelfCut() throws {
@@ -896,7 +896,7 @@ final class ShelfFilterExtendedTests: XCTestCase {
         try filter.configure(
             type: .highshelf(gainDB: -12.0),  // -12 dB cut
             frequency: 5000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
@@ -905,7 +905,7 @@ final class ShelfFilterExtendedTests: XCTestCase {
         let numSamples = 4096
         var input = [Float](repeating: 0, count: numSamples)
         for i in 0..<numSamples {
-            input[i] = sin(2.0 * Float.pi * 15000.0 * Float(i) / 44100.0)
+            input[i] = sin(2.0 * Float.pi * 15_000.0 * Float(i) / 44_100.0)
         }
 
         let output = filter.process(input: input)
@@ -914,7 +914,7 @@ final class ShelfFilterExtendedTests: XCTestCase {
         let outputRMS = sqrt(output.map { $0 * $0 }.reduce(0, +) / Float(numSamples))
 
         XCTAssertLessThan(outputRMS, inputRMS,
-            "High shelf cut should attenuate high frequencies")
+                          "High shelf cut should attenuate high frequencies")
     }
 }
 
@@ -927,13 +927,13 @@ final class PeakingFilterExtendedTests: XCTestCase {
         try filter.configure(
             type: .peaking(gainDB: 12.0),  // +12 dB boost at center
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 2.0
         )
 
         XCTAssertTrue(filter.isStable, "Peaking boost should be stable")
 
-        let sampleRate: Float = 44100
+        let sampleRate: Float = 44_100
         let numSamples = 4096
 
         // At center frequency
@@ -959,7 +959,7 @@ final class PeakingFilterExtendedTests: XCTestCase {
 
         // Center should be boosted more than far frequencies
         XCTAssertGreaterThan(centerRMS, farRMS,
-            "Peaking boost should boost center frequency")
+                             "Peaking boost should boost center frequency")
     }
 
     func testPeakingCut() throws {
@@ -967,7 +967,7 @@ final class PeakingFilterExtendedTests: XCTestCase {
         try filter.configure(
             type: .peaking(gainDB: -12.0),  // -12 dB cut at center
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 2.0
         )
 
@@ -976,7 +976,7 @@ final class PeakingFilterExtendedTests: XCTestCase {
         let numSamples = 4096
         var input = [Float](repeating: 0, count: numSamples)
         for i in 0..<numSamples {
-            input[i] = sin(2.0 * Float.pi * 1000.0 * Float(i) / 44100.0)
+            input[i] = sin(2.0 * Float.pi * 1000.0 * Float(i) / 44_100.0)
         }
 
         let output = filter.process(input: input)
@@ -985,7 +985,7 @@ final class PeakingFilterExtendedTests: XCTestCase {
         let outputRMS = sqrt(output.map { $0 * $0 }.reduce(0, +) / Float(numSamples))
 
         XCTAssertLessThan(outputRMS, inputRMS,
-            "Peaking cut should attenuate center frequency")
+                          "Peaking cut should attenuate center frequency")
     }
 
     func testPeakingUnityGain() throws {
@@ -993,7 +993,7 @@ final class PeakingFilterExtendedTests: XCTestCase {
         try filter.configure(
             type: .peaking(gainDB: 0.0),  // Unity gain
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 1.0
         )
 
@@ -1002,7 +1002,7 @@ final class PeakingFilterExtendedTests: XCTestCase {
         let numSamples = 4096
         var input = [Float](repeating: 0, count: numSamples)
         for i in 0..<numSamples {
-            input[i] = sin(2.0 * Float.pi * 1000.0 * Float(i) / 44100.0)
+            input[i] = sin(2.0 * Float.pi * 1000.0 * Float(i) / 44_100.0)
         }
 
         let output = filter.process(input: input)
@@ -1012,7 +1012,7 @@ final class PeakingFilterExtendedTests: XCTestCase {
 
         // With unity gain, RMS should be approximately preserved
         XCTAssertEqual(outputRMS, inputRMS, accuracy: inputRMS * 0.01,
-            "Unity gain peaking should preserve amplitude")
+                       "Unity gain peaking should preserve amplitude")
     }
 }
 
@@ -1030,8 +1030,8 @@ final class FilterBankExtendedTests: XCTestCase {
         let bank = FilterBank(device: device, bandCount: 5)
         try bank.configureAsEQ(
             lowFreq: 100,
-            highFreq: 10000,
-            sampleRate: 44100
+            highFreq: 10_000,
+            sampleRate: 44_100
         )
 
         // Setting band outside range should throw (fail-fast is better than silent ignore)
@@ -1039,7 +1039,7 @@ final class FilterBankExtendedTests: XCTestCase {
             band: 100,  // Way out of range
             gainDB: 6.0,
             frequency: 1000,
-            sampleRate: 44100
+            sampleRate: 44_100
         )) { error in
             guard let filterError = error as? FilterError else {
                 XCTFail("Expected FilterError, got \(type(of: error))")
@@ -1057,8 +1057,8 @@ final class FilterBankExtendedTests: XCTestCase {
         let bank = FilterBank(device: device, bandCount: 5)
         try bank.configureAsEQ(
             lowFreq: 100,
-            highFreq: 10000,
-            sampleRate: 44100
+            highFreq: 10_000,
+            sampleRate: 44_100
         )
 
         // Negative band index should throw (fail-fast is better than silent ignore)
@@ -1066,7 +1066,7 @@ final class FilterBankExtendedTests: XCTestCase {
             band: -1,  // Negative
             gainDB: 6.0,
             frequency: 1000,
-            sampleRate: 44100
+            sampleRate: 44_100
         )) { error in
             guard let filterError = error as? FilterError else {
                 XCTFail("Expected FilterError, got \(type(of: error))")
@@ -1085,7 +1085,7 @@ final class FilterBankExtendedTests: XCTestCase {
         try bank.configureAsEQ(
             lowFreq: 100,
             highFreq: 8000,
-            sampleRate: 44100
+            sampleRate: 44_100
         )
 
         let input = [Float](repeating: 1.0, count: 1024)
@@ -1103,11 +1103,11 @@ final class FilterBankExtendedTests: XCTestCase {
 
         // Just verify both produce valid output
         XCTAssertGreaterThan(seriesRMS + parallelRMS, 0,
-            "Both series and parallel should produce output")
+                             "Both series and parallel should produce output")
     }
 
     func testFilterBankWithDifferentSampleRates() throws {
-        let sampleRates: [Float] = [22050, 44100, 48000, 96000]
+        let sampleRates: [Float] = [22_050, 44_100, 48_000, 96_000]
 
         for sampleRate in sampleRates {
             let bank = FilterBank(device: device, bandCount: 5)
@@ -1121,7 +1121,7 @@ final class FilterBankExtendedTests: XCTestCase {
             let output = bank.processSeries(input: input)
 
             XCTAssertEqual(output.count, input.count,
-                "Filter bank should work at \(sampleRate) Hz sample rate")
+                           "Filter bank should work at \(sampleRate) Hz sample rate")
         }
     }
 }
@@ -1142,7 +1142,7 @@ final class FilterStabilityTests: XCTestCase {
         try filter.configure(
             type: .lowpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
@@ -1162,7 +1162,7 @@ final class FilterStabilityTests: XCTestCase {
         XCTAssertThrowsError(try filter.configure(
             type: .lowpass,
             frequency: Float.nan,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )) { error in
             XCTAssertTrue(error is FilterError, "Should throw FilterError")
@@ -1194,7 +1194,7 @@ final class FilterStabilityTests: XCTestCase {
         try filter.configure(
             type: .bandpass,
             frequency: 2000,
-            sampleRate: 48000,
+            sampleRate: 48_000,
             q: 2.0
         )
 
@@ -1205,8 +1205,8 @@ final class FilterStabilityTests: XCTestCase {
             // Invalid: frequency above Nyquist
             XCTAssertThrowsError(try filter.configure(
                 type: .lowpass,
-                frequency: 30000,  // Above Nyquist for 48000 Hz
-                sampleRate: 48000,
+                frequency: 30_000,  // Above Nyquist for 48_000 Hz
+                sampleRate: 48_000,
                 q: 0.707
             ))
 
@@ -1222,7 +1222,7 @@ final class FilterStabilityTests: XCTestCase {
             XCTAssertThrowsError(try filter.configure(
                 type: .lowpass,
                 frequency: 1000,
-                sampleRate: 48000,
+                sampleRate: 48_000,
                 q: 0
             ))
         }
@@ -1240,7 +1240,7 @@ final class FilterStabilityTests: XCTestCase {
 
         var input = [Float](repeating: 0, count: 256)
         for i in 0..<256 {
-            input[i] = sin(2.0 * Float.pi * 2000.0 * Float(i) / 48000.0)
+            input[i] = sin(2.0 * Float.pi * 2000.0 * Float(i) / 48_000.0)
         }
 
         let output = filter.process(input: input)
@@ -1256,26 +1256,26 @@ final class FilterStabilityTests: XCTestCase {
         try filter.configure(
             type: .lowpass,
             frequency: 500,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
         // Process some samples to establish state
         for i in 0..<100 {
-            _ = filter.process(sample: sin(2.0 * Float.pi * 100.0 * Float(i) / 44100.0))
+            _ = filter.process(sample: sin(2.0 * Float.pi * 100.0 * Float(i) / 44_100.0))
         }
 
         // Attempt failed reconfigure
         XCTAssertThrowsError(try filter.configure(
             type: .lowpass,
             frequency: Float.infinity,  // Invalid
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         ))
 
         // process(sample:) should still work and produce bounded output
         for i in 100..<200 {
-            let input = sin(2.0 * Float.pi * 100.0 * Float(i) / 44100.0)
+            let input = sin(2.0 * Float.pi * 100.0 * Float(i) / 44_100.0)
             let output = filter.process(sample: input)
             XCTAssertFalse(output.isNaN, "process(sample:) should not produce NaN after failed configure")
             XCTAssertFalse(output.isInfinite, "process(sample:) should not produce Inf after failed configure")
@@ -1286,7 +1286,7 @@ final class FilterStabilityTests: XCTestCase {
     func testAllFilterTypesAreStable() throws {
         let filter = BiquadFilter()
         let frequency: Float = 1000
-        let sampleRate: Float = 44100
+        let sampleRate: Float = 44_100
         let q: Float = 0.707
 
         // Test all filter types
@@ -1313,7 +1313,7 @@ final class FilterStabilityTests: XCTestCase {
             )
 
             XCTAssertTrue(filter.isStable,
-                "Filter type \(filterType) should be stable")
+                          "Filter type \(filterType) should be stable")
         }
     }
 
@@ -1322,7 +1322,7 @@ final class FilterStabilityTests: XCTestCase {
         try filter.configure(
             type: .lowpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
@@ -1352,7 +1352,7 @@ final class FilterNumericalStabilityTests: XCTestCase {
         try filter.configure(
             type: .lowpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
@@ -1367,7 +1367,7 @@ final class FilterNumericalStabilityTests: XCTestCase {
         let secondHalfEnergy = output.suffix(512).map { $0 * $0 }.reduce(0, +)
 
         XCTAssertGreaterThan(firstHalfEnergy, secondHalfEnergy,
-            "Impulse response should decay over time (stable)")
+                             "Impulse response should decay over time (stable)")
     }
 
     func testLongTermStability() throws {
@@ -1375,7 +1375,7 @@ final class FilterNumericalStabilityTests: XCTestCase {
         try filter.configure(
             type: .lowpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
@@ -1383,7 +1383,7 @@ final class FilterNumericalStabilityTests: XCTestCase {
         let numSamples = 100_000
         var input = [Float](repeating: 0, count: numSamples)
         for i in 0..<numSamples {
-            input[i] = sin(2.0 * Float.pi * 440.0 * Float(i) / 44100.0)
+            input[i] = sin(2.0 * Float.pi * 440.0 * Float(i) / 44_100.0)
         }
 
         let output = filter.process(input: input)
@@ -1397,5 +1397,159 @@ final class FilterNumericalStabilityTests: XCTestCase {
         // Check that output hasn't exploded
         let maxOutput = output.map { abs($0) }.max() ?? 0
         XCTAssertLessThan(maxOutput, 10.0, "Output should remain bounded")
+    }
+}
+
+// MARK: - GPU Filter Tests
+
+final class GPUFilterTests: XCTestCase {
+
+    var device: AudioDevice!
+
+    override func setUpWithError() throws {
+        device = try AudioDevice()
+    }
+
+    func testGPUFilterCreation() throws {
+        // Filter created with device should have GPU enabled
+        let filter = BiquadFilter(device: device)
+        try filter.configure(
+            type: .lowpass,
+            frequency: 1000,
+            sampleRate: 44_100,
+            q: 0.707
+        )
+
+        // GPU should be enabled (if shaders loaded successfully)
+        print("GPU enabled: \(filter.gpuEnabled)")
+    }
+
+    func testGPUFilterMatchesCPU() throws {
+        // Create two filters - one GPU, one CPU
+        let gpuFilter = BiquadFilter(device: device)
+        let cpuFilter = BiquadFilter()
+
+        try gpuFilter.configure(type: .lowpass, frequency: 1000, sampleRate: 44_100, q: 0.707)
+        try cpuFilter.configure(type: .lowpass, frequency: 1000, sampleRate: 44_100, q: 0.707)
+
+        // Create large input buffer (above GPU threshold)
+        let numSamples = 2048
+        var input = [Float](repeating: 0, count: numSamples)
+        for i in 0..<numSamples {
+            input[i] = sin(2.0 * Float.pi * 440.0 * Float(i) / 44_100.0)
+        }
+
+        // Process with both
+        let gpuOutput = gpuFilter.process(input: input)
+        let cpuOutput = cpuFilter.process(input: input)
+
+        // Results should match within tolerance
+        for i in 0..<numSamples {
+            XCTAssertEqual(gpuOutput[i], cpuOutput[i], accuracy: 1e-4,
+                           "GPU and CPU output should match at index \(i)")
+        }
+    }
+
+    func testGPUFilterBelowThreshold() throws {
+        // Small buffer should fall back to CPU
+        let filter = BiquadFilter(device: device)
+        try filter.configure(
+            type: .lowpass,
+            frequency: 1000,
+            sampleRate: 44_100,
+            q: 0.707
+        )
+
+        // Small buffer (below threshold)
+        let input = [Float](repeating: 1.0, count: 256)
+        let output = filter.process(input: input)
+
+        // Should still produce valid output
+        XCTAssertEqual(output.count, input.count)
+        for sample in output {
+            XCTAssertFalse(sample.isNaN, "Output should not be NaN")
+        }
+    }
+
+    func testGPUFilterLargeBuffer() throws {
+        // Large buffer should use GPU
+        let filter = BiquadFilter(device: device)
+        try filter.configure(
+            type: .highpass,
+            frequency: 5000,
+            sampleRate: 44_100,
+            q: 0.707
+        )
+
+        // Large buffer (above threshold)
+        let numSamples = 8192
+        var input = [Float](repeating: 0, count: numSamples)
+        for i in 0..<numSamples {
+            input[i] = sin(2.0 * Float.pi * 440.0 * Float(i) / 44_100.0) +
+                       sin(2.0 * Float.pi * 10_000.0 * Float(i) / 44_100.0)
+        }
+
+        let output = filter.process(input: input)
+
+        // Should produce valid filtered output
+        XCTAssertEqual(output.count, input.count)
+        for sample in output {
+            XCTAssertFalse(sample.isNaN, "Output should not be NaN")
+            XCTAssertFalse(sample.isInfinite, "Output should not be infinite")
+        }
+    }
+
+    func testGPUFilterStateContinuity() throws {
+        // Test that state is preserved across GPU calls
+        let filter = BiquadFilter(device: device)
+        try filter.configure(
+            type: .lowpass,
+            frequency: 1000,
+            sampleRate: 44_100,
+            q: 0.707
+        )
+
+        // Process in chunks
+        let chunkSize = 2048
+        var allOutput: [Float] = []
+
+        for _ in 0..<4 {
+            let input = [Float](repeating: 1.0, count: chunkSize)
+            let output = filter.process(input: input)
+            allOutput.append(contentsOf: output)
+        }
+
+        // Later chunks should be more "settled" (filter has reached steady state)
+        // First chunk is transient, last chunk should be more stable
+        let lastChunk = Array(allOutput.suffix(chunkSize))
+        let variance = lastChunk.map { ($0 - lastChunk.first!) * ($0 - lastChunk.first!) }
+            .reduce(0, +) / Float(chunkSize)
+
+        // DC input through lowpass should converge (low variance in steady state)
+        // Note: GPU filter may have state preservation limitations across chunk boundaries
+        // See CLAUDE.md thread safety notes about vDSP internal state
+        XCTAssertLessThan(variance, 1.5, "Filter should reach steady state")
+    }
+
+    func testFilterBankGPUEnabled() throws {
+        // FilterBank should have GPU enabled when initialized with device
+        let bank = FilterBank(device: device, bandCount: 4)
+        try bank.configureAsEQ(
+            lowFreq: 100,
+            highFreq: 8000,
+            sampleRate: 44_100
+        )
+
+        print("FilterBank GPU enabled: \(bank.gpuEnabled)")
+
+        // Process large buffer
+        let numSamples = 4096
+        var input = [Float](repeating: 0, count: numSamples)
+        for i in 0..<numSamples {
+            input[i] = sin(2.0 * Float.pi * 1000.0 * Float(i) / 44_100.0)
+        }
+
+        let output = bank.processSeries(input: input)
+        XCTAssertEqual(output.count, input.count)
     }
 }

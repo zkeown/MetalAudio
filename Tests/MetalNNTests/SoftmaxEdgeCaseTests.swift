@@ -183,7 +183,7 @@ final class SoftmaxEdgeCaseTests: XCTestCase {
 
         // Should be monotonically increasing
         for i in 1..<4 {
-            XCTAssertGreaterThanOrEqual(result[i], result[i-1])
+            XCTAssertGreaterThanOrEqual(result[i], result[i - 1])
         }
 
         // Sum should be 1.0
@@ -248,5 +248,120 @@ final class SoftmaxEdgeCaseTests: XCTestCase {
             XCTAssertFalse(val.isInfinite)
         }
     }
-}
 
+    // MARK: - Additional Error Handling Tests
+
+    func testSoftmaxZeroLengthLastDimensionThrows() {
+        // Last dimension being zero should throw
+        XCTAssertThrowsError(try Softmax(device: device, inputShape: [0])) { error in
+            guard case MetalAudioError.invalidConfiguration = error else {
+                XCTFail("Expected invalidConfiguration error for zero-length input")
+                return
+            }
+        }
+    }
+
+    func testSoftmax2DWithZeroLastDimensionThrows() {
+        // 2D shape with zero last dimension
+        XCTAssertThrowsError(try Softmax(device: device, inputShape: [4, 0])) { error in
+            guard case MetalAudioError.invalidConfiguration = error else {
+                XCTFail("Expected invalidConfiguration error")
+                return
+            }
+        }
+    }
+
+    func testSoftmaxPropertyAccessOnSuccess() throws {
+        // Verify all properties are accessible when GPU succeeds
+        let softmax = try Softmax(device: device, inputShape: [10, 5])
+
+        // isGPUAccelerated should be true on a machine with Metal support
+        XCTAssertTrue(softmax.isGPUAccelerated)
+
+        // pipelineCreationError should be nil on success
+        XCTAssertNil(softmax.pipelineCreationError)
+
+        // inputShape and outputShape should match
+        XCTAssertEqual(softmax.inputShape, [10, 5])
+        XCTAssertEqual(softmax.outputShape, [10, 5])
+    }
+
+    func testSoftmaxHighDimensionalInput() throws {
+        // Test with 4D shape (batch, channels, height, width)
+        let softmax = try Softmax(device: device, inputShape: [2, 3, 4, 5])
+
+        XCTAssertEqual(softmax.inputShape, [2, 3, 4, 5])
+        XCTAssertEqual(softmax.outputShape, [2, 3, 4, 5])
+
+        // Total elements = 2 * 3 * 4 * 5 = 120
+        // Number of rows = 2 * 3 * 4 = 24
+        // Length per row = 5
+        let totalElements = 2 * 3 * 4 * 5
+        let input = try Tensor(device: device, shape: [totalElements])
+        var inputData = [Float](repeating: 0, count: totalElements)
+        for i in 0..<totalElements {
+            inputData[i] = Float(i % 5)  // Each row has values 0,1,2,3,4
+        }
+        try input.copy(from: inputData)
+
+        let output = try Tensor(device: device, shape: [totalElements])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try softmax.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+
+        // Verify all values are valid probabilities
+        for val in result {
+            XCTAssertGreaterThanOrEqual(val, 0, "Softmax produced negative probability")
+            XCTAssertLessThanOrEqual(val, 1, "Softmax produced probability > 1")
+            XCTAssertFalse(val.isNaN, "Softmax produced NaN")
+            XCTAssertFalse(val.isInfinite, "Softmax produced Inf")
+        }
+
+        // Each row of 5 should sum to 1.0
+        let numRows = 24
+        for row in 0..<numRows {
+            let rowSum = result[(row * 5)..<((row + 1) * 5)].reduce(0, +)
+            XCTAssertEqual(rowSum, 1.0, accuracy: 0.001, "Row \(row) does not sum to 1.0")
+        }
+    }
+
+    func testSoftmaxVeryLargeInput() throws {
+        // Test with large input that exercises parallel pipeline
+        let size = 1024
+        let softmax = try Softmax(device: device, inputShape: [size])
+
+        XCTAssertTrue(softmax.isGPUAccelerated)
+
+        var inputData = [Float](repeating: 0, count: size)
+        for i in 0..<size {
+            inputData[i] = sin(Float(i) * 0.01)  // Varied values
+        }
+
+        let input = try Tensor(device: device, shape: [size])
+        try input.copy(from: inputData)
+
+        let output = try Tensor(device: device, shape: [size])
+
+        let context = try ComputeContext(device: device)
+        try context.executeSync { encoder in
+            try softmax.forward(input: input, output: output, encoder: encoder)
+        }
+
+        let result = output.toArray()
+
+        // Sum should be 1.0
+        let sum = result.reduce(0, +)
+        XCTAssertEqual(sum, 1.0, accuracy: 0.001)
+
+        // All values should be valid
+        for val in result {
+            XCTAssertFalse(val.isNaN)
+            XCTAssertFalse(val.isInfinite)
+            XCTAssertGreaterThanOrEqual(val, 0)
+        }
+    }
+}

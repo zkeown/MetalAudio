@@ -2,8 +2,12 @@ import Metal
 import MetalPerformanceShaders
 import Accelerate
 import MetalAudioKit
+import os.log
 
 /// 1D Convolution layer optimized for audio processing
+
+private let logger = Logger(subsystem: "MetalNN", category: "Conv1D")
+
 public final class Conv1D: NNLayer {
 
     public let inputShape: [Int]  // [channels, length]
@@ -151,8 +155,7 @@ public final class Conv1D: NNLayer {
                 // Fall back to basic kernel on devices with insufficient threadgroup memory
                 // This should never happen as all Metal devices support at least 16KB
                 #if DEBUG
-                print("[MetalAudio] Warning: Device threadgroup memory (\(maxThreadgroupMemory) bytes) " +
-                      "insufficient for tiled kernel (\(Self.tiledKernelThreadgroupMemory) bytes). Using basic kernel.")
+                logger.warning("Device threadgroup memory (\(maxThreadgroupMemory) bytes) insufficient for tiled kernel (\(Self.tiledKernelThreadgroupMemory) bytes). Using basic kernel.")
                 #endif
                 self.tiledPipeline = nil
             }
@@ -174,13 +177,13 @@ public final class Conv1D: NNLayer {
         // Validate weights for NaN/Inf
         if let warning = try validateWeights(weightData, name: "Conv1D weights") {
             #if DEBUG
-            print(warning)
+            logger.debug("\(warning)")
             #endif
         }
         if let biasData = biasData {
             if let warning = try validateWeights(biasData, name: "Conv1D bias") {
                 #if DEBUG
-                print(warning)
+                logger.debug("\(warning)")
                 #endif
             }
         }
@@ -601,13 +604,13 @@ public final class ConvTranspose1D: NNLayer {
         // Validate weights for NaN/Inf
         if let warning = try validateWeights(weightData, name: "ConvTranspose1D weights") {
             #if DEBUG
-            print(warning)
+            logger.debug("\(warning)")
             #endif
         }
         if let biasData = biasData {
             if let warning = try validateWeights(biasData, name: "ConvTranspose1D bias") {
                 #if DEBUG
-                print(warning)
+                logger.debug("\(warning)")
                 #endif
             }
         }
@@ -829,13 +832,13 @@ public final class FusedConv1D: NNLayer {
         // Validate weights for NaN/Inf
         if let warning = try validateWeights(weightData, name: "FusedConv1D weights") {
             #if DEBUG
-            print(warning)
+            logger.debug("\(warning)")
             #endif
         }
         if let biasData = biasData {
             if let warning = try validateWeights(biasData, name: "FusedConv1D bias") {
                 #if DEBUG
-                print(warning)
+                logger.debug("\(warning)")
                 #endif
             }
         }

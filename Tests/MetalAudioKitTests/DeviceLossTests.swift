@@ -126,7 +126,7 @@ final class DeviceLossTests: XCTestCase {
 
             // Execute should either fail gracefully or succeed (device not truly lost)
             do {
-                try context.executeSync { encoder in
+                try context.executeSync { _ in
                     // Empty execution
                 }
             } catch {
@@ -237,6 +237,55 @@ final class DeviceLossTests: XCTestCase {
             XCTAssertEqual(real[i], real2[i], accuracy: 1e-6, "FFT should produce consistent results")
         }
     }
+
+    // MARK: - Passive Notification Tests (eGPU)
+
+    #if os(macOS)
+    func testDeviceRemovalNotificationRegistered() throws {
+        // Verify the device sets up the notification observer
+        // (We can't easily simulate MTLDeviceWasRemovedNotification without actual hardware,
+        // but we can verify the mechanism exists)
+
+        // The device should be available after init
+        XCTAssertTrue(device.isDeviceAvailable, "Device should be available after init")
+
+        // Test that markDeviceLost is called when notification fires
+        // by verifying the delegate gets notified
+        let expectation = expectation(description: "Delegate notification")
+        let delegate = MockDeviceLossDelegate {
+            expectation.fulfill()
+        }
+        device.deviceLossDelegate = delegate
+
+        // Simulate what happens when the notification fires
+        // (we use markDeviceLost directly since we can't trigger actual Metal notification)
+        device.markDeviceLost()
+
+        waitForExpectations(timeout: 1.0)
+        XCTAssertFalse(device.isDeviceAvailable, "Device should be unavailable after notification")
+        XCTAssertTrue(delegate.wasNotified, "Delegate should be notified via passive detection path")
+    }
+
+    func testDeviceRemovalNotificationHandlesWeakSelf() throws {
+        // Test that the notification observer properly handles weak self reference
+        // to avoid retain cycles and crashes on dealloc
+
+        weak var weakDevice: AudioDevice?
+        autoreleasepool {
+            let localDevice = try! AudioDevice()
+            weakDevice = localDevice
+            XCTAssertNotNil(weakDevice, "Device should exist in autoreleasepool")
+            // localDevice goes out of scope here
+        }
+
+        // Small delay to let dealloc happen
+        Thread.sleep(forTimeInterval: 0.1)
+
+        // If observer held strong reference, weakDevice would still be non-nil
+        // (though this is not guaranteed due to ARC timing)
+        // Test passes if no crash occurs during dealloc
+    }
+    #endif
 
     // MARK: - New Device Creation After Loss
 

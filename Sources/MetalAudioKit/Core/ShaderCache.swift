@@ -1,5 +1,8 @@
 import Foundation
 import Metal
+import os.log
+
+private let shaderCacheLogger = Logger(subsystem: "MetalAudioKit", category: "ShaderCache")
 
 // MARK: - Shader Disk Cache
 
@@ -235,7 +238,6 @@ public final class ShaderDiskCache: @unchecked Sendable {
                                                                 options: [],
                                                                 reflection: nil)
             return pipeline
-
         } catch {
             // Cache miss or corruption - remove entry
             removeCacheEntry(key: key)
@@ -292,11 +294,10 @@ public final class ShaderDiskCache: @unchecked Sendable {
             os_unfair_lock_unlock(&lock)
 
             saveIndex()
-
         } catch {
             // Caching failed - not critical, just log
             #if DEBUG
-            print("[ShaderDiskCache] Failed to cache shader: \(error)")
+            shaderCacheLogger.error("[ShaderDiskCache] Failed to cache shader: \(error.localizedDescription)")
             #endif
         }
     }
@@ -340,10 +341,8 @@ public final class ShaderDiskCache: @unchecked Sendable {
         let now = Date()
         var keysToRemove: [String] = []
 
-        for (key, entry) in entries {
-            if now.timeIntervalSince(entry.createdAt) > entryTTL {
-                keysToRemove.append(key)
-            }
+        for (key, entry) in entries where now.timeIntervalSince(entry.createdAt) > entryTTL {
+            keysToRemove.append(key)
         }
 
         for key in keysToRemove {
@@ -548,7 +547,7 @@ public final class ShaderPrecompiler: @unchecked Sendable {
                         }
                     } catch {
                         #if DEBUG
-                        print("[ShaderPrecompiler] Failed to compile \(shader.functionName): \(error)")
+                        shaderCacheLogger.error("[ShaderPrecompiler] Failed to compile \(shader.functionName): \(error.localizedDescription)")
                         #endif
                     }
                 }

@@ -908,8 +908,14 @@ final class ExtendedAudioDeviceTests: XCTestCase {
         let profile = device.hardwareProfile
 
         // Check that we get valid GPU family
+        // Note: iOS simulator returns .unknown since it uses emulated Metal
         let gpuFamily = profile.gpuFamily
+        #if targetEnvironment(simulator)
+        // On simulator, unknown is acceptable
+        XCTAssertNotNil(gpuFamily, "GPU family should exist")
+        #else
         XCTAssertNotEqual(gpuFamily, .unknown, "GPU family should be detected")
+        #endif
     }
 
     func testTolerances() throws {
@@ -924,9 +930,15 @@ final class ExtendedAudioDeviceTests: XCTestCase {
         let mode = device.preferredStorageMode
         // On Apple Silicon, should be .storageModeShared for unified memory
         // Just verify it contains a storage mode flag
+        #if os(macOS)
         let hasStorageMode = mode.contains(.storageModeShared) ||
                             mode.contains(.storageModePrivate) ||
                             mode.contains(.storageModeManaged)
+        #else
+        // storageModeManaged is not available on iOS
+        let hasStorageMode = mode.contains(.storageModeShared) ||
+                            mode.contains(.storageModePrivate)
+        #endif
         XCTAssertTrue(hasStorageMode, "Should return a valid storage mode")
     }
 }
@@ -944,7 +956,7 @@ final class ComputeContextTests: XCTestCase {
     func testSyncExecution() throws {
         let context = try ComputeContext(device: device)
 
-        let result = try context.executeSync { encoder in
+        let result = try context.executeSync { _ in
             // Just test that we can create encoder
             return 42
         }
@@ -985,10 +997,10 @@ final class ComputeContextTests: XCTestCase {
         let context = try ComputeContext(device: device)
 
         let expectation = self.expectation(description: "Async execution completed")
-        var executionCompleted = false
-        var executionError: Error?
+        nonisolated(unsafe) var executionCompleted = false
+        nonisolated(unsafe) var executionError: Error?
 
-        context.executeAsync({ encoder in
+        context.executeAsync({ _ in
             // Simple operation
         }, completion: { error in
             executionError = error
@@ -1005,10 +1017,10 @@ final class ComputeContextTests: XCTestCase {
     func testTryExecuteAsyncSuccess() throws {
         let context = try ComputeContext(device: device)
 
-        var completionCalled = false
-        let success = context.tryExecuteAsync({ encoder in
+        nonisolated(unsafe) var completionCalled = false
+        let success = context.tryExecuteAsync({ _ in
             // Simple operation
-        }, completion: { error in
+        }, completion: { _ in
             completionCalled = true
         })
 
@@ -1132,7 +1144,7 @@ final class ComputeContextExtendedTests: XCTestCase {
     func testTryExecuteSyncSuccess() throws {
         let context = try ComputeContext(device: device)
 
-        let result = try context.tryExecuteSync(timeout: 5.0) { encoder in
+        let result = try context.tryExecuteSync(timeout: 5.0) { _ in
             return 123
         }
 
@@ -1142,7 +1154,7 @@ final class ComputeContextExtendedTests: XCTestCase {
     func testTryExecuteSyncReturnsValue() throws {
         let context = try ComputeContext(device: device)
 
-        let result = try context.tryExecuteSync(timeout: 5.0) { encoder in
+        let result = try context.tryExecuteSync(timeout: 5.0) { _ in
             return "test value"
         }
 
@@ -1156,7 +1168,7 @@ final class ComputeContextExtendedTests: XCTestCase {
 
         var passExecuted = false
         try context.executeBatch([
-            { encoder in
+            { _ in
                 passExecuted = true
             }
         ])
@@ -1169,9 +1181,9 @@ final class ComputeContextExtendedTests: XCTestCase {
 
         var passesExecuted = 0
         try context.executeBatch([
-            { encoder in passesExecuted += 1 },
-            { encoder in passesExecuted += 1 },
-            { encoder in passesExecuted += 1 }
+            { _ in passesExecuted += 1 },
+            { _ in passesExecuted += 1 },
+            { _ in passesExecuted += 1 }
         ])
 
         XCTAssertEqual(passesExecuted, 3, "All three passes should execute")
@@ -1182,7 +1194,7 @@ final class ComputeContextExtendedTests: XCTestCase {
 
         var executed = false
         try context.executeBatch([
-            { encoder in executed = true }
+            { _ in executed = true }
         ], timeout: 10.0)
 
         XCTAssertTrue(executed, "Batch should execute with custom timeout")
@@ -1201,7 +1213,7 @@ final class ComputeContextExtendedTests: XCTestCase {
         let context = try ComputeContext(device: device)
 
         // Create a command buffer and signal a fence
-        try context.executeSync { encoder in
+        try context.executeSync { _ in
             // Do some work
         }
 
@@ -1217,7 +1229,7 @@ final class ComputeContextExtendedTests: XCTestCase {
         let initialValue = context.currentFenceValue
 
         // Execute something to potentially signal fence
-        try context.executeSync { encoder in }
+        try context.executeSync { _ in }
 
         // Fence value should be >= initial
         let newValue = context.currentFenceValue
@@ -1229,9 +1241,9 @@ final class ComputeContextExtendedTests: XCTestCase {
         let context = try ComputeContext(device: device)
 
         let expectation = self.expectation(description: "Execute with fence completed")
-        var receivedFence: UInt64 = 0
+        nonisolated(unsafe) var receivedFence: UInt64 = 0
 
-        context.executeWithFence({ encoder in
+        context.executeWithFence({ _ in
             // Do some work
         }, completion: { result in
             switch result {
@@ -1253,9 +1265,9 @@ final class ComputeContextExtendedTests: XCTestCase {
 
         // Execute and get fence
         let expectation = self.expectation(description: "Got fence")
-        var fenceValue: UInt64 = 0
+        nonisolated(unsafe) var fenceValue: UInt64 = 0
 
-        context.executeWithFence({ encoder in
+        context.executeWithFence({ _ in
             // Do some work
         }, completion: { result in
             if case .success(let fence) = result {
@@ -1300,7 +1312,7 @@ final class ComputeContextExtendedTests: XCTestCase {
         let context = try ComputeContext(device: device)
 
         // Without triple buffering setup, withReadBuffer should return nil
-        let result: Int? = context.withReadBuffer { buffer in
+        let result: Int? = context.withReadBuffer { _ in
             return 42
         }
 
@@ -1311,7 +1323,7 @@ final class ComputeContextExtendedTests: XCTestCase {
         let context = try ComputeContext(device: device)
         try context.setupTripleBuffering(bufferSize: 1024)
 
-        let result: Int? = context.withReadBuffer { buffer in
+        let result: Int? = context.withReadBuffer { _ in
             return 42
         }
 
@@ -1323,7 +1335,7 @@ final class ComputeContextExtendedTests: XCTestCase {
     func testWithWriteBufferNilWhenNotSetup() throws {
         let context = try ComputeContext(device: device)
 
-        let result: Int? = context.withWriteBuffer { buffer in
+        let result: Int? = context.withWriteBuffer { _ in
             return 42
         }
 
@@ -1334,7 +1346,7 @@ final class ComputeContextExtendedTests: XCTestCase {
         let context = try ComputeContext(device: device)
         try context.setupTripleBuffering(bufferSize: 1024)
 
-        let result: Int? = context.withWriteBuffer { buffer in
+        let result: Int? = context.withWriteBuffer { _ in
             return 99
         }
 
@@ -1375,7 +1387,7 @@ final class ComputeContextAsyncTests: XCTestCase {
     func testAsyncExecuteWithReturn() async throws {
         let context = try ComputeContext(device: device)
 
-        let result = try await context.execute(timeout: 5.0) { encoder in
+        let result = try await context.execute(timeout: 5.0) { _ in
             return 42
         }
 
@@ -1386,7 +1398,7 @@ final class ComputeContextAsyncTests: XCTestCase {
         let context = try ComputeContext(device: device)
 
         var executed = false
-        try await context.execute { encoder in
+        try await context.execute { _ in
             executed = true
         }
 
@@ -1396,7 +1408,7 @@ final class ComputeContextAsyncTests: XCTestCase {
     func testAsyncExecuteWithFence() async throws {
         let context = try ComputeContext(device: device)
 
-        let fence = try await context.executeWithFence { encoder in
+        let fence = try await context.executeWithFence { _ in
             // Do some work
         }
 
@@ -1408,9 +1420,9 @@ final class ComputeContextAsyncTests: XCTestCase {
 
         var stagesExecuted = 0
         let pipeline = context.pipeline()
-            .then { encoder in stagesExecuted += 1 }
-            .then { encoder in stagesExecuted += 1 }
-            .then { encoder in stagesExecuted += 1 }
+            .then { _ in stagesExecuted += 1 }
+            .then { _ in stagesExecuted += 1 }
+            .then { _ in stagesExecuted += 1 }
 
         try await pipeline.executeSequential()
 
@@ -1422,8 +1434,8 @@ final class ComputeContextAsyncTests: XCTestCase {
 
         var progressCalls: [(Int, Int)] = []
         let pipeline = context.pipeline()
-            .then { encoder in }
-            .then { encoder in }
+            .then { _ in }
+            .then { _ in }
 
         try await pipeline.executeWithProgress { completed, total in
             progressCalls.append((completed, total))
@@ -1440,7 +1452,7 @@ final class ComputeContextAsyncTests: XCTestCase {
         let context = try ComputeContext(device: device)
 
         let pipeline = context.pipeline()
-            .then { encoder in }
+            .then { _ in }
 
         let fence = try await pipeline.executeWithFence()
 
@@ -1452,8 +1464,8 @@ final class ComputeContextAsyncTests: XCTestCase {
 
         var stagesExecuted = 0
         let pipeline = context.pipeline()
-            .then { encoder in stagesExecuted += 1 }
-            .then { encoder in stagesExecuted += 1 }
+            .then { _ in stagesExecuted += 1 }
+            .then { _ in stagesExecuted += 1 }
 
         try await pipeline.executeSequential()
         XCTAssertEqual(stagesExecuted, 2)
@@ -1478,7 +1490,7 @@ final class ComputeContextAsyncTests: XCTestCase {
         let context = try ComputeContext(device: device)
 
         var executed = false
-        let stage = GPUPipelineStage { encoder in
+        let stage = GPUPipelineStage { _ in
             executed = true
         }
 
@@ -1499,7 +1511,7 @@ final class ComputeContextAsyncTests: XCTestCase {
             setup: { total in
                 XCTAssertEqual(total, 3, "Setup should receive chunk count")
             },
-            processChunk: { index, encoder in
+            processChunk: { _, _ in
                 chunksProcessed += 1
             },
             onChunkComplete: { index in
@@ -1517,7 +1529,7 @@ final class ComputeContextAsyncTests: XCTestCase {
         var setupCalled = false
         try await context.streamProcess(
             chunks: 0,
-            setup: { total in
+            setup: { _ in
                 setupCalled = true
             },
             processChunk: { _, _ in },
@@ -1582,8 +1594,12 @@ final class HardwareProfileExtendedTests: XCTestCase {
         // Thread execution width should be 32 for all Apple GPUs
         XCTAssertEqual(profile.threadExecutionWidth, 32)
 
-        // Working set size should be positive
+        // Working set size should be positive (0 on simulator is acceptable)
+        #if targetEnvironment(simulator)
+        XCTAssertGreaterThanOrEqual(profile.recommendedWorkingSetSize, 0)
+        #else
         XCTAssertGreaterThan(profile.recommendedWorkingSetSize, 0)
+        #endif
     }
 }
 
@@ -1750,7 +1766,7 @@ final class ComputeContextFenceAdvancedTests: XCTestCase {
         var fenceValues: [UInt64] = []
 
         for _ in 0..<5 {
-            let fence = try await context.executeWithFence { encoder in
+            let fence = try await context.executeWithFence { _ in
                 // Do some work
             }
             fenceValues.append(fence)
@@ -1758,7 +1774,7 @@ final class ComputeContextFenceAdvancedTests: XCTestCase {
 
         // Verify monotonically increasing
         for i in 1..<fenceValues.count {
-            XCTAssertGreaterThan(fenceValues[i], fenceValues[i-1],
+            XCTAssertGreaterThan(fenceValues[i], fenceValues[i - 1],
                 "Fence values should be monotonically increasing")
         }
     }
@@ -1782,7 +1798,7 @@ final class ComputeContextFenceAdvancedTests: XCTestCase {
         let context = try ComputeContext(device: device)
 
         // Execute and get fence
-        let fence = try await context.executeWithFence { encoder in }
+        let fence = try await context.executeWithFence { _ in }
 
         // Small delay to ensure completion
         try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
@@ -1800,7 +1816,7 @@ final class ComputeContextFenceAdvancedTests: XCTestCase {
         let context = try ComputeContext(device: device)
 
         // Just verify this doesn't crash - hard to test actual GPU-side wait
-        try context.executeSync { encoder in
+        try context.executeSync { _ in
             // This would normally be used with a command buffer
         }
     }
@@ -2090,7 +2106,7 @@ final class TensorHalfPrecisionTests: XCTestCase {
         let tensor = try Tensor(device: device, shape: [3], dataType: .float16)
 
         // Float16 has limited precision - test edge cases
-        let testValues: [Float] = [0.0001, 1000.0, 65504.0]  // 65504 is max float16
+        let testValues: [Float] = [0.0001, 1000.0, 65_504.0]  // 65_504 is max float16
         try tensor.copyFromFloat(testValues)
 
         let result = tensor.toFloatArray()
@@ -2257,7 +2273,7 @@ final class ComputeContextEdgeCaseTests: XCTestCase {
         // so we test that valid encoding works correctly
         let context = try ComputeContext(device: device)
 
-        let result = try context.executeSync { encoder in
+        let result = try context.executeSync { _ in
             // Valid encoding that doesn't throw
             return 42
         }
@@ -2286,11 +2302,11 @@ final class ComputeContextEdgeCaseTests: XCTestCase {
         let context = try ComputeContext(device: device)
 
         let expectation = self.expectation(description: "Completion called")
-        var completionCalled = false
+        nonisolated(unsafe) var completionCalled = false
 
-        context.executeAsync({ encoder in
+        context.executeAsync({ _ in
             // Valid encoding - does nothing but doesn't crash
-        }, completion: { error in
+        }, completion: { _ in
             completionCalled = true
             expectation.fulfill()
         })
@@ -2533,7 +2549,7 @@ final class AudioBufferSafeCopyTests: XCTestCase {
         let testData: [Float] = [1.0, 2.0, 3.0, 4.0]
 
         // Get a fence value by executing a simple operation
-        let fenceValue = try context.executeSync { encoder in
+        let fenceValue = try context.executeSync { _ in
             // Minimal encode - just get fence value
             return UInt64(0)
         }

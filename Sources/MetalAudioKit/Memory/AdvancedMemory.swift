@@ -300,10 +300,10 @@ public final class AudioAllocatorZone {
         2048,    // 512 samples
         4096,    // 1024 samples
         8192,    // 2048 samples
-        16384,   // 4096 samples
-        32768,   // 8192 samples
-        65536,   // 16384 samples
-        131072,  // 32768 samples
+        16_384,   // 4096 samples
+        32_768,   // 8192 samples
+        65_536,   // 16_384 samples
+        131_072  // 32_768 samples
     ]
 
     /// Freelists for each size class
@@ -360,10 +360,8 @@ public final class AudioAllocatorZone {
 
     /// Find the size class index for a given size
     private func sizeClassIndex(for size: Int) -> Int? {
-        for (i, classSize) in Self.sizeClasses.enumerated() {
-            if size <= classSize {
-                return i
-            }
+        for (i, classSize) in Self.sizeClasses.enumerated() where size <= classSize {
+            return i
         }
         return nil  // Too large for our size classes
     }

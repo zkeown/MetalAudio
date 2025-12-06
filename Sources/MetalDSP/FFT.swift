@@ -3,8 +3,12 @@ import MetalPerformanceShaders
 import MetalPerformanceShadersGraph
 import Accelerate
 import MetalAudioKit
+import os.log
 
 /// Errors specific to FFT operations
+
+private let logger = Logger(subsystem: "MetalDSP", category: "FFT")
+
 public enum FFTError: Error, LocalizedError {
     /// Input is shorter than the FFT size, which would produce an incomplete or invalid transform
     case inputTooShort(inputSize: Int, requiredSize: Int)
@@ -56,7 +60,7 @@ public enum FFTError: Error, LocalizedError {
 /// Set to `true` to enable validation for debugging production issues
 /// WARNING: Enabling this adds overhead to every FFT operation
 /// Note: Not thread-safe - set once at startup before processing begins
-public nonisolated(unsafe) var fftValidationEnabled: Bool = false
+nonisolated(unsafe) public var fftValidationEnabled: Bool = false
 
 /// Validates FFT output for NaN/Inf values.
 /// In DEBUG builds: Always runs (via sample-based checking)
@@ -120,10 +124,10 @@ internal func validateFFTOutput(_ buffer: UnsafePointer<Float>, count: Int, cont
 
     // Log warnings (don't assert - some tests intentionally use edge case inputs)
     if foundNaN {
-        print("[FFT] Warning: NaN detected in \(context) near index \(nanIndex)")
+        logger.debug("[FFT] Warning: NaN detected in \(context) near index \(nanIndex)")
     }
     if foundInf {
-        print("[FFT] Warning: Inf detected in \(context) near index \(infIndex)")
+        logger.debug("[FFT] Warning: Inf detected in \(context) near index \(infIndex)")
     }
 
     return foundNaN || foundInf
@@ -217,7 +221,7 @@ public final class FFT {
         /// let config = FFT.Config(size: 2048, windowType: .hann, hopSize: 512)
         /// let validation = config.validateCOLA()
         /// if !validation.isValid {
-        ///     print("Warning: \(validation.message)")
+        ///     print("Warning: \(validation.message)")  // TODO: Convert to os_log
         /// }
         /// ```
         ///
@@ -260,7 +264,7 @@ public final class FFT {
         case blackman
 
         /// Compute window coefficient at given index
-        /// Uses Float64 internally to prevent precision loss for large FFT sizes (N > 16384)
+        /// Uses Float64 internally to prevent precision loss for large FFT sizes (N > 16_384)
         func coefficient(at index: Int, length: Int) -> Float {
             // Guard against length=1 (would cause division by zero)
             guard length > 1 else { return 1.0 }
@@ -403,8 +407,12 @@ public final class FFT {
         ToleranceProvider.shared.tolerances.gpuCpuThreshold
     }
 
-    /// Higher threshold for MPSGraph (has more setup overhead than custom kernels)
-    private static let mpsGraphThreshold: Int = 2048
+    /// Threshold for using custom Metal kernels (above this, prefer GPU over vDSP)
+    private static let metalThreshold: Int = 2048
+
+    /// Higher threshold for MPSGraph (maximum parallelism for very large FFTs)
+    /// Below this, custom Metal kernels are used for medium-sized FFTs.
+    private static let mpsGraphThreshold: Int = 8192
 
     /// Maximum supported FFT size (2^24 = 16M samples)
     /// Beyond this:
@@ -473,13 +481,15 @@ public final class FFT {
             )
         }
 
-        // Setup GPU FFT for large buffers
-        if config.size >= ToleranceProvider.shared.tolerances.gpuCpuThreshold {
+        // Setup GPU FFT for medium and large buffers (>2048 samples)
+        // Metal custom kernels are used for 2048-8192 range
+        if config.size > Self.metalThreshold {
             try setupGPUFFT()
         }
 
-        // Setup MPSGraph FFT for very large buffers (higher threshold due to graph compilation overhead)
-        if config.size >= Self.mpsGraphThreshold {
+        // Setup MPSGraph FFT for very large buffers (>8192 samples)
+        // MPSGraph has more setup overhead but better parallelism for large sizes
+        if config.size > Self.mpsGraphThreshold {
             setupMPSGraphFFT()
         }
     }
@@ -604,26 +614,29 @@ public final class FFT {
     }
 
     private func setupGPUFFT() throws {
-        // Try to load GPU FFT kernels from the device's shader library
+        // Load GPU FFT kernels from MetalDSP's bundle (not MetalAudioKit's)
+        // This ensures we find the shaders in Sources/MetalDSP/Shaders/DSP.metal
+        let dspBundle = Bundle.module
+
         do {
-            gpuBitReversalPipeline = try device.makeComputePipeline(functionName: "fft_bit_reversal")
-            gpuButterflyPipeline = try device.makeComputePipeline(functionName: "fft_butterfly")
+            gpuBitReversalPipeline = try device.makeComputePipeline(functionName: "fft_bit_reversal", bundle: dspBundle)
+            gpuButterflyPipeline = try device.makeComputePipeline(functionName: "fft_butterfly", bundle: dspBundle)
 
             // Try to load the optimized butterfly kernel (pre-computed twiddles)
-            gpuButterflyOptimizedPipeline = try? device.makeComputePipeline(functionName: "fft_butterfly_optimized")
+            gpuButterflyOptimizedPipeline = try? device.makeComputePipeline(functionName: "fft_butterfly_optimized", bundle: dspBundle)
 
             // Try to load radix-4 butterfly kernel (20-40% faster for power-of-4 sizes)
-            gpuButterflyRadix4Pipeline = try? device.makeComputePipeline(functionName: "fft_butterfly_radix4")
+            gpuButterflyRadix4Pipeline = try? device.makeComputePipeline(functionName: "fft_butterfly_radix4", bundle: dspBundle)
             useRadix4 = gpuButterflyRadix4Pipeline != nil && Self.isPowerOf4(config.size)
 
             // Try to load tiled butterfly kernel (better for large FFTs due to threadgroup memory)
-            gpuButterflyTiledPipeline = try? device.makeComputePipeline(functionName: "fft_butterfly_tiled")
+            gpuButterflyTiledPipeline = try? device.makeComputePipeline(functionName: "fft_butterfly_tiled", bundle: dspBundle)
 
             // Load inverse butterfly kernel (uses conjugate twiddles for IFFT)
-            gpuInverseButterflyPipeline = try? device.makeComputePipeline(functionName: "ifft_butterfly_optimized")
+            gpuInverseButterflyPipeline = try? device.makeComputePipeline(functionName: "ifft_butterfly_optimized", bundle: dspBundle)
 
             // Load scale kernel for 1/N normalization in IFFT
-            gpuScalePipeline = try? device.makeComputePipeline(functionName: "fft_scale")
+            gpuScalePipeline = try? device.makeComputePipeline(functionName: "fft_scale", bundle: dspBundle)
 
             // Pre-allocate GPU buffer for real-time safety
             let bufferSize = config.size * MemoryLayout<Float>.stride * 2  // float2 per element
@@ -662,7 +675,7 @@ public final class FFT {
             }
 
             // Create bit reversal LUT (5-15% faster than computing per-thread)
-            gpuBitReversalLUTPipeline = try? device.makeComputePipeline(functionName: "fft_bit_reversal_lut")
+            gpuBitReversalLUTPipeline = try? device.makeComputePipeline(functionName: "fft_bit_reversal_lut", bundle: dspBundle)
             if gpuBitReversalLUTPipeline != nil {
                 // Use integer math for log2 (trailingZeroBitCount = log2 for power of 2)
                 let logN = config.size.trailingZeroBitCount
@@ -687,7 +700,7 @@ public final class FFT {
             }
 
             // Create GPU window buffer from pre-computed windowBuffer (30-50% faster windowing)
-            gpuWindowPrecomputedPipeline = try? device.makeComputePipeline(functionName: "apply_window_precomputed")
+            gpuWindowPrecomputedPipeline = try? device.makeComputePipeline(functionName: "apply_window_precomputed", bundle: dspBundle)
             if config.windowType != .none {
                 gpuWindowBuffer = windowBuffer.withUnsafeBytes { ptr in
                     guard let baseAddress = ptr.baseAddress else { return nil }
@@ -714,6 +727,9 @@ public final class FFT {
             gpuEnabled = gpuDataBuffer != nil && gpuContext != nil
         } catch {
             // GPU kernels not available, will fall back to Accelerate
+            #if DEBUG
+            logger.debug("[FFT] GPU setup failed: \(error). Falling back to Accelerate.")
+            #endif
             gpuEnabled = false
         }
     }
@@ -1499,16 +1515,24 @@ public final class FFT {
     }
 
     /// Check if MPSGraph FFT is available and should be used
+    /// Returns true for sizes > 8192 when MPSGraph is available
     public var shouldUseMPSGraph: Bool {
         if #available(macOS 14.0, iOS 17.0, *) {
-            return mpsGraphEnabled && config.size >= Self.mpsGraphThreshold
+            return mpsGraphEnabled && config.size > Self.mpsGraphThreshold
         }
         return false
     }
 
-    /// Check if GPU FFT is available and should be used for the current size
+    /// Check if GPU FFT (Metal or MPSGraph) is available and should be used
+    /// Returns true for sizes > 2048 when GPU is available
     public var shouldUseGPU: Bool {
-        (gpuEnabled || mpsGraphEnabled) && config.size >= gpuThreshold
+        (gpuEnabled || mpsGraphEnabled) && config.size > Self.metalThreshold
+    }
+
+    /// Check if custom Metal kernels should be used (medium-sized FFTs)
+    /// Returns true for sizes 2048-8192 when GPU is available
+    public var shouldUseMetal: Bool {
+        gpuEnabled && config.size > Self.metalThreshold && config.size <= Self.mpsGraphThreshold
     }
 
     /// Warm up the FFT by triggering all deferred compilation
@@ -1564,13 +1588,22 @@ public final class FFT {
 
     /// Returns the optimal backend for this FFT configuration
     ///
-    /// Based on benchmark data:
-    /// - vDSP: <2048 samples (overhead-free, fastest for small)
-    /// - MPSGraph: >=2048 samples when available (Apple-optimized)
-    /// - GPU: >=2048 samples as fallback when MPSGraph unavailable
+    /// Based on benchmark data, implements three-tier routing:
+    /// - vDSP: ≤2048 samples (no kernel launch overhead, lowest latency)
+    /// - GPU (Metal): 2048-8192 samples (custom shaders, good parallelism)
+    /// - MPSGraph: >8192 samples (Apple-optimized, maximum parallelism)
     public var optimalBackend: Backend {
         // Small FFTs: vDSP is unbeatable (no kernel launch overhead)
-        if config.size < Self.mpsGraphThreshold {
+        if config.size <= Self.metalThreshold {
+            return .vdsp
+        }
+
+        // Medium FFTs: use custom Metal kernels
+        if config.size <= Self.mpsGraphThreshold {
+            if gpuEnabled {
+                return .gpu
+            }
+            // Fallback to vDSP if GPU not available
             return .vdsp
         }
 
@@ -1581,20 +1614,21 @@ public final class FFT {
             }
         }
 
-        // Fallback to custom GPU kernels
+        // Fallback to custom GPU kernels for large sizes if MPSGraph unavailable
         if gpuEnabled {
             return .gpu
         }
 
-        // No GPU available, use vDSP
+        // No GPU available at all, use vDSP
         return .vdsp
     }
 
     /// Perform forward FFT with automatic backend selection
     ///
     /// Automatically chooses the optimal backend based on FFT size:
-    /// - Size < 2048: Uses vDSP (CPU) for lowest latency
-    /// - Size >= 2048: Uses MPSGraph when available, GPU otherwise
+    /// - Size ≤ 2048: Uses vDSP (CPU) for lowest latency
+    /// - Size 2048-8192: Uses custom Metal kernels
+    /// - Size > 8192: Uses MPSGraph when available, Metal otherwise
     ///
     /// - Parameters:
     ///   - input: Real input samples
@@ -1718,7 +1752,7 @@ public final class FFT {
     /// ```swift
     /// let fft = try FFT(device: device, config: config)
     /// if fft.colaCompliance != .perfect {
-    ///     print("Warning: \(fft.config.validateCOLA().message)")
+    ///     print("Warning: \(fft.config.validateCOLA().message)")  // TODO: Convert to os_log
     /// }
     /// ```
     public var colaCompliance: COLACompliance {

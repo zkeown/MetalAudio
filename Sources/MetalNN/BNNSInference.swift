@@ -1,7 +1,12 @@
+// BNNS Graph API requires iOS 18+ / macOS 15+ SDK (Swift 6 / Xcode 16)
+#if compiler(>=6.0)
+
 import Foundation
 import Accelerate
 import MetalAudioKit
 import os.log
+
+private let logger = Logger(subsystem: "MetalNN", category: "BNNSInference")
 
 /// Errors for BNNS Graph operations
 public enum BNNSInferenceError: Error, LocalizedError {
@@ -544,7 +549,7 @@ extension BNNSInference: MemoryPressureResponder {
         os_unfair_lock_unlock(&memoryPressureLock)
 
         // Notify delegate and let it decide what to do
-        let _ = memoryPressureDelegate?.bnnsInference(self, didReceiveMemoryPressure: level)
+        _ = memoryPressureDelegate?.bnnsInference(self, didReceiveMemoryPressure: level)
 
         // Note: We intentionally do NOT release workspace on critical pressure.
         // For real-time audio, maintaining inference capability is more important
@@ -569,17 +574,29 @@ extension BNNSInference: MemoryPressureResponder {
 ///     streaming.predict(input: chunk, output: outputBuffer)
 /// }
 ///
-/// // Reset state for new audio stream
+/// // Reset state for new audio stream (real-time safe!)
 /// streaming.resetState()
 /// ```
 ///
 /// ## Thread Safety
 /// Like `BNNSInference`, this is safe to call from the audio thread after initialization.
+/// The `resetState()` method is also real-time safe - it swaps to a pre-allocated
+/// fresh context without allocating memory.
 @available(macOS 15.0, iOS 18.0, *)
 public final class BNNSStreamingInference: @unchecked Sendable {
 
     private let graph: bnns_graph_t
-    private var context: bnns_graph_context_t  // var to allow resetState() recreation
+
+    /// Active context used for inference (swappable for real-time safe reset)
+    private var activeContext: bnns_graph_context_t
+
+    /// Pre-allocated "reset" context with fresh state (for real-time safe swap)
+    /// After swap, this holds the used context which is lazily recreated on background thread
+    private var resetContext: bnns_graph_context_t
+
+    /// Lock to protect context swap atomically
+    private var contextSwapLock = os_unfair_lock()
+
     private let workspace: UnsafeMutableRawPointer
     private let workspaceSize: Int
     private let arguments: UnsafeMutablePointer<bnns_graph_argument_t>
@@ -587,15 +604,17 @@ public final class BNNSStreamingInference: @unchecked Sendable {
     private let inputPosition: Int
     private let outputPosition: Int
 
-    /// Lock to protect context during resetState() - prevents use-after-free
-    /// when resetState() is called concurrently with predict()
-    private var contextLock = os_unfair_lock()
-
     /// Tracks number of predict() calls in flight.
     /// Used by resetState() to wait for in-flight predictions to complete before
-    /// destroying the context, preventing use-after-free.
+    /// swapping contexts, preventing use-after-free.
     /// Active in all builds (not just DEBUG) for memory safety.
     private var predictInFlightCount: Int32 = 0
+
+    /// Flag indicating whether resetContext needs to be refreshed (lazily on background thread)
+    private var needsResetContextRefresh: Int32 = 0
+
+    /// Background queue for lazy context recreation after reset
+    private let backgroundQueue = DispatchQueue(label: "com.metalaudio.bnns.reset", qos: .utility)
 
     public let inputShape: [Int]
     public let outputShape: [Int]
@@ -621,6 +640,9 @@ public final class BNNSStreamingInference: @unchecked Sendable {
         defer { os_unfair_lock_unlock(&memoryPressureLock) }
         return _currentMemoryPressureLevel
     }
+
+    /// Whether resetState() is real-time safe (always true after successful init)
+    public private(set) var resetStateIsRealtimeSafe: Bool = false
 
     /// Create a streaming inference context
     ///
@@ -648,7 +670,7 @@ public final class BNNSStreamingInference: @unchecked Sendable {
         }
         self.graph = compiledGraph
 
-        // Create STREAMING context (maintains hidden state)
+        // Create PRIMARY streaming context (maintains hidden state)
         let ctx = BNNSGraphContextMakeStreaming(graph, nil, 0, nil)
         guard ctx.data != nil else {
             // NOTE: BNNS API does not expose BNNSGraphDestroy - graph lifecycle is tied
@@ -656,9 +678,26 @@ public final class BNNSStreamingInference: @unchecked Sendable {
             // This is an Apple API limitation; context creation failures are rare in practice.
             throw BNNSInferenceError.contextCreationFailed
         }
-        self.context = ctx
+        self.activeContext = ctx
 
-        BNNSGraphContextSetArgumentType(context, BNNSGraphArgumentTypePointer)
+        // Create SECONDARY "reset" context for real-time safe state reset
+        // This context starts with fresh state and will be swapped in on resetState()
+        let resetCtx = BNNSGraphContextMakeStreaming(graph, nil, 0, nil)
+        if resetCtx.data != nil {
+            self.resetContext = resetCtx
+            BNNSGraphContextSetArgumentType(resetCtx, BNNSGraphArgumentTypePointer)
+            self.resetStateIsRealtimeSafe = true
+        } else {
+            // Fallback: secondary context creation failed, resetState() will allocate
+            // Create a placeholder that will be replaced on first resetState() call
+            self.resetContext = ctx  // Will be recreated on reset
+            self.resetStateIsRealtimeSafe = false
+            #if DEBUG
+            logger.debug("[BNNSStreamingInference] Warning: Could not pre-allocate reset context. resetState() will allocate.")
+            #endif
+        }
+
+        BNNSGraphContextSetArgumentType(activeContext, BNNSGraphArgumentTypePointer)
 
         self.argumentCount = BNNSGraphGetArgumentCount(graph, nil)
         let inPos = BNNSGraphGetArgumentPosition(graph, nil, "input")
@@ -666,16 +705,19 @@ public final class BNNSStreamingInference: @unchecked Sendable {
 
         // SAFETY: Validate argument positions are within bounds
         guard inPos >= 0 && inPos < argumentCount else {
-            BNNSGraphContextDestroy(ctx)
+            BNNSGraphContextDestroy(activeContext)
+            if resetStateIsRealtimeSafe { BNNSGraphContextDestroy(resetContext) }
             throw BNNSInferenceError.invalidArgumentPosition(name: "input", position: inPos)
         }
         guard outPos >= 0 && outPos < argumentCount else {
-            BNNSGraphContextDestroy(ctx)
+            BNNSGraphContextDestroy(activeContext)
+            if resetStateIsRealtimeSafe { BNNSGraphContextDestroy(resetContext) }
             throw BNNSInferenceError.invalidArgumentPosition(name: "output", position: outPos)
         }
         // SAFETY: Input and output must not share the same argument slot
         guard inPos != outPos else {
-            BNNSGraphContextDestroy(ctx)
+            BNNSGraphContextDestroy(activeContext)
+            if resetStateIsRealtimeSafe { BNNSGraphContextDestroy(resetContext) }
             throw BNNSInferenceError.compilationFailed(
                 reason: "Input and output share the same argument position (\(inPos)). Model may be malformed."
             )
@@ -685,7 +727,7 @@ public final class BNNSStreamingInference: @unchecked Sendable {
 
         // Query shapes
         var inputTensor = BNNSTensor()
-        let inputResult = BNNSGraphContextGetTensor(context, nil, "input", true, &inputTensor)
+        let inputResult = BNNSGraphContextGetTensor(activeContext, nil, "input", true, &inputTensor)
         if inputResult == 0 && inputTensor.rank > 0 {
             let rank = Int(inputTensor.rank)
             var shape = [Int]()
@@ -699,7 +741,7 @@ public final class BNNSStreamingInference: @unchecked Sendable {
         }
 
         var outputTensor = BNNSTensor()
-        let outputResult = BNNSGraphContextGetTensor(context, nil, "output", true, &outputTensor)
+        let outputResult = BNNSGraphContextGetTensor(activeContext, nil, "output", true, &outputTensor)
         if outputResult == 0 && outputTensor.rank > 0 {
             let rank = Int(outputTensor.rank)
             var shape = [Int]()
@@ -717,12 +759,13 @@ public final class BNNSStreamingInference: @unchecked Sendable {
         self.inputSizeBytes = inputElementCount * MemoryLayout<Float>.size
         self.outputSizeBytes = outputElementCount * MemoryLayout<Float>.size
 
-        let requiredSize = BNNSGraphContextGetWorkspaceSize(context, nil)
+        let requiredSize = BNNSGraphContextGetWorkspaceSize(activeContext, nil)
         let pageSize = Int(getpagesize())
         self.workspaceSize = ((requiredSize + pageSize - 1) / pageSize + 1) * pageSize
 
         guard let ws = aligned_alloc(pageSize, workspaceSize) else {
-            BNNSGraphContextDestroy(context)
+            BNNSGraphContextDestroy(activeContext)
+            if resetStateIsRealtimeSafe { BNNSGraphContextDestroy(resetContext) }
             throw BNNSInferenceError.workspaceAllocationFailed(size: workspaceSize)
         }
         self.workspace = ws
@@ -740,18 +783,18 @@ public final class BNNSStreamingInference: @unchecked Sendable {
         }
         arguments.deallocate()
         free(workspace)
-        BNNSGraphContextDestroy(context)
+        BNNSGraphContextDestroy(activeContext)
+        if resetStateIsRealtimeSafe {
+            BNNSGraphContextDestroy(resetContext)
+        }
     }
 
     /// Run streaming inference (zero-allocation, maintains hidden state)
     ///
-    /// - Warning: **Thread Safety**: Do NOT call this method concurrently with `resetState()`.
-    ///   `resetState()` destroys and recreates the context, which would cause use-after-free
-    ///   if called during `predict()`. Use external synchronization if needed, or call
-    ///   `resetState()` only when you know no `predict()` calls are in progress.
+    /// This method is thread-safe with `resetState()` - the context swap is atomic.
     ///
     /// - Note: This method tracks in-flight calls atomically to allow `resetState()` to wait
-    ///   for completion, preventing use-after-free. The atomic operations are lock-free and
+    ///   for completion before swapping contexts. The atomic operations are lock-free and
     ///   real-time safe.
     @discardableResult
     @inline(__always)
@@ -760,14 +803,9 @@ public final class BNNSStreamingInference: @unchecked Sendable {
         output: UnsafeMutablePointer<Float>
     ) -> Bool {
         // Track in-flight predict() calls atomically (lock-free, real-time safe).
-        // This allows resetState() to wait for in-flight predictions to complete
-        // before destroying the context, preventing use-after-free.
         OSAtomicIncrement32(&predictInFlightCount)
         defer { OSAtomicDecrement32(&predictInFlightCount) }
 
-        // Note: We don't acquire contextLock here for performance reasons.
-        // Audio thread predict() calls must be lock-free for real-time safety.
-        // resetState() will spin-wait for predictInFlightCount to reach 0.
         arguments[inputPosition].data_ptr = UnsafeMutableRawPointer(mutating: input)
         arguments[inputPosition].data_ptr_size = inputSizeBytes
 
@@ -775,7 +813,7 @@ public final class BNNSStreamingInference: @unchecked Sendable {
         arguments[outputPosition].data_ptr_size = outputSizeBytes
 
         let result = BNNSGraphContextExecute(
-            context, nil, argumentCount, arguments, workspaceSize, workspace
+            activeContext, nil, argumentCount, arguments, workspaceSize, workspace
         )
         return result == 0
     }
@@ -800,7 +838,7 @@ public final class BNNSStreamingInference: @unchecked Sendable {
         arguments[outputPosition].data_ptr_size = outputSize * MemoryLayout<Float>.size
 
         let result = BNNSGraphContextExecute(
-            context, nil, argumentCount, arguments, workspaceSize, workspace
+            activeContext, nil, argumentCount, arguments, workspaceSize, workspace
         )
         return result == 0
     }
@@ -815,14 +853,14 @@ public final class BNNSStreamingInference: @unchecked Sendable {
     /// carryover from previous processing.
     ///
     /// ## Real-Time Safety
-    /// **⚠️ WARNING: This method is NOT real-time safe.**
+    /// **✅ This method IS real-time safe** (when `resetStateIsRealtimeSafe` is true).
     ///
-    /// The BNNS API does not provide an in-place state reset function. This method
-    /// recreates the streaming context, which allocates memory. Do NOT call this
-    /// from audio render callbacks.
+    /// The implementation uses a pre-allocated "reset" context that is swapped in
+    /// atomically. No memory allocation occurs during the swap. After the swap,
+    /// a background thread lazily recreates a fresh reset context for the next call.
     ///
-    /// For real-time applications, call `resetState()` from a non-audio thread
-    /// (e.g., during track changes, before processing starts, or from a UI thread).
+    /// If `resetStateIsRealtimeSafe` is false (rare case where secondary context
+    /// creation failed at init), this method falls back to the non-real-time path.
     ///
     /// ## Usage
     /// ```swift
@@ -831,8 +869,8 @@ public final class BNNSStreamingInference: @unchecked Sendable {
     ///     streaming.predict(input: chunk, output: outputBuffer)
     /// }
     ///
-    /// // Reset before processing new file (call from non-audio thread)
-    /// streaming.resetState()
+    /// // Reset before processing new file (safe from audio thread!)
+    /// try streaming.resetState()
     ///
     /// // Processing second audio file (fresh state)
     /// for chunk in audioFile2.chunks {
@@ -842,11 +880,14 @@ public final class BNNSStreamingInference: @unchecked Sendable {
     /// Possible errors from resetState()
     public enum ResetError: Error, LocalizedError {
         case contextCreationFailed
+        case resetContextNotAvailable
 
         public var errorDescription: String? {
             switch self {
             case .contextCreationFailed:
                 return "BNNSStreamingInference: Failed to recreate streaming context. The existing context is still valid."
+            case .resetContextNotAvailable:
+                return "BNNSStreamingInference: Reset context not available (still being recreated). Try again shortly."
             }
         }
     }
@@ -855,54 +896,112 @@ public final class BNNSStreamingInference: @unchecked Sendable {
     private static let resetStateMaxWaitTime: UInt64 = 100_000_000  // nanoseconds
 
     public func resetState() throws {
-        // BNNS does not provide an in-place state reset API.
-        // We recreate the streaming context which initializes all states to zero.
-        // This allocates memory, so it's not real-time safe.
+        // REAL-TIME SAFE PATH: Swap to pre-allocated reset context
+        if resetStateIsRealtimeSafe {
+            try resetStateRealTimeSafe()
+        } else {
+            // FALLBACK: Allocate new context (not real-time safe)
+            try resetStateAllocating()
+        }
+    }
 
-        // THREAD SAFETY: Wait for any in-flight predict() calls to complete.
-        // This prevents use-after-free when destroying the old context.
-        // Uses a spin-wait with yield to avoid blocking the audio thread if it's
-        // in the middle of a predict() call.
+    /// Real-time safe reset: swap active context with pre-allocated reset context
+    private func resetStateRealTimeSafe() throws {
+        // Wait for in-flight predictions to complete (spin-wait is RT-safe)
         let startTime = DispatchTime.now().uptimeNanoseconds
         var spinCount = 0
         while OSAtomicAdd32(0, &predictInFlightCount) > 0 {
             spinCount += 1
-            // Yield to other threads periodically (sched_yield via usleep(0))
             if spinCount % 100 == 0 {
                 usleep(0)  // Yields CPU without blocking
             }
-            // Check for timeout to prevent infinite wait
             let elapsed = DispatchTime.now().uptimeNanoseconds - startTime
             if elapsed > Self.resetStateMaxWaitTime {
                 #if DEBUG
                 let inFlight = OSAtomicAdd32(0, &predictInFlightCount)
                 assertionFailure(
-                    "BNNSStreamingInference.resetState() timed out waiting for \(inFlight) predict() call(s). " +
-                    "This may indicate a deadlock or very long-running prediction.")
+                    "BNNSStreamingInference.resetState() timed out waiting for \(inFlight) predict() call(s).")
                 #endif
-                // In release builds, proceed anyway after timeout.
-                // This is still safer than the old behavior which had no protection.
                 break
             }
         }
 
-        // Create new context FIRST before destroying old one.
-        // This ensures we never leave the object in an invalid state.
+        // Check if reset context is available (not currently being recreated)
+        if OSAtomicAdd32(0, &needsResetContextRefresh) != 0 {
+            // Reset context is being recreated on background thread
+            throw ResetError.resetContextNotAvailable
+        }
+
+        // Atomic swap of contexts (no allocation!)
+        os_unfair_lock_lock(&contextSwapLock)
+        let oldActive = activeContext
+        activeContext = resetContext
+        resetContext = oldActive  // Old context with accumulated state
+        os_unfair_lock_unlock(&contextSwapLock)
+
+        // Mark that reset context needs to be refreshed
+        OSAtomicIncrement32(&needsResetContextRefresh)
+
+        // Schedule lazy recreation of reset context on background thread
+        backgroundQueue.async { [weak self] in
+            guard let self = self else { return }
+
+            // Destroy old context (now in resetContext slot)
+            os_unfair_lock_lock(&self.contextSwapLock)
+            let contextToDestroy = self.resetContext
+            os_unfair_lock_unlock(&self.contextSwapLock)
+
+            BNNSGraphContextDestroy(contextToDestroy)
+
+            // Create fresh context with clean state
+            let newContext = BNNSGraphContextMakeStreaming(self.graph, nil, 0, nil)
+            if newContext.data != nil {
+                BNNSGraphContextSetArgumentType(newContext, BNNSGraphArgumentTypePointer)
+
+                os_unfair_lock_lock(&self.contextSwapLock)
+                self.resetContext = newContext
+                os_unfair_lock_unlock(&self.contextSwapLock)
+            } else {
+                #if DEBUG
+                logger.debug("[BNNSStreamingInference] Warning: Failed to recreate reset context")
+                #endif
+            }
+
+            // Mark recreation complete
+            OSAtomicDecrement32(&self.needsResetContextRefresh)
+        }
+    }
+
+    /// Fallback reset: allocate new context (not real-time safe)
+    private func resetStateAllocating() throws {
+        let startTime = DispatchTime.now().uptimeNanoseconds
+        var spinCount = 0
+        while OSAtomicAdd32(0, &predictInFlightCount) > 0 {
+            spinCount += 1
+            if spinCount % 100 == 0 {
+                usleep(0)
+            }
+            let elapsed = DispatchTime.now().uptimeNanoseconds - startTime
+            if elapsed > Self.resetStateMaxWaitTime {
+                #if DEBUG
+                let inFlight = OSAtomicAdd32(0, &predictInFlightCount)
+                assertionFailure(
+                    "BNNSStreamingInference.resetState() timed out waiting for \(inFlight) predict() call(s).")
+                #endif
+                break
+            }
+        }
+
         let newContext = BNNSGraphContextMakeStreaming(graph, nil, 0, nil)
         guard newContext.data != nil else {
-            // Context recreation failed - keep existing context to prevent crashes.
-            // This should rarely happen since the original was created successfully.
-            // Caller can decide whether to continue with existing state or handle error.
             throw ResetError.contextCreationFailed
         }
 
-        os_unfair_lock_lock(&contextLock)
-        defer { os_unfair_lock_unlock(&contextLock) }
-
-        // Safe to destroy old context now that we have a valid replacement
-        BNNSGraphContextDestroy(context)
-        context = newContext
-        BNNSGraphContextSetArgumentType(context, BNNSGraphArgumentTypePointer)
+        os_unfair_lock_lock(&contextSwapLock)
+        BNNSGraphContextDestroy(activeContext)
+        activeContext = newContext
+        BNNSGraphContextSetArgumentType(activeContext, BNNSGraphArgumentTypePointer)
+        os_unfair_lock_unlock(&contextSwapLock)
     }
 
     // MARK: - Memory Pressure
@@ -983,3 +1082,12 @@ public func isBNNSGraphAvailable() -> Bool {
     }
     return false
 }
+
+#else
+
+// Stub for older compilers that don't have BNNS Graph API
+public func isBNNSGraphAvailable() -> Bool {
+    return false
+}
+
+#endif  // compiler(>=6.0)

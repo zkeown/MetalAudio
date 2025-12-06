@@ -64,14 +64,14 @@ final class PerformanceBenchmarks: XCTestCase {
         }
     }
 
-    func testGPUFFTPerformance_16384() throws {
-        let fft = try FFT(device: device, config: FFT.Config(size: 16384))
-        var input = [Float](repeating: 0, count: 16384 * 2)
-        for i in 0..<16384 {
+    func testGPUFFTPerformance_16_384() throws {
+        let fft = try FFT(device: device, config: FFT.Config(size: 16_384))
+        var input = [Float](repeating: 0, count: 16_384 * 2)
+        for i in 0..<16_384 {
             input[i * 2] = Float(sin(Double(i) * 0.1))
             input[i * 2 + 1] = 0
         }
-        var output = [Float](repeating: 0, count: 16384 * 2)
+        var output = [Float](repeating: 0, count: 16_384 * 2)
 
         measure {
             for _ in 0..<50 {
@@ -276,7 +276,7 @@ final class PerformanceBenchmarks: XCTestCase {
 
         // Measure single-frame latency (important for real-time)
         var totalTime: UInt64 = 0
-        let iterations = 10000
+        let iterations = 10_000
 
         for _ in 0..<iterations {
             let start = DispatchTime.now()
@@ -329,7 +329,7 @@ final class PerformanceBenchmarks: XCTestCase {
         }
 
         let avgLatencyUs = Double(totalTime) / Double(iterations) / 1000.0
-        let budgetUs = Double(bufferSize) / 48000.0 * 1_000_000.0
+        let budgetUs = Double(bufferSize) / 48_000.0 * 1_000_000.0
 
         print("Audio callback average processing time: \(String(format: "%.2f", avgLatencyUs)) µs")
         print("Budget at 48kHz: \(String(format: "%.2f", budgetUs)) µs")
@@ -353,7 +353,7 @@ extension PerformanceBenchmarks {
             var outputReal = [Float](repeating: 0, count: size)
             var outputImag = [Float](repeating: 0, count: size)
 
-            let iterations = 10000
+            let iterations = 10_000
             let start = DispatchTime.now()
 
             for _ in 0..<iterations {
@@ -371,7 +371,7 @@ extension PerformanceBenchmarks {
     }
 
     func testGPUFFTThroughput() throws {
-        let sizes = [1024, 2048, 4096, 8192, 16384]
+        let sizes = [1024, 2048, 4096, 8192, 16_384]
 
         print("\n--- GPU FFT Throughput ---")
         for size in sizes {

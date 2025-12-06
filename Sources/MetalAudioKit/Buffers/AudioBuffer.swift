@@ -615,12 +615,6 @@ public struct PooledBufferHandle: Hashable, Sendable {
     public let address: UInt64
     /// Monotonic generation number assigned at acquisition
     public let generation: UInt64
-
-    /// Create a handle for a buffer
-    internal init(address: UInt64, generation: UInt64) {
-        self.address = address
-        self.generation = generation
-    }
 }
 
 /// A pool of reusable audio buffers to minimize allocations during real-time processing
@@ -1080,8 +1074,8 @@ extension AudioBufferPool: MemoryBudgetable {
     }
 
     /// Memory budget storage
-    private nonisolated(unsafe) static var budgets: [ObjectIdentifier: Int] = [:]
-    private nonisolated(unsafe) static var budgetLock = os_unfair_lock()
+    nonisolated(unsafe) private static var budgets: [ObjectIdentifier: Int] = [:]
+    nonisolated(unsafe) private static var budgetLock = os_unfair_lock()
 
     /// Set memory budget for this pool
     ///

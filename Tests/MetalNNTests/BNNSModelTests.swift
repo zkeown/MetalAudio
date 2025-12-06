@@ -1,3 +1,5 @@
+// BNNS Graph API requires Swift 6 / Xcode 16 SDK
+#if compiler(>=6.0)
 import XCTest
 @testable import MetalNN
 @testable import MetalAudioKit
@@ -11,7 +13,8 @@ final class BNNSModelTests: XCTestCase {
 
     /// Get URL for a test model resource
     func modelURL(_ name: String) -> URL? {
-        Bundle.module.url(forResource: name, withExtension: "mlmodelc")
+        // Use Bundle(for:) as Bundle.module can be ambiguous on some platforms
+        Bundle(for: type(of: self)).url(forResource: name, withExtension: "mlmodelc")
     }
 
     /// Helper to require a model URL or skip test
@@ -317,7 +320,8 @@ final class BNNSModelTests: XCTestCase {
 final class ChunkedInferenceModelTests: XCTestCase {
 
     func modelURL(_ name: String) -> URL? {
-        Bundle.module.url(forResource: name, withExtension: "mlmodelc")
+        // Use Bundle(for:) as Bundle.module can be ambiguous on some platforms
+        Bundle(for: type(of: self)).url(forResource: name, withExtension: "mlmodelc")
     }
 
     func requireModelURL(_ name: String) throws -> URL {
@@ -357,8 +361,8 @@ final class ChunkedInferenceModelTests: XCTestCase {
         let chunked = ChunkedInference(inference: inference, config: config)
 
         // Latency in seconds at 48kHz
-        let latencySeconds = chunked.latencySeconds(sampleRate: 48000.0)
-        XCTAssertEqual(latencySeconds, 2048.0 / 48000.0, accuracy: 0.0001)
+        let latencySeconds = chunked.latencySeconds(sampleRate: 48_000.0)
+        XCTAssertEqual(latencySeconds, 2048.0 / 48_000.0, accuracy: 0.0001)
     }
 
     func testChunkedInferenceBufferStatus() throws {
@@ -478,3 +482,4 @@ final class ChunkedInferenceModelTests: XCTestCase {
         XCTAssertGreaterThan(totalProcessed, 0, "Should produce output after warmup")
     }
 }
+#endif  // compiler(>=6.0)

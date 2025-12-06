@@ -441,12 +441,12 @@ final class RingBufferTests: XCTestCase {
     // MARK: - Performance
 
     func testWriteReadPerformance() {
-        let ring = RingBuffer(capacity: 16384)
+        let ring = RingBuffer(capacity: 16_384)
         var input = [Float](repeating: 0.5, count: 512)
         var output = [Float](repeating: 0, count: 512)
 
         measure {
-            for _ in 0..<10000 {
+            for _ in 0..<10_000 {
                 ring.write(&input, count: 512)
                 ring.read(into: &output, count: 512)
             }
@@ -455,7 +455,7 @@ final class RingBufferTests: XCTestCase {
 
     func testConcurrentWriteRead() {
         let ring = RingBuffer(capacity: 8192)
-        let iterations = 10000
+        let iterations = 10_000
         let writeExpectation = expectation(description: "Write complete")
         let readExpectation = expectation(description: "Read complete")
 

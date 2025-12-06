@@ -1,3 +1,5 @@
+// InferenceQueue requires Swift 6 / Xcode 16 SDK (BNNS Graph API)
+#if compiler(>=6.0)
 import XCTest
 @testable import MetalNN
 @testable import MetalAudioKit
@@ -96,7 +98,7 @@ final class InferenceQueueStatisticsTests: XCTestCase {
         let stats = InferenceQueue.Statistics(
             queueDepth: Int.max / 2,
             averageInferenceTime: 1000.0,
-            maxInferenceTime: 10000.0,
+            maxInferenceTime: 10_000.0,
             totalProcessed: UInt64.max / 2,
             itemsDropped: UInt64.max / 4,
             inferencesFailed: UInt64.max / 8
@@ -106,3 +108,4 @@ final class InferenceQueueStatisticsTests: XCTestCase {
         XCTAssertEqual(stats.totalProcessed, UInt64.max / 2)
     }
 }
+#endif  // compiler(>=6.0)

@@ -1,20 +1,37 @@
-# CODEOWNERS - Defines who must review changes to specific files
+# CODEOWNERS for MetalAudio
 # https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
-# Default owner for all files
+# Default owner for everything
 * @zkeown
 
-# Critical infrastructure - require owner review
-.github/ @zkeown
+# Core GPU infrastructure - requires careful review
+/Sources/MetalAudioKit/ @zkeown
+
+# DSP module - performance-critical
+/Sources/MetalDSP/ @zkeown
+
+# Neural network module - ML expertise
+/Sources/MetalNN/ @zkeown
+
+# Metal shaders - GPU programming expertise
+**/Shaders/ @zkeown
+
+# CI/CD and automation
+/.github/ @zkeown
+
+# Documentation
+*.md @zkeown
+/docs/ @zkeown
+
+# Build configuration
 Package.swift @zkeown
 Package.resolved @zkeown
 
 # Security-sensitive files
 SECURITY.md @zkeown
-Sources/*/Shaders/*.metal @zkeown
 
-# Core thread-safety and real-time audio code
-Sources/MetalAudioKit/AudioDevice.swift @zkeown
-Sources/MetalAudioKit/ComputeContext.swift @zkeown
+# Core thread-safety and real-time audio code (critical)
+Sources/MetalAudioKit/Core/AudioDevice.swift @zkeown
+Sources/MetalAudioKit/Core/ComputeContext.swift @zkeown
 Sources/MetalNN/BNNSInference.swift @zkeown
 Sources/MetalNN/BNNSStreamingInference.swift @zkeown

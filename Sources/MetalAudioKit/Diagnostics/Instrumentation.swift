@@ -1,5 +1,8 @@
 import Foundation
 import os.signpost
+import os.log
+
+private let instrumentationLogger = Logger(subsystem: "MetalAudioKit", category: "Instrumentation")
 
 // MARK: - Instruments Integration with os_signpost
 
@@ -52,7 +55,7 @@ public final class AudioSignpost: @unchecked Sendable {
     public let category: String
 
     /// Whether signposting is enabled
-    public nonisolated(unsafe) static var isEnabled: Bool = true
+    nonisolated(unsafe) public static var isEnabled: Bool = true
 
     // MARK: - Predefined Categories
 
@@ -111,7 +114,7 @@ public final class AudioSignpost: @unchecked Sendable {
         guard AudioSignpost.isEnabled else { return .invalid }
 
         let id = OSSignpostID(log: log)
-        withVaList(args) { pointer in
+        withVaList(args) { _ in
             // Note: os_signpost doesn't directly support CVarArg in the same way
             // Using the simpler overload for now
             os_signpost(.begin, log: log, name: name, signpostID: id)
@@ -422,10 +425,10 @@ public final class PerfRegistry: @unchecked Sendable {
         return allStats.map { $0.summary() }.sorted()
     }
 
-    /// Print all summaries
+    /// Log all summaries
     public func printSummaries() {
         for summary in allSummaries() {
-            print(summary)
+            instrumentationLogger.info("\(summary)")
         }
     }
 

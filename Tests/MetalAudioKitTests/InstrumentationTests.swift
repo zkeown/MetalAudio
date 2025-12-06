@@ -154,7 +154,7 @@ final class ScopedSignpostTests: XCTestCase {
 
         // Signpost ends automatically when scope exits
         do {
-            let _ = ScopedSignpost(.audio, "Scoped Test")
+            _ = ScopedSignpost(.audio, "Scoped Test")
             executed = true
         }
 
@@ -163,7 +163,7 @@ final class ScopedSignpostTests: XCTestCase {
 
     func testScopedSignpostInFunction() {
         func doWork() -> Int {
-            let _ = ScopedSignpost(.dsp, "Process")
+            _ = ScopedSignpost(.dsp, "Process")
             return 42
         }
 
@@ -178,7 +178,7 @@ final class ScopedSignpostTests: XCTestCase {
         var executed = false
 
         do {
-            let _ = ScopedSignpost(.audio, "Disabled Scoped")
+            _ = ScopedSignpost(.audio, "Disabled Scoped")
             executed = true
         }
 

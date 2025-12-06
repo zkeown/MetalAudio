@@ -11,7 +11,7 @@ final class AudioUnitHelperTests: XCTestCase {
 
         XCTAssertEqual(config.maxFrames, 4096)
         XCTAssertEqual(config.channelCount, 2)
-        XCTAssertEqual(config.sampleRate, 48000)
+        XCTAssertEqual(config.sampleRate, 48_000)
         XCTAssertFalse(config.interleaved)
     }
 
@@ -19,13 +19,13 @@ final class AudioUnitHelperTests: XCTestCase {
         let config = AudioUnitHelper.Config(
             maxFrames: 1024,
             channelCount: 6,
-            sampleRate: 96000,
+            sampleRate: 96_000,
             interleaved: true
         )
 
         XCTAssertEqual(config.maxFrames, 1024)
         XCTAssertEqual(config.channelCount, 6)
-        XCTAssertEqual(config.sampleRate, 96000)
+        XCTAssertEqual(config.sampleRate, 96_000)
         XCTAssertTrue(config.interleaved)
     }
 
@@ -42,14 +42,14 @@ final class AudioUnitHelperTests: XCTestCase {
         let config = AudioUnitHelper.Config(
             maxFrames: 512,
             channelCount: 4,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             interleaved: false
         )
         let helper = AudioUnitHelper(config: config)
 
         XCTAssertEqual(helper.config.maxFrames, 512)
         XCTAssertEqual(helper.config.channelCount, 4)
-        XCTAssertEqual(helper.config.sampleRate, 44100)
+        XCTAssertEqual(helper.config.sampleRate, 44_100)
         XCTAssertFalse(helper.config.interleaved)
     }
 
@@ -360,7 +360,7 @@ final class AudioUnitHelperTests: XCTestCase {
     // MARK: - Latency Calculation Tests
 
     func testCalculateLatencyWithoutFFT() {
-        let config = AudioUnitHelper.Config(maxFrames: 512, sampleRate: 48000)
+        let config = AudioUnitHelper.Config(maxFrames: 512, sampleRate: 48_000)
         let helper = AudioUnitHelper(config: config)
 
         let latency = helper.calculateLatency()
@@ -368,7 +368,7 @@ final class AudioUnitHelperTests: XCTestCase {
     }
 
     func testCalculateLatencyWithFFT() {
-        let config = AudioUnitHelper.Config(maxFrames: 512, sampleRate: 48000)
+        let config = AudioUnitHelper.Config(maxFrames: 512, sampleRate: 48_000)
         let helper = AudioUnitHelper(config: config)
 
         let latency = helper.calculateLatency(fftSize: 1024)
@@ -376,19 +376,19 @@ final class AudioUnitHelperTests: XCTestCase {
     }
 
     func testCalculateLatencySeconds() {
-        let config = AudioUnitHelper.Config(maxFrames: 480, sampleRate: 48000)
+        let config = AudioUnitHelper.Config(maxFrames: 480, sampleRate: 48_000)
         let helper = AudioUnitHelper(config: config)
 
         let latencySeconds = helper.calculateLatencySeconds()
-        XCTAssertEqual(latencySeconds, 0.01, accuracy: 0.0001) // 480 / 48000 = 0.01s
+        XCTAssertEqual(latencySeconds, 0.01, accuracy: 0.0001) // 480 / 48_000 = 0.01s
     }
 
     func testCalculateLatencySecondsWithFFT() {
-        let config = AudioUnitHelper.Config(maxFrames: 480, sampleRate: 48000)
+        let config = AudioUnitHelper.Config(maxFrames: 480, sampleRate: 48_000)
         let helper = AudioUnitHelper(config: config)
 
         let latencySeconds = helper.calculateLatencySeconds(fftSize: 480)
-        XCTAssertEqual(latencySeconds, 0.02, accuracy: 0.0001) // (480 + 480) / 48000 = 0.02s
+        XCTAssertEqual(latencySeconds, 0.02, accuracy: 0.0001) // (480 + 480) / 48_000 = 0.02s
     }
 
     // MARK: - Captured Pointers Tests
@@ -438,7 +438,7 @@ final class AudioUnitHelperTests: XCTestCase {
         let config = AudioUnitHelper.Config(
             maxFrames: 256,
             channelCount: 6,
-            sampleRate: 48000
+            sampleRate: 48_000
         )
         let helper = AudioUnitHelper(config: config)
 
@@ -497,7 +497,7 @@ final class AudioUnitHelperTests: XCTestCase {
         let helper = AudioUnitHelper(config: config)
 
         // Create AVAudioPCMBuffer with test data
-        let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
         let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4)!
         pcmBuffer.frameLength = 4
 
@@ -532,7 +532,7 @@ final class AudioUnitHelperTests: XCTestCase {
         let config = AudioUnitHelper.Config(maxFrames: 8, channelCount: 2)
         let helper = AudioUnitHelper(config: config)
 
-        let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
         let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8)!
         pcmBuffer.frameLength = 8
 
@@ -571,7 +571,7 @@ final class AudioUnitHelperTests: XCTestCase {
         }
 
         // Create output buffer
-        let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
         let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4)!
         pcmBuffer.frameLength = 4
 
@@ -600,7 +600,7 @@ final class AudioUnitHelperTests: XCTestCase {
             }
         }
 
-        let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)!
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
         let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8)!
         pcmBuffer.frameLength = 8
 
@@ -625,7 +625,7 @@ final class AudioUnitHelperTests: XCTestCase {
         let helper = AudioUnitHelper(config: config)
 
         // Create source buffer with test data
-        let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
         let sourceBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4)!
         sourceBuffer.frameLength = 4
 
@@ -659,7 +659,7 @@ final class AudioUnitHelperTests: XCTestCase {
         let config = AudioUnitHelper.Config(maxFrames: 4, channelCount: 1)
         let helper = AudioUnitHelper(config: config)
 
-        let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
         let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4)!
         pcmBuffer.frameLength = 4
 
@@ -678,7 +678,7 @@ final class AudioUnitHelperTests: XCTestCase {
         let config = AudioUnitHelper.Config(maxFrames: 2, channelCount: 1)
         let helper = AudioUnitHelper(config: config)
 
-        let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)!
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
         let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8)!
         pcmBuffer.frameLength = 8
 

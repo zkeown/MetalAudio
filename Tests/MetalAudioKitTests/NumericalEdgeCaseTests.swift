@@ -199,11 +199,9 @@ final class NumericalEdgeCaseTests: XCTestCase {
 
         // NaN in kernel should propagate to output
         var hasNaN = false
-        for value in output {
-            if value.isNaN {
-                hasNaN = true
-                break
-            }
+        for value in output where value.isNaN {
+            hasNaN = true
+            break
         }
         XCTAssertTrue(hasNaN, "NaN in kernel should propagate to convolution output")
     }
@@ -275,11 +273,9 @@ final class NumericalEdgeCaseTests: XCTestCase {
 
         // NaN in input should propagate (weight * NaN = NaN)
         var hasNaN = false
-        for value in result {
-            if value.isNaN {
-                hasNaN = true
-                break
-            }
+        for value in result where value.isNaN {
+            hasNaN = true
+            break
         }
         XCTAssertTrue(hasNaN, "NaN in linear layer input should propagate to output")
     }
@@ -393,7 +389,7 @@ final class NumericalEdgeCaseTests: XCTestCase {
         try filter.configure(
             type: .lowpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
@@ -404,11 +400,9 @@ final class NumericalEdgeCaseTests: XCTestCase {
 
         // NaN should propagate through filter state
         var hasNaN = false
-        for value in output.suffix(50) {  // Check after NaN injection
-            if value.isNaN {
-                hasNaN = true
-                break
-            }
+        for value in output.suffix(50) where value.isNaN {  // Check after NaN injection
+            hasNaN = true
+            break
         }
         XCTAssertTrue(hasNaN, "NaN should propagate through biquad filter")
     }
@@ -418,7 +412,7 @@ final class NumericalEdgeCaseTests: XCTestCase {
         try filter.configure(
             type: .lowpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
@@ -432,7 +426,7 @@ final class NumericalEdgeCaseTests: XCTestCase {
         // Normal input after reset should produce valid output
         var normalInput = [Float](repeating: 0, count: 100)
         for i in 0..<100 {
-            normalInput[i] = sin(2.0 * Float.pi * 100.0 * Float(i) / 44100.0)
+            normalInput[i] = sin(2.0 * Float.pi * 100.0 * Float(i) / 44_100.0)
         }
 
         let output = filter.process(input: normalInput)
@@ -448,16 +442,16 @@ final class NumericalEdgeCaseTests: XCTestCase {
     func testFloat16Overflow() throws {
         let tensor = try Tensor(device: device, shape: [3], dataType: .float16)
 
-        // Float16 max is ~65504, so values beyond that overflow to Inf
-        let values: [Float] = [65504.0, 100000.0, -100000.0]  // Max, overflow+, overflow-
+        // Float16 max is ~65_504, so values beyond that overflow to Inf
+        let values: [Float] = [65_504.0, 100_000.0, -100_000.0]  // Max, overflow+, overflow-
         try tensor.copyFromFloat(values)
 
         let result = tensor.toFloatArray()
 
-        XCTAssertEqual(result[0], 65504.0, accuracy: 1.0, "Float16 max should be preserved")
+        XCTAssertEqual(result[0], 65_504.0, accuracy: 1.0, "Float16 max should be preserved")
         // Values beyond Float16 max become Inf
-        XCTAssertTrue(result[1].isInfinite, "Value > 65504 should become Inf in Float16")
-        XCTAssertTrue(result[2].isInfinite, "Value < -65504 should become -Inf in Float16")
+        XCTAssertTrue(result[1].isInfinite, "Value > 65_504 should become Inf in Float16")
+        XCTAssertTrue(result[2].isInfinite, "Value < -65_504 should become -Inf in Float16")
     }
 
     func testFloat16Underflow() throws {

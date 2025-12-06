@@ -1,6 +1,14 @@
 import Metal
 import Accelerate
 import MetalAudioKit
+import os.log
+
+/// Threshold for GPU filter processing - buffers larger than this use GPU
+/// when available. Below this threshold, vDSP is faster due to GPU dispatch overhead.
+
+private let logger = Logger(subsystem: "MetalDSP", category: "Filters")
+
+private let gpuFilterThreshold: Int = 1024
 
 /// Errors for filter operations
 public enum FilterError: Error, LocalizedError {
@@ -97,8 +105,224 @@ public final class BiquadFilter {
     // For Accelerate batch processing
     private var biquadSetup: vDSP.Biquad<Float>?
 
+    // MARK: - GPU Acceleration
+
+    /// Audio device for GPU processing (optional)
+    private var device: AudioDevice?
+
+    /// GPU compute pipeline for multi-channel biquad filtering
+    private var gpuPipeline: MTLComputePipelineState?
+
+    /// Whether GPU acceleration is enabled and available
+    public private(set) var gpuEnabled: Bool = false
+
+    /// GPU buffer for filter parameters (b0, b1, b2, a1, a2)
+    private var gpuParamsBuffer: MTLBuffer?
+
+    /// GPU buffer for filter state (z1, z2)
+    private var gpuStateBuffer: MTLBuffer?
+
+    /// Maximum buffer size for pre-allocated GPU buffers (can grow if needed)
+    private var maxGPUBufferSize: Int = 0
+
+    /// Pre-allocated input buffer for GPU processing
+    private var gpuInputBuffer: MTLBuffer?
+
+    /// Pre-allocated output buffer for GPU processing
+    private var gpuOutputBuffer: MTLBuffer?
+
+    /// Initialize without GPU acceleration (CPU-only mode)
     public init() {
         self.coefficients = Coefficients()
+    }
+
+    /// Initialize with optional GPU acceleration
+    /// - Parameter device: Audio device for GPU processing. If nil, uses CPU-only mode.
+    public init(device: AudioDevice?) {
+        self.coefficients = Coefficients()
+        self.device = device
+
+        if let device = device {
+            setupGPU(device: device)
+        }
+    }
+
+    /// Set up GPU resources for accelerated filtering
+    private func setupGPU(device: AudioDevice) {
+        do {
+            // Load the biquad pipeline from MetalDSP's bundle
+            let dspBundle = Bundle.module
+            gpuPipeline = try device.makeComputePipeline(
+                functionName: "biquad_filter_multichannel",
+                bundle: dspBundle
+            )
+
+            // Allocate parameter buffer (5 floats: b0, b1, b2, a1, a2)
+            gpuParamsBuffer = device.device.makeBuffer(
+                length: 5 * MemoryLayout<Float>.size,
+                options: .storageModeShared
+            )
+
+            // Allocate state buffer (2 floats: z1, z2)
+            gpuStateBuffer = device.device.makeBuffer(
+                length: 2 * MemoryLayout<Float>.size,
+                options: .storageModeShared
+            )
+
+            // Initialize state to zero
+            if let stateBuffer = gpuStateBuffer {
+                let statePtr = stateBuffer.contents().bindMemory(to: Float.self, capacity: 2)
+                statePtr[0] = 0.0
+                statePtr[1] = 0.0
+            }
+
+            gpuEnabled = true
+            #if DEBUG
+            logger.debug("[BiquadFilter] GPU acceleration enabled")
+            #endif
+        } catch {
+            gpuEnabled = false
+            #if DEBUG
+            logger.debug("[BiquadFilter] GPU setup failed: \(error). Using CPU-only mode.")
+            #endif
+        }
+    }
+
+    /// Update GPU parameter buffer with current coefficients
+    private func updateGPUParams() {
+        guard let paramsBuffer = gpuParamsBuffer else { return }
+
+        let paramsPtr = paramsBuffer.contents().bindMemory(to: Float.self, capacity: 5)
+        paramsPtr[0] = coefficients.b0
+        paramsPtr[1] = coefficients.b1
+        paramsPtr[2] = coefficients.b2
+        paramsPtr[3] = coefficients.a1
+        paramsPtr[4] = coefficients.a2
+    }
+
+    /// Sync GPU state buffer with CPU delays
+    private func syncGPUStateFromCPU() {
+        guard let stateBuffer = gpuStateBuffer else { return }
+
+        let statePtr = stateBuffer.contents().bindMemory(to: Float.self, capacity: 2)
+        statePtr[0] = Float(delays[0])
+        statePtr[1] = Float(delays[1])
+    }
+
+    /// Sync CPU delays from GPU state buffer
+    private func syncCPUStateFromGPU() {
+        guard let stateBuffer = gpuStateBuffer else { return }
+
+        let statePtr = stateBuffer.contents().bindMemory(to: Float.self, capacity: 2)
+        delays[0] = Double(statePtr[0])
+        delays[1] = Double(statePtr[1])
+    }
+
+    /// Ensure GPU buffers are large enough for the given sample count
+    private func ensureGPUBuffers(sampleCount: Int) {
+        guard let device = device else { return }
+
+        if sampleCount > maxGPUBufferSize {
+            // Grow buffers with some headroom to avoid frequent reallocations
+            let newSize = max(sampleCount, maxGPUBufferSize * 2, 2048)
+            let byteSize = newSize * MemoryLayout<Float>.size
+
+            gpuInputBuffer = device.device.makeBuffer(length: byteSize, options: .storageModeShared)
+            gpuOutputBuffer = device.device.makeBuffer(length: byteSize, options: .storageModeShared)
+            maxGPUBufferSize = newSize
+        }
+    }
+
+    // MARK: - Coefficient Calculation
+
+    /// Raw biquad coefficients before normalization
+    private struct RawCoefficients {
+        var b0: Double, b1: Double, b2: Double
+        var a0: Double, a1: Double, a2: Double
+    }
+
+    /// Calculate raw biquad coefficients for the given filter type and parameters
+    private func calculateRawCoefficients(
+        type: FilterType,
+        cosOmega: Double,
+        sinOmega: Double,
+        alpha: Double
+    ) -> RawCoefficients {
+        var b0: Double = 0, b1: Double = 0, b2: Double = 0
+        var a0: Double = 0, a1: Double = 0, a2: Double = 0
+
+        switch type {
+        case .lowpass:
+            b0 = (1.0 - cosOmega) / 2.0
+            b1 = 1.0 - cosOmega
+            b2 = (1.0 - cosOmega) / 2.0
+            a0 = 1.0 + alpha
+            a1 = -2.0 * cosOmega
+            a2 = 1.0 - alpha
+
+        case .highpass:
+            b0 = (1.0 + cosOmega) / 2.0
+            b1 = -(1.0 + cosOmega)
+            b2 = (1.0 + cosOmega) / 2.0
+            a0 = 1.0 + alpha
+            a1 = -2.0 * cosOmega
+            a2 = 1.0 - alpha
+
+        case .bandpass:
+            b0 = alpha
+            b1 = 0
+            b2 = -alpha
+            a0 = 1.0 + alpha
+            a1 = -2.0 * cosOmega
+            a2 = 1.0 - alpha
+
+        case .notch:
+            b0 = 1.0
+            b1 = -2.0 * cosOmega
+            b2 = 1.0
+            a0 = 1.0 + alpha
+            a1 = -2.0 * cosOmega
+            a2 = 1.0 - alpha
+
+        case .allpass:
+            b0 = 1.0 - alpha
+            b1 = -2.0 * cosOmega
+            b2 = 1.0 + alpha
+            a0 = 1.0 + alpha
+            a1 = -2.0 * cosOmega
+            a2 = 1.0 - alpha
+
+        case .peaking(let gainDB):
+            let A = pow(10.0, Double(gainDB) / 40.0)
+            b0 = 1.0 + alpha * A
+            b1 = -2.0 * cosOmega
+            b2 = 1.0 - alpha * A
+            a0 = 1.0 + alpha / A
+            a1 = -2.0 * cosOmega
+            a2 = 1.0 - alpha / A
+
+        case .lowshelf(let gainDB):
+            let A = pow(10.0, Double(gainDB) / 40.0)
+            let sqrtA = sqrt(A)
+            b0 = A * ((A + 1.0) - (A - 1.0) * cosOmega + 2.0 * sqrtA * alpha)
+            b1 = 2.0 * A * ((A - 1.0) - (A + 1.0) * cosOmega)
+            b2 = A * ((A + 1.0) - (A - 1.0) * cosOmega - 2.0 * sqrtA * alpha)
+            a0 = (A + 1.0) + (A - 1.0) * cosOmega + 2.0 * sqrtA * alpha
+            a1 = -2.0 * ((A - 1.0) + (A + 1.0) * cosOmega)
+            a2 = (A + 1.0) + (A - 1.0) * cosOmega - 2.0 * sqrtA * alpha
+
+        case .highshelf(let gainDB):
+            let A = pow(10.0, Double(gainDB) / 40.0)
+            let sqrtA = sqrt(A)
+            b0 = A * ((A + 1.0) + (A - 1.0) * cosOmega + 2.0 * sqrtA * alpha)
+            b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cosOmega)
+            b2 = A * ((A + 1.0) + (A - 1.0) * cosOmega - 2.0 * sqrtA * alpha)
+            a0 = (A + 1.0) - (A - 1.0) * cosOmega + 2.0 * sqrtA * alpha
+            a1 = 2.0 * ((A - 1.0) - (A + 1.0) * cosOmega)
+            a2 = (A + 1.0) - (A - 1.0) * cosOmega - 2.0 * sqrtA * alpha
+        }
+
+        return RawCoefficients(b0: b0, b1: b1, b2: b2, a0: a0, a1: a1, a2: a2)
     }
 
     /// Configure filter with type, frequency, and Q
@@ -175,85 +399,19 @@ public final class BiquadFilter {
         let cosOmega = cos(omega)
         let alpha = sinOmega / (2.0 * q64)
 
-        var b0: Double = 0, b1: Double = 0, b2: Double = 0
-        var a0: Double = 0, a1: Double = 0, a2: Double = 0
-
-        switch type {
-        case .lowpass:
-            b0 = (1.0 - cosOmega) / 2.0
-            b1 = 1.0 - cosOmega
-            b2 = (1.0 - cosOmega) / 2.0
-            a0 = 1.0 + alpha
-            a1 = -2.0 * cosOmega
-            a2 = 1.0 - alpha
-
-        case .highpass:
-            b0 = (1.0 + cosOmega) / 2.0
-            b1 = -(1.0 + cosOmega)
-            b2 = (1.0 + cosOmega) / 2.0
-            a0 = 1.0 + alpha
-            a1 = -2.0 * cosOmega
-            a2 = 1.0 - alpha
-
-        case .bandpass:
-            b0 = alpha
-            b1 = 0
-            b2 = -alpha
-            a0 = 1.0 + alpha
-            a1 = -2.0 * cosOmega
-            a2 = 1.0 - alpha
-
-        case .notch:
-            b0 = 1.0
-            b1 = -2.0 * cosOmega
-            b2 = 1.0
-            a0 = 1.0 + alpha
-            a1 = -2.0 * cosOmega
-            a2 = 1.0 - alpha
-
-        case .allpass:
-            b0 = 1.0 - alpha
-            b1 = -2.0 * cosOmega
-            b2 = 1.0 + alpha
-            a0 = 1.0 + alpha
-            a1 = -2.0 * cosOmega
-            a2 = 1.0 - alpha
-
-        case .peaking(let gainDB):
-            let A = pow(10.0, Double(gainDB) / 40.0)
-            b0 = 1.0 + alpha * A
-            b1 = -2.0 * cosOmega
-            b2 = 1.0 - alpha * A
-            a0 = 1.0 + alpha / A
-            a1 = -2.0 * cosOmega
-            a2 = 1.0 - alpha / A
-
-        case .lowshelf(let gainDB):
-            let A = pow(10.0, Double(gainDB) / 40.0)
-            let sqrtA = sqrt(A)
-            b0 = A * ((A + 1.0) - (A - 1.0) * cosOmega + 2.0 * sqrtA * alpha)
-            b1 = 2.0 * A * ((A - 1.0) - (A + 1.0) * cosOmega)
-            b2 = A * ((A + 1.0) - (A - 1.0) * cosOmega - 2.0 * sqrtA * alpha)
-            a0 = (A + 1.0) + (A - 1.0) * cosOmega + 2.0 * sqrtA * alpha
-            a1 = -2.0 * ((A - 1.0) + (A + 1.0) * cosOmega)
-            a2 = (A + 1.0) + (A - 1.0) * cosOmega - 2.0 * sqrtA * alpha
-
-        case .highshelf(let gainDB):
-            let A = pow(10.0, Double(gainDB) / 40.0)
-            let sqrtA = sqrt(A)
-            b0 = A * ((A + 1.0) + (A - 1.0) * cosOmega + 2.0 * sqrtA * alpha)
-            b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cosOmega)
-            b2 = A * ((A + 1.0) + (A - 1.0) * cosOmega - 2.0 * sqrtA * alpha)
-            a0 = (A + 1.0) - (A - 1.0) * cosOmega + 2.0 * sqrtA * alpha
-            a1 = 2.0 * ((A - 1.0) - (A + 1.0) * cosOmega)
-            a2 = (A + 1.0) - (A - 1.0) * cosOmega - 2.0 * sqrtA * alpha
-        }
+        // Calculate raw coefficients using helper method
+        let raw = calculateRawCoefficients(
+            type: type,
+            cosOmega: cosOmega,
+            sinOmega: sinOmega,
+            alpha: alpha
+        )
 
         // Guard against division by near-zero a0 (can cause NaN propagation)
         // This indicates invalid filter parameters - throw instead of silently falling back to pass-through
         // Note: Use Float tolerance because coefficients will be stored as Float32. A value that passes
         // Double tolerance (1e-15) might still produce Inf when divided in Float32 representation.
-        let a0Float = Float(a0)
+        let a0Float = Float(raw.a0)
         let a0Tolerance: Float = 1e-6  // Safe margin for Float32 division
         guard abs(a0Float) > a0Tolerance else {
             throw FilterError.invalidParameter(
@@ -268,11 +426,11 @@ public final class BiquadFilter {
         // This ensures that if ANY validation fails, the filter remains in its previous valid state.
         // Previously, coefficients were stored before stability validation, leaving the filter in
         // an inconsistent state if validation threw (coefficients updated but biquadSetup not).
-        let newB0 = Float(b0 / a0)
-        let newB1 = Float(b1 / a0)
-        let newB2 = Float(b2 / a0)
-        let newA1 = Float(a1 / a0)
-        let newA2 = Float(a2 / a0)
+        let newB0 = Float(raw.b0 / raw.a0)
+        let newB1 = Float(raw.b1 / raw.a0)
+        let newB2 = Float(raw.b2 / raw.a0)
+        let newA1 = Float(raw.a1 / raw.a0)
+        let newA2 = Float(raw.a2 / raw.a0)
 
         // Check for NaN/Inf after normalization (can occur with extreme parameters)
         // This catches cases where Float32 overflow or underflow occurred during conversion
@@ -325,6 +483,11 @@ public final class BiquadFilter {
 
         // Update Accelerate setup
         updateBiquadSetup()
+
+        // Update GPU params if GPU is enabled
+        if gpuEnabled {
+            updateGPUParams()
+        }
     }
 
     private func updateBiquadSetup() {
@@ -370,7 +533,11 @@ public final class BiquadFilter {
         return output
     }
 
-    /// Process buffer using Accelerate (much faster for blocks)
+    /// Process buffer using GPU or Accelerate (much faster for blocks)
+    ///
+    /// ## Backend Selection
+    /// - GPU: Used for buffers > 1024 samples when GPU acceleration is available
+    /// - vDSP: Used for smaller buffers or when GPU is unavailable
     ///
     /// ## State Persistence
     /// This method uses vDSP's internal state which is separate from per-sample state.
@@ -384,7 +551,16 @@ public final class BiquadFilter {
     ///
     /// ## Denormal Handling
     /// vDSP handles denormals internally via FTZ (Flush-To-Zero) mode.
+    /// GPU shader flushes denormals explicitly.
     public func process(input: [Float]) -> [Float] {
+        // Use GPU for large buffers when available
+        if gpuEnabled && input.count > gpuFilterThreshold {
+            if let gpuOutput = processGPU(input: input) {
+                return gpuOutput
+            }
+            // Fall through to CPU if GPU processing fails
+        }
+
         guard var setup = biquadSetup else {
             return input.map { process(sample: $0) }
         }
@@ -408,6 +584,75 @@ public final class BiquadFilter {
         return output
     }
 
+    /// Process buffer on GPU
+    /// - Parameter input: Input samples
+    /// - Returns: Filtered output, or nil if GPU processing fails
+    private func processGPU(input: [Float]) -> [Float]? {
+        guard let device = device,
+              let pipeline = gpuPipeline,
+              let paramsBuffer = gpuParamsBuffer,
+              let stateBuffer = gpuStateBuffer else {
+            return nil
+        }
+
+        // Ensure we have large enough buffers
+        ensureGPUBuffers(sampleCount: input.count)
+
+        guard let inputBuffer = gpuInputBuffer,
+              let outputBuffer = gpuOutputBuffer else {
+            return nil
+        }
+
+        // Copy input data to GPU buffer
+        let inputPtr = inputBuffer.contents().bindMemory(to: Float.self, capacity: input.count)
+        for i in 0..<input.count {
+            inputPtr[i] = input[i]
+        }
+
+        // Sync CPU state to GPU (in case we switched from CPU mode)
+        syncGPUStateFromCPU()
+
+        // Create command buffer and encoder
+        guard let commandBuffer = device.commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            return nil
+        }
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(inputBuffer, offset: 0, index: 0)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 1)
+        encoder.setBuffer(paramsBuffer, offset: 0, index: 2)
+        encoder.setBuffer(stateBuffer, offset: 0, index: 3)
+
+        // Set constants: numChannels = 1, samplesPerChannel = input.count
+        var numChannels: UInt32 = 1
+        var samplesPerChannel = UInt32(input.count)
+        encoder.setBytes(&numChannels, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.setBytes(&samplesPerChannel, length: MemoryLayout<UInt32>.size, index: 5)
+
+        // Dispatch 1 thread (single channel processes sequentially)
+        // The GPU kernel processes samples sequentially within each channel
+        let threadsPerGrid = MTLSize(width: 1, height: 1, depth: 1)
+        let threadsPerThreadgroup = MTLSize(width: 1, height: 1, depth: 1)
+        encoder.dispatchThreads(threadsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
+
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        // Copy output back
+        let outputPtr = outputBuffer.contents().bindMemory(to: Float.self, capacity: input.count)
+        var output = [Float](repeating: 0, count: input.count)
+        for i in 0..<input.count {
+            output[i] = outputPtr[i]
+        }
+
+        // Sync GPU state back to CPU
+        syncCPUStateFromGPU()
+
+        return output
+    }
+
     /// Process buffer in-place
     public func process(buffer: inout [Float]) {
         buffer = process(input: buffer)
@@ -417,6 +662,13 @@ public final class BiquadFilter {
     public func reset() {
         delays = [0.0, 0.0]
         updateBiquadSetup()
+
+        // Reset GPU state buffer if GPU is enabled
+        if gpuEnabled, let stateBuffer = gpuStateBuffer {
+            let statePtr = stateBuffer.contents().bindMemory(to: Float.self, capacity: 2)
+            statePtr[0] = 0.0
+            statePtr[1] = 0.0
+        }
     }
 
     /// Get current coefficients
@@ -474,6 +726,10 @@ public final class BiquadFilter {
 
 /// A bank of parallel filters for multi-band processing
 ///
+/// ## GPU Acceleration
+/// When initialized with an `AudioDevice`, filters use GPU acceleration for large buffers.
+/// The GPU threshold is shared with individual `BiquadFilter` instances.
+///
 /// ## Thread Safety
 /// `FilterBank` is NOT thread-safe. It contains multiple `BiquadFilter` instances
 /// which maintain internal state. Use separate filter bank instances per thread.
@@ -483,16 +739,22 @@ public final class FilterBank {
     private var filters: [BiquadFilter] = []
     private let bandCount: Int
 
-    /// Initialize a filter bank
+    /// Whether GPU acceleration is enabled for this filter bank
+    public var gpuEnabled: Bool {
+        filters.first?.gpuEnabled ?? false
+    }
+
+    /// Initialize a filter bank with optional GPU acceleration
     /// - Parameters:
-    ///   - device: Audio device
+    ///   - device: Audio device (used for GPU acceleration)
     ///   - bandCount: Number of frequency bands
     public init(device: AudioDevice, bandCount: Int) {
         self.device = device
         self.bandCount = bandCount
 
         for _ in 0..<bandCount {
-            filters.append(BiquadFilter())
+            // Pass device to each filter for GPU acceleration
+            filters.append(BiquadFilter(device: device))
         }
     }
 

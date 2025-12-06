@@ -1,9 +1,13 @@
 import Foundation
 import Metal
+import os.log
 
 // MARK: - Memory Budget Protocol
 
 /// Protocol for components that support memory budgets
+
+private let logger = Logger(subsystem: "MetalAudioKit", category: "MemoryManager")
+
 public protocol MemoryBudgetable: AnyObject {
     /// Current memory usage in bytes
     var currentMemoryUsage: Int { get }
@@ -288,8 +292,8 @@ public final class MemoryManager: @unchecked Sendable {
 
         // Log to console in debug builds
         #if DEBUG
-        print("""
-            [MemoryManager] GPU: \(String(format: "%.1f", snapshot.gpuAllocatedMB))MB | \
+        logger.debug("""
+            GPU: \(String(format: "%.1f", snapshot.gpuAllocatedMB))MB | \
             Process: \(String(format: "%.1f", snapshot.processFootprintMB))MB | \
             Available: \(String(format: "%.1f", snapshot.systemAvailableMB))MB
             """)

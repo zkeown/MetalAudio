@@ -503,7 +503,7 @@ kernel void apply_window_precomputed(
 /// mixed signed/unsigned operations.
 kernel void convolve_direct(
     device const float* input [[buffer(0)]],
-    device const float* kernel [[buffer(1)]],
+    device const float* filterKernel [[buffer(1)]],
     device float* output [[buffer(2)]],
     constant uint& inputLength [[buffer(3)]],
     constant uint& kernelLength [[buffer(4)]],
@@ -530,7 +530,7 @@ kernel void convolve_direct(
     for (uint k = kStart; k < kEnd; k++) {
         // inputIdx = id - k is always valid since k <= id (because k < kEnd <= id + 1)
         uint inputIdx = id - k;
-        sum += kernel[k] * input[inputIdx];
+        sum += filterKernel[k] * input[inputIdx];
     }
 
     output[id] = sum;
@@ -552,7 +552,7 @@ kernel void convolve_direct(
 /// mixed signed/unsigned operations.
 kernel void convolve_direct_kahan(
     device const float* input [[buffer(0)]],
-    device const float* kernel [[buffer(1)]],
+    device const float* filterKernel [[buffer(1)]],
     device float* output [[buffer(2)]],
     constant uint& inputLength [[buffer(3)]],
     constant uint& kernelLength [[buffer(4)]],
@@ -580,7 +580,7 @@ kernel void convolve_direct_kahan(
     for (uint k = kStart; k < kEnd; k++) {
         // inputIdx = id - k is always valid since k <= id (because k < kEnd <= id + 1)
         uint inputIdx = id - k;
-        float product = kernel[k] * input[inputIdx];
+        float product = filterKernel[k] * input[inputIdx];
         float y = product - c;    // Compensate for previous error
         float t = sum + y;        // Accumulate
         c = (t - sum) - y;        // New error term (algebraically 0, but captures rounding)
@@ -625,7 +625,7 @@ kernel void complex_multiply(
 /// performance degradation when accumulating many partitions with quiet audio.
 kernel void complex_multiply_accumulate(
     device const float2* input [[buffer(0)]],
-    device const float2* kernel [[buffer(1)]],
+    device const float2* filterKernel [[buffer(1)]],
     device float2* accumulator [[buffer(2)]],
     constant uint& length [[buffer(3)]],
     uint id [[thread_position_in_grid]]
@@ -633,7 +633,7 @@ kernel void complex_multiply_accumulate(
     if (id >= length) return;
 
     float2 in_val = input[id];
-    float2 kern_val = kernel[id];
+    float2 kern_val = filterKernel[id];
     float2 acc_val = accumulator[id];
 
     // acc += input * kernel with denormal flushing
@@ -661,7 +661,7 @@ kernel void complex_multiply_accumulate(
 /// degradation in subsequent operations when processing quiet audio.
 kernel void complex_multiply_accumulate_kahan(
     device const float2* input [[buffer(0)]],
-    device const float2* kernel [[buffer(1)]],
+    device const float2* filterKernel [[buffer(1)]],
     device float2* accumulator [[buffer(2)]],
     device float2* compensation [[buffer(3)]],  // Kahan compensation term per element
     constant uint& length [[buffer(4)]],
@@ -670,7 +670,7 @@ kernel void complex_multiply_accumulate_kahan(
     if (id >= length) return;
 
     float2 in_val = input[id];
-    float2 kern_val = kernel[id];
+    float2 kern_val = filterKernel[id];
     float2 acc_val = accumulator[id];
     float2 c = compensation[id];
 

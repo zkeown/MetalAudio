@@ -356,7 +356,7 @@ final class ISTFTFrameValidationTests: XCTestCase {
     /// DSP-3: Test FFTError.istftFrameOverflow error description
     func testIstftFrameOverflowErrorDescription() {
         let error = FFTError.istftFrameOverflow(
-            frameIndex: 1000000,
+            frameIndex: 1_000_000,
             hopSize: 256,
             fftSize: 512,
             outputLength: 1024

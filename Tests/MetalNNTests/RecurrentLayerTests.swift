@@ -229,11 +229,9 @@ final class LSTMTests: XCTestCase {
 
         // Result 2 should differ from result 1 (state accumulated)
         var anyDifferent = false
-        for i in 0..<result1.count {
-            if abs(result1[i] - result2[i]) > 1e-5 {
-                anyDifferent = true
-                break
-            }
+        for i in 0..<result1.count where abs(result1[i] - result2[i]) > 1e-5 {
+            anyDifferent = true
+            break
         }
         XCTAssertTrue(anyDifferent, "Second pass should differ from first (state should accumulate)")
     }
@@ -1036,7 +1034,7 @@ final class LSTMErrorPathTests: XCTestCase {
         )
 
         // Should throw for memory budget exceeded
-        XCTAssertThrowsError(try lstm.prewarm(sequenceLength: 10000)) { error in
+        XCTAssertThrowsError(try lstm.prewarm(sequenceLength: 10_000)) { error in
             guard let audioError = error as? MetalAudioError else {
                 XCTFail("Expected MetalAudioError")
                 return
@@ -1138,7 +1136,7 @@ final class LSTMForwardValidationTests: XCTestCase {
         )
 
         // Large prewarm should fail due to budget
-        XCTAssertThrowsError(try lstm.prewarm(sequenceLength: 10000)) { error in
+        XCTAssertThrowsError(try lstm.prewarm(sequenceLength: 10_000)) { error in
             XCTAssertTrue(error is MetalAudioError, "Expected MetalAudioError")
         }
     }

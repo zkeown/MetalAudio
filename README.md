@@ -43,16 +43,22 @@ context.tryExecuteAsync(pipeline) { buffer in
 ### MetalDSP — Hybrid CPU/GPU Signal Processing
 
 ```swift
-let fft = try FFT(size: 4096, device: device)
+let fft = try FFT(device: device, config: .init(
+    size: 4096,
+    windowType: .hann,
+    hopSize: 1024
+))
 
 // Automatically chooses optimal backend:
 // - vDSP for ≤2048 samples (lower latency)
 // - Metal for 2048-8192 (custom shaders)
 // - MPSGraph for >8192 (maximum parallelism)
-let spectrum = fft.forward(signal)
+var real = [Float](repeating: 0, count: 4096)
+var imag = [Float](repeating: 0, count: 4096)
+fft.forward(input: &signal, outputReal: &real, outputImag: &imag)
 
-// STFT with COLA validation
-let stft = fft.stft(signal, hopSize: 1024, window: .hann)
+// STFT with COLA validation (uses config's hopSize and window)
+let stft = try fft.stft(input: signal)
 ```
 
 - **Intelligent FFT routing** — first Swift library with hybrid vDSP/Metal/MPSGraph
@@ -101,16 +107,21 @@ dependencies: [
 import MetalDSP
 
 let device = try AudioDevice()
-let fft = try FFT(size: 2048, device: device)
+let fft = try FFT(device: device, config: .init(size: 2048))
+
+// Pre-allocate buffers (do this once, reuse in audio callback)
+var real = [Float](repeating: 0, count: 2048)
+var imag = [Float](repeating: 0, count: 2048)
+var mag = [Float](repeating: 0, count: 1025)
 
 // Forward transform
-let spectrum = fft.forward(audioBuffer)
+fft.forward(input: &audioBuffer, outputReal: &real, outputImag: &imag)
 
 // Magnitude spectrum
-let magnitudes = fft.magnitudes(spectrum)
+fft.magnitude(real: &real, imag: &imag, magnitude: &mag)
 
 // Inverse transform
-let reconstructed = fft.inverse(spectrum)
+fft.inverse(inputReal: &real, inputImag: &imag, output: &audioBuffer)
 ```
 
 ### Real-Time ML Inference
@@ -154,8 +165,8 @@ helper.copyFromBufferList(ioData, frameCount: frameCount)
 
 // Process with your DSP...
 myDSP.process(
-    input: helper.inputBufferPointer(channel: 0)!,
-    output: helper.outputBufferPointer(channel: 0)!,
+    input: helper.inputBuffer(channel: 0)!,
+    output: helper.outputBuffer(channel: 0)!,
     count: frameCount
 )
 
@@ -188,7 +199,7 @@ MetalAudio/
 
 ## Performance
 
-Benchmarked on M4 Max *(cranked to 11)*:
+Benchmarked on M4 Max *(cranked to 11)*. Performance varies by hardware:
 
 | Operation | MetalAudio | Alternative | Speedup |
 |-----------|------------|-------------|---------|

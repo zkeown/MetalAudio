@@ -195,7 +195,7 @@ final class ShaderPrecompilerTests: XCTestCase {
 
         precompiler.register(source: testSource, functionName: "precomp_test")
 
-        var progressCalled = false
+        nonisolated(unsafe) var progressCalled = false
         precompiler.startPrecompilation(progress: { progress in
             progressCalled = true
             XCTAssertGreaterThanOrEqual(progress, 0)

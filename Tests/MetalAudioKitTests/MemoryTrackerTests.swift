@@ -63,7 +63,7 @@ final class MemorySnapshotTests: XCTestCase {
             timestamp: 2_000_000,  // 2ms
             gpuAllocated: 150 * 1024 * 1024,  // 150 MB (+50 MB)
             processFootprint: 220 * 1024 * 1024,  // +20 MB
-            systemAvailable: 7_900 * 1024 * 1024,  // -100 MB
+            systemAvailable: 7900 * 1024 * 1024,  // -100 MB
             labelIndex: 0
         )
 
@@ -103,7 +103,7 @@ final class MemoryDeltaTests: XCTestCase {
 
     func testElapsedMicroseconds() {
         let delta = MemoryDelta(
-            elapsedNanoseconds: 5_000,  // 5 microseconds
+            elapsedNanoseconds: 5000,  // 5 microseconds
             gpuDelta: 0,
             processDelta: 0,
             systemDelta: 0
@@ -180,7 +180,12 @@ final class MemoryTrackerTests: XCTestCase {
         // Snapshot should have valid values
         XCTAssertGreaterThan(snapshot.timestamp, 0)
         // System should have some available memory
+        #if targetEnvironment(simulator)
+        // On simulator, os_proc_available_memory() returns 0
+        XCTAssertGreaterThanOrEqual(snapshot.systemAvailable, 0)
+        #else
         XCTAssertGreaterThan(snapshot.systemAvailable, 0)
+        #endif
     }
 
     func testMultipleRecords() throws {
@@ -202,7 +207,7 @@ final class MemoryTrackerTests: XCTestCase {
         let before = tracker.record()
 
         // Small delay to ensure time difference
-        usleep(10000)  // 10ms
+        usleep(10_000)  // 10ms
 
         let after = tracker.record()
         let delta = after - before
@@ -264,13 +269,13 @@ final class MemoryTrackerTests: XCTestCase {
 
         let (result, delta) = tracker.measure {
             // Allocate some memory
-            var array = [Float](repeating: 0, count: 10000)
+            var array = [Float](repeating: 0, count: 10_000)
             array[0] = 1.0
             return array.count
         }
 
         // The measure function should complete and return result
-        XCTAssertEqual(result, 10000)
+        XCTAssertEqual(result, 10_000)
         _ = delta  // Use delta
     }
 

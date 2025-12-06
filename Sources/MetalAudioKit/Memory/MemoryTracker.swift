@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import os.log
 
 // MARK: - Memory Snapshot
 
@@ -7,6 +8,9 @@ import Metal
 ///
 /// All fields are value types to avoid allocations during capture.
 /// Size: 40 bytes (fits in single cache line on Apple Silicon)
+
+private let logger = Logger(subsystem: "MetalAudioKit", category: "MemoryTracker")
+
 public struct MemorySnapshot: Sendable {
     /// Timestamp in nanoseconds (from DispatchTime)
     public let timestamp: UInt64
@@ -258,7 +262,7 @@ public enum MemoryWarning: CustomStringConvertible, Sendable {
 /// // ... operation ...
 /// let after = tracker.record()
 /// let delta = after - before
-/// print("GPU delta: \(delta.gpuDeltaMB) MB")
+/// print("GPU delta: \(delta.gpuDeltaMB) MB")  // TODO: Convert to os_log
 /// ```
 public final class MemoryTracker: @unchecked Sendable {
 
@@ -285,10 +289,15 @@ public final class MemoryTracker: @unchecked Sendable {
     private var count: Int = 0
     private var snapshotLock = os_unfair_lock()
 
+    /// Whether the ring buffer has no snapshots
+    private var isEmpty: Bool {
+        count == 0 // swiftlint:disable:this empty_count
+    }
+
     // Watermark tracking
     private var peakGPU: UInt64 = 0
     private var peakProcess: UInt64 = 0
-    private var minSystemAvailable: UInt64 = UInt64.max
+    private var minSystemAvailable = UInt64.max
 
     /// Initialize with pre-allocated capacity
     /// - Parameters:
@@ -373,7 +382,7 @@ public final class MemoryTracker: @unchecked Sendable {
 
         for i in 0..<iterations {
             // Safety check every 10 iterations to avoid overhead
-            if i % 10 == 0 && i > 0 {
+            if i.isMultiple(of: 10) && i > 0 {
                 let snapshot = MemorySnapshot.capture(device: nil)
                 if snapshot.systemAvailable < abortThresholdBytes {
                     // Memory getting low - abort early to prevent crash
@@ -488,7 +497,7 @@ public final class MemoryTracker: @unchecked Sendable {
         os_unfair_lock_lock(&snapshotLock)
         defer { os_unfair_lock_unlock(&snapshotLock) }
 
-        guard count > 0 else { return nil }
+        guard !isEmpty else { return nil }
         let idx = (writeIndex - 1 + capacity) % capacity
         return snapshots[idx]
     }

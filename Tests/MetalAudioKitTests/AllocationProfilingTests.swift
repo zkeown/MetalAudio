@@ -25,7 +25,7 @@ final class AllocationProfilingTests: XCTestCase {
         // Pre-allocate all buffers
         var input = [Float](repeating: 0, count: fftSize)
         for i in 0..<fftSize {
-            input[i] = sin(2.0 * Float.pi * 440.0 * Float(i) / 44100.0)
+            input[i] = sin(2.0 * Float.pi * 440.0 * Float(i) / 44_100.0)
         }
         var real = [Float](repeating: 0, count: fftSize)
         var imag = [Float](repeating: 0, count: fftSize)
@@ -178,7 +178,13 @@ final class AllocationProfilingTests: XCTestCase {
         let delta = afterSnapshot - beforeSnapshot
 
         let perIterationBytes = abs(delta.processDelta) / Int64(iterations)
-        assertAllocationStable(perIterationBytes, lessThan: 4096,
+        // iOS simulator has higher allocation overhead due to Metal translation layer
+        #if targetEnvironment(simulator)
+        let threshold: Int64 = 65_536  // 64KB for simulator
+        #else
+        let threshold: Int64 = 4096
+        #endif
+        assertAllocationStable(perIterationBytes, lessThan: threshold,
             "Linear layer forward should have minimal allocations (got \(perIterationBytes) bytes/iteration)")
     }
 
@@ -215,10 +221,13 @@ final class AllocationProfilingTests: XCTestCase {
         let delta = afterSnapshot - beforeSnapshot
 
         let perIterationBytes = abs(delta.processDelta) / Int64(iterations)
-        // Threshold is 8KB to account for variance across environments (CI, debug builds, etc.)
-        // The key assertion is that allocations don't grow unboundedly per iteration
-        // Measured values: ~2-4KB typical, may vary with system state
-        XCTAssertLessThan(perIterationBytes, 8192,
+        // iOS simulator has higher allocation overhead due to Metal translation layer
+        #if targetEnvironment(simulator)
+        let threshold: Int64 = 65_536  // 64KB for simulator
+        #else
+        let threshold: Int64 = 8192
+        #endif
+        XCTAssertLessThan(perIterationBytes, threshold,
             "ReLU forward should have minimal allocations (got \(perIterationBytes) bytes/iteration)")
     }
 
@@ -229,7 +238,7 @@ final class AllocationProfilingTests: XCTestCase {
         try filter.configure(
             type: .lowpass,
             frequency: 1000,
-            sampleRate: 44100,
+            sampleRate: 44_100,
             q: 0.707
         )
 
@@ -237,7 +246,7 @@ final class AllocationProfilingTests: XCTestCase {
         let bufferSize = 512
         var input = [Float](repeating: 0, count: bufferSize)
         for i in 0..<bufferSize {
-            input[i] = sin(2.0 * Float.pi * 440.0 * Float(i) / 44100.0)
+            input[i] = sin(2.0 * Float.pi * 440.0 * Float(i) / 44_100.0)
         }
 
         // Warmup
@@ -268,7 +277,7 @@ final class AllocationProfilingTests: XCTestCase {
     // MARK: - Tensor Operations Allocation Tests
 
     func testTensorCopyIsStable() throws {
-        let size = 10000
+        let size = 10_000
         let tensor = try Tensor(device: device, shape: [size])
 
         // Pre-allocate source data
@@ -312,7 +321,7 @@ final class AllocationProfilingTests: XCTestCase {
 
     func testTensorCopyToPreallocatedIsZeroAllocation() throws {
         // copy(to:) with pre-allocated buffer should not allocate
-        let size = 10000
+        let size = 10_000
         let tensor = try Tensor(device: device, shape: [size])
         tensor.fill(1.0)
 

@@ -8,7 +8,4 @@
 
 import MetalAudioKit
 
-@_exported import MetalAudioKit
-
-/// MetalNN version
 public let metalNNVersion = "0.1.0"

@@ -219,7 +219,7 @@ final class ConvolutionTests: XCTestCase {
     /// This validates the overflow protection in DSP.metal doesn't reject valid sizes.
     func testLargePracticalConvolutionSize() throws {
         // 64K samples is a practical maximum for real-time audio
-        let inputSize = 65536
+        let inputSize = 65_536
         let kernelSize = 1024
 
         let conv = Convolution(device: device, mode: .fft)

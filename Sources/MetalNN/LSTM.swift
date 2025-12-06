@@ -1,6 +1,10 @@
 import Metal
 import MetalPerformanceShaders
 import Accelerate
+import os.log
+
+private let logger = Logger(subsystem: "MetalNN", category: "LSTM")
+
 @preconcurrency import MetalAudioKit
 
 /// LSTM layer for sequential audio processing
@@ -296,22 +300,22 @@ public final class LSTM: NNLayer {
         // Validate all weights for NaN/Inf before acquiring lock
         if let warning = try validateWeights(weightsIH, name: "LSTM weightsIH[layer=\(layer),dir=\(direction)]") {
             #if DEBUG
-            print(warning)
+            logger.debug("\(warning)")
             #endif
         }
         if let warning = try validateWeights(weightsHH, name: "LSTM weightsHH[layer=\(layer),dir=\(direction)]") {
             #if DEBUG
-            print(warning)
+            logger.debug("\(warning)")
             #endif
         }
         if let warning = try validateWeights(biasIH, name: "LSTM biasIH[layer=\(layer),dir=\(direction)]") {
             #if DEBUG
-            print(warning)
+            logger.debug("\(warning)")
             #endif
         }
         if let warning = try validateWeights(biasHH, name: "LSTM biasHH[layer=\(layer),dir=\(direction)]") {
             #if DEBUG
-            print(warning)
+            logger.debug("\(warning)")
             #endif
         }
 
@@ -904,8 +908,8 @@ extension LSTM: MemoryBudgetable {
     }
 
     /// Maximum sequence length based on memory budget
-    private nonisolated(unsafe) static var budgetedMaxSequenceLengths: [ObjectIdentifier: Int] = [:]
-    private nonisolated(unsafe) static var budgetedMaxSequenceLock = os_unfair_lock()
+    nonisolated(unsafe) private static var budgetedMaxSequenceLengths: [ObjectIdentifier: Int] = [:]
+    nonisolated(unsafe) private static var budgetedMaxSequenceLock = os_unfair_lock()
 
     /// Set memory budget for this LSTM
     ///

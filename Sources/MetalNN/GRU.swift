@@ -2,6 +2,7 @@ import Metal
 import MetalPerformanceShaders
 import Accelerate
 import MetalAudioKit
+import os.log
 
 // MARK: - GRU Layer
 
@@ -23,6 +24,9 @@ import MetalAudioKit
 /// `loadWeights()` and `resetState()` ARE thread-safe with respect to `forward()`.
 /// They acquire an internal lock to prevent data races. However, for best
 /// performance, complete all weight loading before starting inference.
+
+private let logger = Logger(subsystem: "MetalNN", category: "GRU")
+
 public final class GRU: NNLayer {
 
     /// Lock for protecting hidden state during forward pass
@@ -115,22 +119,22 @@ public final class GRU: NNLayer {
         // Validate all weights for NaN/Inf before acquiring lock
         if let warning = try validateWeights(weightsIH, name: "GRU weightsIH[dir=\(direction)]") {
             #if DEBUG
-            print(warning)
+            logger.debug("\(warning)")
             #endif
         }
         if let warning = try validateWeights(weightsHH, name: "GRU weightsHH[dir=\(direction)]") {
             #if DEBUG
-            print(warning)
+            logger.debug("\(warning)")
             #endif
         }
         if let warning = try validateWeights(biasIH, name: "GRU biasIH[dir=\(direction)]") {
             #if DEBUG
-            print(warning)
+            logger.debug("\(warning)")
             #endif
         }
         if let warning = try validateWeights(biasHH, name: "GRU biasHH[dir=\(direction)]") {
             #if DEBUG
-            print(warning)
+            logger.debug("\(warning)")
             #endif
         }
 

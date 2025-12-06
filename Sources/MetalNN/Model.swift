@@ -159,14 +159,12 @@ public final class Sequential {
             let shapeKey = outputShape.map { String($0) }.joined(separator: "x")
 
             // Find a reusable buffer (one that wasn't used by the immediately previous layer)
-            var reuseIndex: Int? = nil
+            var reuseIndex: Int?
             if let candidates = shapeToBuffers[shapeKey] {
-                for (bufferIdx, lastUsed) in candidates {
-                    // Can reuse if there's at least one layer gap (ping-pong pattern)
-                    if i - lastUsed >= 2 {
-                        reuseIndex = bufferIdx
-                        break
-                    }
+                // Can reuse if there's at least one layer gap (ping-pong pattern)
+                for (bufferIdx, lastUsed) in candidates where i - lastUsed >= 2 {
+                    reuseIndex = bufferIdx
+                    break
                 }
             }
 
@@ -175,12 +173,10 @@ public final class Sequential {
                 bufferIndices.append(reuse)
                 // Update last used
                 if var candidates = shapeToBuffers[shapeKey] {
-                    for j in 0..<candidates.count {
-                        if candidates[j].index == reuse {
-                            candidates[j] = (reuse, i)
-                            shapeToBuffers[shapeKey] = candidates
-                            break
-                        }
+                    for j in 0..<candidates.count where candidates[j].index == reuse {
+                        candidates[j] = (reuse, i)
+                        shapeToBuffers[shapeKey] = candidates
+                        break
                     }
                 }
             } else {
@@ -429,7 +425,7 @@ public final class BinaryModelLoader {
     }
 
     /// Compute CRC32 checksum of data
-    /// Uses standard CRC32 polynomial (0xEDB88320)
+    /// Uses standard CRC32 polynomial (0xEDB88_320)
     private static func computeCRC32(_ data: Data, startOffset: Int = 0) -> UInt32 {
         var crc: UInt32 = 0xFFFFFFFF
 
@@ -438,7 +434,7 @@ public final class BinaryModelLoader {
             crc ^= UInt32(byte)
             for _ in 0..<8 {
                 if crc & 1 != 0 {
-                    crc = (crc >> 1) ^ 0xEDB88320
+                    crc = (crc >> 1) ^ 0xEDB88_320
                 } else {
                     crc >>= 1
                 }
