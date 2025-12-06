@@ -649,14 +649,14 @@ final class UNetPaddingCalculatorTests: XCTestCase {
     func testPaddingCalculation_MultipleLevels() {
         // With 5 levels and stride 4, need multiple of 4^5 = 1024
         let (leftPad, rightPad, outputLength) = UNetPaddingCalculator.calculatePadding(
-            inputLength: 44100,  // ~1 second at 44.1kHz
+            inputLength: 44_100,  // ~1 second at 44.1kHz
             levels: 5,
             kernelSize: 8,
             stride: 4
         )
 
         // Total padding should make length work through 5 levels of downsampling
-        let totalLength = 44100 + leftPad + rightPad
+        let totalLength = 44_100 + leftPad + rightPad
         XCTAssertEqual(totalLength % 1024, 0, "Should be divisible by 4^5")
         XCTAssertEqual(outputLength, totalLength)
     }

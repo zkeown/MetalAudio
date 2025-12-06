@@ -527,7 +527,7 @@ final class TransformerTests: XCTestCase {
         // Test a single non-square sequence length configuration
         // (Reduced set to avoid GPU hangs in rapid sequential testing)
         let testCases = [
-            (timeLen: 16, freqLen: 32),
+            (timeLen: 16, freqLen: 32)
         ]
 
         for (timeLen, freqLen) in testCases {

@@ -126,7 +126,7 @@ final class HTDemucsForwardTests: XCTestCase {
 
         // Input: 1 second of stereo audio at 44.1kHz
         // Padded to be compatible with U-Net downsampling
-        let inputLength = 44032  // Divisible by stride^3 = 64
+        let inputLength = 44_032  // Divisible by stride^3 = 64
         let input = try Tensor(device: device, shape: [2, inputLength])
         try input.copy(from: [Float](repeating: 0.1, count: 2 * inputLength))
 

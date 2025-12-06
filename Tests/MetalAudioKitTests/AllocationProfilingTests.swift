@@ -180,7 +180,7 @@ final class AllocationProfilingTests: XCTestCase {
         let perIterationBytes = abs(delta.processDelta) / Int64(iterations)
         // iOS simulator has higher allocation overhead due to Metal translation layer
         #if targetEnvironment(simulator)
-        let threshold: Int64 = 65536  // 64KB for simulator
+        let threshold: Int64 = 65_536  // 64KB for simulator
         #else
         let threshold: Int64 = 4096
         #endif
@@ -223,7 +223,7 @@ final class AllocationProfilingTests: XCTestCase {
         let perIterationBytes = abs(delta.processDelta) / Int64(iterations)
         // iOS simulator has higher allocation overhead due to Metal translation layer
         #if targetEnvironment(simulator)
-        let threshold: Int64 = 65536  // 64KB for simulator
+        let threshold: Int64 = 65_536  // 64KB for simulator
         #else
         let threshold: Int64 = 8192
         #endif

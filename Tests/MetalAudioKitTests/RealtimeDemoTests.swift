@@ -25,7 +25,7 @@ final class RealtimeDemoTests: XCTestCase {
 
         // Generate 440 Hz test signal
         for i in 0..<fftSize {
-            input[i] = sinf(2.0 * .pi * 440.0 * Float(i) / 48000.0)
+            input[i] = sinf(2.0 * .pi * 440.0 * Float(i) / 48_000.0)
         }
 
         // Run FFT with pre-allocated buffers
@@ -40,7 +40,7 @@ final class RealtimeDemoTests: XCTestCase {
 
     func testFFTDetectsKnownFrequency() throws {
         let fftSize = 512
-        let sampleRate: Float = 48000
+        let sampleRate: Float = 48_000
         let testFrequency: Float = 1000  // 1 kHz - easy to detect
 
         let fft = try FFT(device: device, config: .init(size: fftSize))
@@ -91,7 +91,7 @@ final class RealtimeDemoTests: XCTestCase {
         for frequency in [440.0, 880.0, 1320.0] as [Float] {
             // Update input
             for i in 0..<fftSize {
-                input[i] = sinf(2.0 * .pi * frequency * Float(i) / 48000.0)
+                input[i] = sinf(2.0 * .pi * frequency * Float(i) / 48_000.0)
             }
 
             // Process
@@ -110,7 +110,7 @@ final class RealtimeDemoTests: XCTestCase {
     func testFFTCompletesWithinBudget() throws {
         // Verify FFT completes within real-time budget
         let fftSize = 512
-        let sampleRate = 48000.0
+        let sampleRate = 48_000.0
         let bufferDuration = Double(fftSize) / sampleRate
         let budgetMicroseconds = bufferDuration * 1_000_000
 
@@ -200,7 +200,7 @@ final class RealtimeDemoTests: XCTestCase {
 
     func testPeakDetectionWithMultipleFrequencies() throws {
         let fftSize = 1024
-        let sampleRate: Float = 48000
+        let sampleRate: Float = 48_000
         let frequencies: [Float] = [440, 880, 1320]  // Harmonics
 
         let fft = try FFT(device: device, config: .init(size: fftSize))
@@ -234,7 +234,7 @@ final class RealtimeDemoTests: XCTestCase {
         var detectedPeaks: [Float] = []
 
         for i in 1..<(fftSize / 2 - 1) {
-            if magnitudes[i] > magnitudes[i-1] && magnitudes[i] > magnitudes[i+1] {
+            if magnitudes[i] > magnitudes[i - 1] && magnitudes[i] > magnitudes[i + 1] {
                 if magnitudes[i] > 1.0 {  // Threshold
                     detectedPeaks.append(Float(i) * binWidth)
                 }

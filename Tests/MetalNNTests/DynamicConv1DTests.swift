@@ -382,11 +382,11 @@ final class DynamicConv1DTests: XCTestCase {
         )
 
         // 10 seconds of audio at 44100Hz = 441000 samples
-        let inputLength = 441000
+        let inputLength = 441_000
         let outputLength = conv.outputLength(for: inputLength)
 
         // With reflect padding of 3, should get (441000 + 6 - 8) / 4 + 1 = 110250
-        XCTAssertEqual(outputLength, 110250)
+        XCTAssertEqual(outputLength, 110_250)
     }
 
     func testHTDemucsEncoderLevelConfigs() throws {
