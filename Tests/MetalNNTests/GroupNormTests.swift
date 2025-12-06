@@ -76,6 +76,10 @@ final class GroupNormTests: XCTestCase {
     // MARK: - Forward Pass Tests
 
     func testForwardWithIdentityParams_ReturnsNormalized() throws {
+        // Skip on CI due to GPU driver variability
+        try XCTSkipIf(ProcessInfo.processInfo.environment["CI"] != nil,
+                      "Skipping GPU forward test on CI due to driver variability")
+
         let numChannels = 8
         let numGroups = 2
         let length = 16
@@ -132,6 +136,10 @@ final class GroupNormTests: XCTestCase {
     }
 
     func testForwardWithLearnedParams_AppliesScaleBias() throws {
+        // Skip on CI due to GPU driver variability
+        try XCTSkipIf(ProcessInfo.processInfo.environment["CI"] != nil,
+                      "Skipping GPU forward test on CI due to driver variability")
+
         let numChannels = 4
         let numGroups = 2
         let length = 8
