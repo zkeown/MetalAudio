@@ -91,8 +91,7 @@ jobs:
       - name: Install xcodes
         if: matrix.ios == '16.4'
         run: |
-          brew install xcodesorg/made/xcodes
-          brew install aria2
+          brew install xcodes aria2
 
       - name: Install iOS 16.4 Runtime
         if: matrix.ios == '16.4'
