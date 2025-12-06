@@ -441,7 +441,7 @@ public struct UNetPaddingCalculator {
     ) -> Int {
         var length = inputLength
         for _ in 0..<levels {
-            length = length / stride
+            length /= stride
         }
         return length
     }
