@@ -13,7 +13,8 @@ final class BNNSModelTests: XCTestCase {
 
     /// Get URL for a test model resource
     func modelURL(_ name: String) -> URL? {
-        Bundle.module.url(forResource: name, withExtension: "mlmodelc")
+        // Use Bundle(for:) as Bundle.module can be ambiguous on some platforms
+        Bundle(for: type(of: self)).url(forResource: name, withExtension: "mlmodelc")
     }
 
     /// Helper to require a model URL or skip test
@@ -319,7 +320,8 @@ final class BNNSModelTests: XCTestCase {
 final class ChunkedInferenceModelTests: XCTestCase {
 
     func modelURL(_ name: String) -> URL? {
-        Bundle.module.url(forResource: name, withExtension: "mlmodelc")
+        // Use Bundle(for:) as Bundle.module can be ambiguous on some platforms
+        Bundle(for: type(of: self)).url(forResource: name, withExtension: "mlmodelc")
     }
 
     func requireModelURL(_ name: String) throws -> URL {
