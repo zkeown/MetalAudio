@@ -186,7 +186,7 @@ final class DebugMonitoringTests: XCTestCase {
         let device = try AudioDevice()
         let expectation = expectation(description: "Debug callback received")
 
-        var receivedSnapshot: MemorySnapshot?
+        nonisolated(unsafe) var receivedSnapshot: MemorySnapshot?
         manager.debugCallback = { snapshot, _ in
             receivedSnapshot = snapshot
             expectation.fulfill()
@@ -418,7 +418,7 @@ final class MemoryManagerAdditionalTests: XCTestCase {
         let device = try AudioDevice()
         let expectation = expectation(description: "Debug callback with watermarks")
 
-        var receivedWatermarks: MemoryWatermarks?
+        nonisolated(unsafe) var receivedWatermarks: MemoryWatermarks?
         manager.debugCallback = { _, watermarks in
             receivedWatermarks = watermarks
             expectation.fulfill()
