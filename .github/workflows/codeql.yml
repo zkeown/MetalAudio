@@ -28,7 +28,7 @@ jobs:
           xcode-version: latest-stable
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@fe4161a26a8629af62121b670040955b330f9af2 # v4.31.6
+        uses: github/codeql-action/init@cf1bb45a277cb3c205638b2cd5c984db1c46a412 # v4.31.7
         with:
           languages: swift
           # Use extended queries for more thorough analysis
@@ -40,6 +40,6 @@ jobs:
 
       - name: Perform CodeQL Analysis
         continue-on-error: true
-        uses: github/codeql-action/analyze@fe4161a26a8629af62121b670040955b330f9af2 # v4.31.6
+        uses: github/codeql-action/analyze@cf1bb45a277cb3c205638b2cd5c984db1c46a412 # v4.31.7
         with:
           category: "/language:swift"
